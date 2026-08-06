@@ -7,21 +7,28 @@ user-invocable: false
 
 # Building hogdot
 
-⚠ **Status — no `scons` build has ever been run in this repo.** Every build command below is upstream- or
-fork-documented, **not yet observed here**. **Correct each one in place the first time you actually run
-it**, and say which tier it reached (`.claude/rules/verification.md`). Do not let a command sit here
-unmarked after it has been proven or disproven.
+**Status — the macOS editor build is now OBSERVED, not documented.** Measured 2026-08-06 on the M5:
 
-**Verified 2026-08-06:** `pre-commit run clang-format --files core/object/worker_thread_pool.cpp` →
-`Passed`. So the lint path genuinely works end to end, the pinned v21.1.7 downloads correctly, and an
-untouched 4.7.1 file is already format-clean. Everything else here is still documentation.
+| What | Result |
+| --- | --- |
+| `scons platform=macos target=editor arch=arm64` | **builds**, `bin/godot.macos.editor.arm64`, 130 MB |
+| Cold build, 2,890 objects, `-j$(sysctl -n hw.ncpu)` | **~4–5 minutes**, not "tens of minutes" |
+| `pre-commit run --all-files` on untouched 4.7.1 | **clean** — every hook passes (see below) |
+
+⚠ **Godot cold-builds in minutes on this machine.** The plan's "builds are long, work around them"
+posture is calibrated for far slower hardware. Backgrounding a build is still right, but do not
+restructure a session around a wait that is shorter than a single reference read.
+
+⚠ **`bin/` did not exist and `arch=arm64` is required** — plain `scons platform=macos` picks a
+different default.
 
 ## The toolchain (installed and verified 2026-08-06)
 
 | Tool | Version | Notes |
 | --- | --- | --- |
 | `scons` | brew | Godot's build system. |
-| `ccache` | 4.13.6 | ⚠ **Picked up automatically by Godot's SConstruct — pass nothing.** XDG-native; config at `~/.config/ccache/ccache.conf`, cache at `~/.cache/ccache`, cap raised to 30G there (5 GiB stock thrashes on an engine build). |
+| `ccache` | 4.13.6 | ⚠ **NOT automatic — you must pass `cpp_compiler_launcher=ccache c_compiler_launcher=ccache`.** XDG-native; config at `~/.config/ccache/ccache.conf`, cache at `~/.cache/ccache`, cap raised to 30G there (5 GiB stock thrashes on an engine build). |
+| Vulkan SDK | LunarG, installed 2026-08-06 | Needed for `-lMoltenVK` at link time. Installed with `sh misc/scripts/install_vulkan_sdk_macos.sh` — headless, no sudo, lands in `~/VulkanSDK`. Outside Homebrew, so `brewup` does not cover it. |
 | `pre-commit` | 4.6.1 | The only way to run Godot's `.pre-commit-config.yaml`. |
 | `emcc` | 6.0.5 | Web targets only. `EM_CACHE` → `~/.cache/emscripten` (fish `conf.d/xdg-apps.fish`). |
 
@@ -33,12 +40,20 @@ diff nobody can review. **Always `pre-commit run`, never a bare `clang-format`.*
 ## Commands
 
 ```bash
-# macOS editor — the binary CommonGrounds opens. Cold build is tens of minutes.
-scons platform=macos target=editor arch=arm64 -j"$(sysctl -n hw.ncpu)"
+# macOS editor — the binary CommonGrounds opens. ~4-5 min cold, seconds incremental.
+# ⚠ The two launcher options are what actually enable ccache. Without them the 30G
+#   cache stays empty and every build is uncached (measured 2026-08-06, the hard way).
+scons platform=macos target=editor arch=arm64 -j"$(sysctl -n hw.ncpu)" \
+      cpp_compiler_launcher=ccache c_compiler_launcher=ccache
 # -> bin/godot.macos.editor.arm64
 
 # web export template, mainline (no WebGPU until the port lands)
-scons platform=web target=template_release
+# ⚠ Set EM_CACHE explicitly. Fish's conf.d/xdg-apps.fish redirects it out of the
+#   Cellar, but Claude's Bash tool runs under zsh and never sees that export, so
+#   emcc silently caches its system libs in
+#   /opt/homebrew/Cellar/emscripten/<ver>/libexec/cache — which `brew autoupdate`
+#   deletes every 12 h, forcing a slow sysroot rebuild. Observed 2026-08-06.
+EM_CACHE="$HOME/.cache/emscripten" scons platform=web target=template_release
 
 # web export template WITH WebGPU — only meaningful after the port
 scons platform=web target=template_release dlink_enabled=yes webgpu=yes opengl3=no threads=no
@@ -50,6 +65,18 @@ scons platform=macos target=editor arch=arm64 tests=yes && bin/godot.macos.edito
 pre-commit run --all-files
 pre-commit run <hook-id> --files <path>      # scoped; much faster
 ```
+
+⚠ **`codespell` rewrites your files in place.** Godot sets `write-changes = true` and the
+`en-GB_to_en-US` builtin in `pyproject.toml`, so a lint run silently converts en-GB spelling
+(`judgement`, `behaviour`, `colour`) to en-US in **any** tracked file, `.claude/skills/**` included.
+**Write US English in this repo** — the alternative is a permanently dirty tree. A "failed" codespell
+run that reports `files were modified by this hook` has already edited your working tree; re-run to
+confirm, don't hand-revert.
+
+⚠ **`validate-codeowners` fails on any tracked file with no `.github/CODEOWNERS` entry.** `hogdot/`
+needed its own line (added `7d5f060`-era, commit `e2450de`). `.claude/**` passes only by accident —
+upstream's root catch-all `/*.*` compiles to a regex that matches any path whose first segment
+contains a dot. A new top-level directory without a dot in its name will fail this hook.
 
 ⚠ **First `pre-commit run` is slow** — it initialises environments for **every** hook in the config, not
 just the one you asked for (clang-format, clang-tidy 21.1.6, ruff, mypy, codespell, check-jsonschema, plus
@@ -90,15 +117,19 @@ FILL: the actual handoff — whether CommonGrounds points at `bin/godot.macos.ed
 an installed editor, and where its export templates are expected. Derive from that repo's `build-export`
 skill and record it here the first time a build is handed over.
 
+## The lint baseline (established 2026-08-06, before the first port commit)
+
+`pre-commit run --all-files` on untouched 4.7.1 **passes every hook**. The snapshot is
+`.claude/work/plans/research/lint-baseline.txt`; the only two failures in it were hogdot's own files
+(codespell spelling, unowned `hogdot/`), both fixed in `e2450de`. **Any lint failure from here on is
+ours.** There is no upstream noise to subtract — judge future runs against green, not against a diff.
+
 ## Not yet established
 
-- Cold and warm build times on this M5, and the ccache hit rate that justifies the 30G cap.
-- Whether `pre-commit run --all-files` passes on an untouched 4.7.1 checkout. One file is confirmed clean;
-  the whole tree is not. ⚠ Establish this baseline **before** the first port commit, so any later failure
-  is attributable to the port rather than to upstream.
-- Whether mainline `platform=web` builds cleanly on Emscripten 6.0.5. ⚠ **This is the highest-value cheap
-  experiment available** — it separates a toolchain problem from a port problem before any WebGPU code
-  exists to blame.
+- ccache hit rate across a realistic port session, now that the launcher options are actually passed.
+  The 30G cap is still unjustified by measurement.
+- Whether `platform=web` **links** on Emscripten 6.0.5 (compilation is confirmed; see status table).
+- The CommonGrounds handoff above.
 
 ---
 *Source of truth for building hogdot — correct it in the same change as any build command you actually run.*
