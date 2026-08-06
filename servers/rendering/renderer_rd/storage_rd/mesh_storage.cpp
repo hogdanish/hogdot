@@ -207,6 +207,52 @@ MeshStorage::~MeshStorage() {
 	singleton = nullptr;
 }
 
+// Take a slot of exactly p_float_count floats, reusing a reclaimed one when the size
+// matches. Returns the float offset into the atlas.
+//
+// ⚠ Callers depend on every offset staying 4-float aligned, because `atlas_offset` is
+// stored in vec4 units. That holds for free: a slot is `bones * 12` (3D) or
+// `bones * 8` (2D) floats, both multiples of 4, so the bump allocator never leaves an
+// unaligned high-water mark and a reused slot inherits an aligned one.
+uint32_t MeshStorage::_skeleton_atlas_alloc(uint32_t p_float_count) {
+	LocalVector<uint32_t> *slots = skeleton_atlas_free_slots.getptr(p_float_count);
+	if (slots != nullptr && !slots->is_empty()) {
+		uint32_t offset = (*slots)[slots->size() - 1];
+		slots->resize(slots->size() - 1);
+		return offset;
+	}
+
+	uint32_t offset = skeleton_atlas_used;
+	skeleton_atlas_used += p_float_count;
+	_skeleton_atlas_ensure_capacity(skeleton_atlas_used);
+	return offset;
+}
+
+// Hand a skeleton's atlas slot back. Without this the atlas was a pure bump allocator:
+// `skeleton_free()` routes through `skeleton_allocate_data(rid, 0)`, which sets
+// `size = 0` and skipped the allocation block entirely, so a dead skeleton's slot was
+// never returned and neither was that of a live skeleton that changed bone count.
+// Since the atlas grows by doubling and reallocates the GPU buffer each time, a scene
+// that spawns and despawns skeletons -- a pooled-enemy or streaming setup, which is
+// exactly what CommonGrounds is -- grew GPU memory without bound until allocation
+// failed. It bites only where API_TRAIT_SKELETON_BUFFER_DIRECT_WRITE is set, i.e.
+// WebGPU, where memory is tightest. See ledger RL-011.
+void MeshStorage::_skeleton_atlas_release(Skeleton *p_skeleton) {
+	if (!use_skeleton_atlas || p_skeleton->atlas_alloc_size == 0) {
+		return;
+	}
+	uint32_t offset = p_skeleton->atlas_offset * 4;
+	if (offset + p_skeleton->atlas_alloc_size == skeleton_atlas_used) {
+		// Last slot out: give it straight back to the bump allocator so a
+		// spawn/despawn cycle at the tail does not grow the high-water mark.
+		skeleton_atlas_used -= p_skeleton->atlas_alloc_size;
+	} else {
+		skeleton_atlas_free_slots[p_skeleton->atlas_alloc_size].push_back(offset);
+	}
+	p_skeleton->atlas_offset = 0;
+	p_skeleton->atlas_alloc_size = 0;
+}
+
 void MeshStorage::_skeleton_atlas_ensure_capacity(uint32_t p_floats_needed) {
 	if (p_floats_needed <= skeleton_atlas_capacity) {
 		return;
@@ -217,6 +263,8 @@ void MeshStorage::_skeleton_atlas_ensure_capacity(uint32_t p_floats_needed) {
 		new_capacity *= 2;
 	}
 
+	const uint32_t live_floats = MIN(skeleton_atlas_used, skeleton_atlas_capacity);
+
 	if (skeleton_atlas_buffer.is_valid()) {
 		RD::get_singleton()->free_rid(skeleton_atlas_buffer);
 	}
@@ -226,6 +274,18 @@ void MeshStorage::_skeleton_atlas_ensure_capacity(uint32_t p_floats_needed) {
 	skeleton_atlas_uniform_set = RID(); // Invalidate.
 	skeleton_atlas_uniform_set_3d = RID(); // Invalidate draw-time set too.
 	_skeleton_atlas_rebuild_uniform_set(); // Rebuild immediately so it's always available.
+
+	// ⚠ The new buffer is uninitialized, and `_update_dirty_skeletons` only uploads the
+	// range covering skeletons dirty *this frame*. Without this re-upload, every
+	// skeleton that is not dirty on the frame the atlas grows points at garbage GPU
+	// memory until it next becomes dirty. Animating skeletons are dirty every frame and
+	// hide it; a skeleton posed once and left static -- a ragdoll at rest, a posed prop
+	// -- renders with undefined bone transforms the moment some *other* skeleton
+	// triggers a grow. The CPU mirror survives the resize (LocalVector preserves
+	// contents), so it is the authority here. See ledger RL-012.
+	if (live_floats > 0) {
+		RD::get_singleton()->buffer_update_direct(skeleton_atlas_buffer, 0, live_floats * sizeof(float), skeleton_atlas_data.ptr());
+	}
 }
 
 void MeshStorage::_skeleton_atlas_rebuild_uniform_set() {
@@ -2404,18 +2464,20 @@ void MeshStorage::skeleton_allocate_data(RID p_skeleton, int p_bones, bool p_2d_
 		skeleton->uniform_set_mi = RID();
 	}
 
+	// Return the old atlas slot before taking a new one. This runs on the resize path
+	// and on the p_bones == 0 path that `skeleton_free()` uses, which is the one that
+	// used to leak (RL-011).
+	_skeleton_atlas_release(skeleton);
+
 	if (skeleton->size) {
 		uint32_t float_count = skeleton->size * (skeleton->use_2d ? 8 : 12);
 		skeleton->data.resize(float_count);
 		memset(skeleton->data.ptr(), 0, float_count * sizeof(float));
 
 		if (use_skeleton_atlas) {
-			// Allocate a slot in the atlas (simple bump allocator).
 			// Atlas offset is in vec4 units (4 floats per vec4).
-			skeleton->atlas_offset = skeleton_atlas_used / 4;
+			skeleton->atlas_offset = _skeleton_atlas_alloc(float_count) / 4;
 			skeleton->atlas_alloc_size = float_count;
-			skeleton_atlas_used += float_count;
-			_skeleton_atlas_ensure_capacity(skeleton_atlas_used);
 		} else {
 			skeleton->buffer = RD::get_singleton()->storage_buffer_create(float_count * sizeof(float));
 			{

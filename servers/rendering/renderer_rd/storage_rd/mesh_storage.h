@@ -357,8 +357,14 @@ private:
 	RID skeleton_atlas_uniform_set; // For compute skinning shader.
 	mutable RID skeleton_atlas_uniform_set_3d; // For scene draw shader (lazily created).
 	LocalVector<float> skeleton_atlas_data; // CPU mirror
-	uint32_t skeleton_atlas_used = 0; // Floats used
+	uint32_t skeleton_atlas_used = 0; // Floats used (high-water mark of the bump allocator)
 	uint32_t skeleton_atlas_capacity = 0; // Floats allocated
+	// Reclaimed slots, keyed by slot size in floats -> float offsets into the atlas.
+	// Exact-size reuse only, which is what a pool of identical skeletons produces;
+	// a slot whose size never recurs stays parked here rather than being coalesced.
+	HashMap<uint32_t, LocalVector<uint32_t>> skeleton_atlas_free_slots;
+	uint32_t _skeleton_atlas_alloc(uint32_t p_float_count);
+	void _skeleton_atlas_release(Skeleton *p_skeleton);
 	void _skeleton_atlas_ensure_capacity(uint32_t p_floats_needed);
 	void _skeleton_atlas_rebuild_uniform_set();
 
