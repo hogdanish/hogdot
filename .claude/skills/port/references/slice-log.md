@@ -981,3 +981,103 @@ from `git log --oneline 4.6.2-stable..webgpu/webgpu-4.6.2 -- <path>`. Caught bef
 it and corrected by amending the tip (unpushed, nothing referencing it), so it is **not** in
 § *Provenance corrections* — that section is for landed, uncorrectable trailers, and diluting it with
 same-minute slips makes it less useful. The rule stands: run the log command, paste the output.
+
+---
+
+## Phase 7 — hardening, second batch (2026-08-06)
+
+Queue items 7, 8, 9, 11 plus gate clauses (b), (c), (f). Commits: `28a9960` `a2d81ab` `f90fccd`
+`b659667` `94eadae` `24cb88d` `42427d3` `da731d2`.
+
+### The measurement that ended the precompiled-WGSL question (item 7)
+
+The audit deferred delete-vs-repair on RL-009 pending a measurement nobody had taken. Taking it cost
+one instrumented build and one browser run: a temporary `print_line` at the lookup site reported
+**`table_count=141`, 600+ lookups, `hits=0`.** Not a low hit rate — *zero*. The mechanism had been
+inert for the entire port.
+
+⚠ **Two pieces of "evidence" for that conclusion were already on the record and both were wrong.**
+Worth naming because both are the kind of reasoning that feels conclusive:
+
+1. *"The glslang generator version proves the SPIR-V differs."* It does not. Both external 16.5.0 and
+   vendored 16.1.0 return `GetSpirvGeneratorVersion() == 11`
+   (`thirdparty/glslang/SPIRV/GlslangToSpv.cpp:11454`), so the SPIR-V header's generator word is
+   **identical** and cannot distinguish them. Checked directly by compiling a trivial shader and
+   reading word 2.
+2. *"`warning: variable '_spv_to_wgsl_precompiled_hits' set but not used` corroborates zero hits."*
+   It does not. The counter's only *read* sits inside `WEBGPU_DIAG`, which compiles to `((void)0)`
+   because `WEBGPU_VERBOSE` is commented out at `rendering_device_driver_webgpu.cpp:53`. The warning
+   appears whether the table hits or not.
+
+**The lesson: a plausible mechanism is not a measurement, and neither is a compiler warning you have
+not traced to its cause.** The instrumented build was ~45 s of ccache-warm rebuild.
+
+### Dead code that was load-bearing-looking but empty (item 9)
+
+`//SSBO_USED:` and `*_depth_alias` were both naga-era: naga emitted the markers, Tint never did, and
+the consumer sides survived the migration. Both maps were always empty, so every loop over them was a
+no-op and removal was provably behaviour-neutral.
+
+⚠ **The check that makes such a removal safe is "who *produces* this?", not "who consumes it?".** One
+`rg` across `spirv_preprocess.cpp`, `tint_cli/main.cpp` and `thirdparty/tint/` for the marker string
+answered it in seconds; reading the consumers would only ever have shown they were plausible.
+
+### `buffer_flush` looked like the right hook for RL-005 and was not
+
+The obvious fix for the unconditional `buffer_unmap` loop in `_end_frame` was to route it through
+`RenderingDeviceDriver::buffer_flush`, already a defaulted no-op on every native driver. ⚠ **That
+would have caused a large performance regression on WebGPU.** WebGPU's `buffer_unmap` checks
+`map_dirty`; its `buffer_flush` deliberately does not, because `buffer_persistent_map_advance` sets
+the dirty *range* without setting `map_dirty` and `_buffer_update`'s persistent fast path depends on
+the unconditional flush. Sharing the entry point would have flushed all ~69 × 256 KB staging blocks
+every frame. A new `API_TRAIT_BUFFER_MAP_IS_CPU_SHADOW` keeps the two semantics apart.
+
+⚠ **And it had to be verified windowed.** Headless runs the dummy driver and never calls
+`api_trait_get` on a real one — RL-016's trap exactly. `bin/godot.macos.editor.arm64 --path
+webgpu_tests/test_project --rendering-driver metal --rendering-method mobile` reports
+`PASS — All shader paths exercised without errors`.
+
+### The paired-condition trap in the buffer fast path (RL-006)
+
+Five call sites in `rendering_device.cpp` each test the same predicate **twice** — once to choose
+`buffer_create_with_data()`, once negated to decide whether to run `_buffer_initialize()`. ⚠ Editing
+only the first (the natural minimal edit) leaves a buffer created *without* data and *without*
+initialization — silently uninitialized, no error anywhere. The predicate now lives in
+`_can_create_buffer_with_data()` and both branches read one stored local.
+
+### `pre-commit run --all-files`, run over the whole tree for the first time
+
+Phase 1 only ever ran it per-file. Five iterations to green; each hook that fixes files fails its own
+run, so a clean result needs a re-run after the last fix.
+
+Findings beyond formatting:
+- **A real bug in `misc/dist/html/webgpu-full-size.html`** — `engine` referenced in the
+  missing-features branch where it is not in scope (upstream declares it at module scope; this file
+  builds it inside the `initWebGPU()` callback). A feature-poor browser would have hit
+  `ReferenceError` instead of installing the service worker. eslint found what no run had.
+- ⚠ **The `// eslint-disable-next-line <rule> -- <reason>` suffix form is NOT supported here** —
+  `eslint --fix` silently *deletes* the whole directive, taking the first line of the adjacent comment
+  with it. Put the reason on preceding lines and keep the directive bare.
+- ⚠ **`chmod +x` does not satisfy `check-shebang-scripts-are-executable`** — it reads the git index
+  mode. Use `git add --chmod=+x`.
+- ⚠ **`header_guards.py` requires `#pragma once` immediately after the licence block**, before any
+  descriptive comment. Three `tint_cli` shim headers had it below their comments and reported
+  `REQUIRES MANUAL CHANGES`.
+- ⚠ **The `file-format` hook deleted a carried port hunk** — the fork's lone blank line in
+  `canvas.glsl` (RL-004). Whitespace-only fork deltas cannot survive Godot's own gate; do not spend
+  effort carrying them at the next rebase-forward.
+
+### Verification reached this batch
+
+| Item | Tier | Evidence |
+| --- | --- | --- |
+| 7 — precompiled-WGSL deletion | **renders** | draw metrics identical before/after (`draws/f=107 SetBG/f=161 PC/f=86 RP/f=50`), 0 GPU validation errors |
+| 8 — RL-003 | compiles | both targets |
+| 8 — RL-005/006/008 | **runs (native, windowed)** | metal/mobile `PASS`; headless would not have exercised it |
+| 8 — RL-018/019 | compiles | web path is `#ifdef WEB_ENABLED`; the *web* branch is not separately demonstrated |
+| 9 — dead mechanisms + WGSL unification | **renders** | same metrics, same 62 console messages, 0 validation errors |
+| 11 — slice 8 | n/a | docs/ignore only |
+| 11 — `pre-commit --all-files` | **clean, exit 0** | first time ever over the whole tree |
+| gauntlet — `driver_unit_tests` | 327/0/0 | |
+| gauntlet — `preprocessing_tests` | 191/0/1 | |
+| gauntlet — `shader_corpus` | 13/0 | needs `glslangValidator` + `bin/tint_convert_cli` |
