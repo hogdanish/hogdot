@@ -398,6 +398,13 @@ $RECYCLE.BIN/
 *.generated.props
 
 # --- hogdot fork-local ---------------------------------------------------------
+# Carried from GodotWebGPU.
+.chat-history/
+tmp/
+# ⚠ The fork also ignores `*.uid`. NOT carried: Godot generates .uid files as
+# tracked project content (mainline tracks 8 of them under platform/android/),
+# so ignoring them repo-wide would silently stop hogdot tracking files upstream
+# does and show up as phantom drift at every rebase-forward.
 # Agent working files: plans, specs, notes, scratch. Durable knowledge belongs in
 # .claude/skills/, never here and never in a docs/ directory.
 /.claude/work/

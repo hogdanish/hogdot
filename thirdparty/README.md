@@ -1049,6 +1049,17 @@ Files extracted from upstream source:
 - `include/spirv/unified1/spirv.{h,hpp,hpp11}` with the same folder structure
 - `LICENSE` (edited to keep only relevant license)
 
+hogdot additionally vendors the rest of `include/spirv/unified1/` — `DebugInfo.h`,
+`GLSL.std.450.h`, `NonSemanticClspvReflection.h`, `NonSemanticShaderDebugInfo.h`,
+`OpenCL.std.h` and `OpenCLDebugInfo100.h` — because `spirv-tools` (below) includes
+them directly.
+
+⚠ `spirv.hpp11` is taken from a **newer** SPIRV-Headers drop than the version above,
+carried in from GodotWebGPU (`ad9184e76a66b1001c29db9b0a3e87f646c64de0`). The
+version listed above lacks `OpMemberDecorateIdEXT`, `OpSpecConstantDataKHR` and
+`OpConstantSizeOfEXT`, which `spirv-tools` references, so building with mainline's
+copy fails to compile. Keep the two in step when bumping either.
+
 
 ## spirv-reflect
 
@@ -1070,6 +1081,24 @@ Patches:
 - `0002-spirv-headers.patch` ([GH-111452](https://github.com/godotengine/godot/pull/111452))
 
 
+## spirv-tools
+
+- Upstream: https://github.com/KhronosGroup/SPIRV-Tools
+- Version: git (3605cce5b11f6a085107fd400f1721cd2a59c49e, 2026)
+- License: Apache 2.0
+
+Files extracted from upstream source:
+
+- `source/` folder
+- `include/` folder
+- `generated/` folder (pre-generated from an upstream build)
+- `LICENSE`
+
+Required by `tint` (below) for SPIR-V parsing and validation; the version is pinned
+by Dawn's DEPS. Built only for `webgpu=yes`. Vendored via GodotWebGPU rather than
+extracted independently, so the drop matches the `tint` revision it is paired with.
+
+
 ## swappy-frame-pacing
 
 - Upstream: https://android.googlesource.com/platform/frameworks/opt/gamesdk/ via https://github.com/godotengine/godot-swappy
@@ -1081,6 +1110,31 @@ Files extracted from upstream source:
 - `include/common/`
 - `include/swappy/{swappy_common.h,swappyVk.h}`
 - `LICENSE`
+
+
+## tint
+
+- Upstream: https://dawn.googlesource.com/dawn (`src/tint/`)
+- Version: git (db49a5496374b1f7284e0b9c8f2964c01d4bb20a, 2026)
+- License: BSD-3-Clause
+
+Files extracted from upstream source:
+
+- `src/tint/` folder (extracted via `extract_tint.sh`)
+- `LICENSE`
+
+Patches:
+
+- `0001-skip-block-layout-validation.patch` — `SetSkipBlockLayout(true)` for Godot's UBO layout
+- `0002-allow-struct-member-size-mismatch.patch` — `kAllowStructMemberSizeMismatch` for specialization constants
+- `0003-decompose-strided-array-stride-guard.patch` — skip padding when stride < element size
+- `0004-accept-non-constant-point-size.patch` — accept non-constant `point_size` stores
+- `0005-size-emission-and-capability.patch` — `@size` emission guard for specialization constants
+- `0006-remove-abseil-dependency.patch` — replace `absl::from_chars` with `std::from_chars`
+
+Used for SPIR-V → WGSL translation in the WebGPU rendering backend, which is the
+reason this fork exists. Requires `spirv-tools` and `spirv-headers`. Built only for
+`webgpu=yes`; no other platform links it.
 
 
 ## thorvg

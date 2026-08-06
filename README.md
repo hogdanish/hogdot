@@ -1,3 +1,57 @@
+# hogdot
+
+**hogdot is a fork of the Godot Engine that adds a WebGPU rendering backend.**
+
+It exists for one purpose: to carry [GodotWebGPU](https://github.com/dwalter/godotwebgpu)'s WebGPU
+backend on top of a current mainline Godot release. Everything below this section is Godot's own
+README, unmodified — hogdot is Godot, plus one renderer.
+
+## What the fork adds
+
+- `drivers/webgpu/` — `RenderingDeviceDriverWebGPU` and `RenderingContextDriverWebGPU`, implemented
+  against `emdawnwebgpu`/Dawn. It fills the gaps between Godot's `RenderingDevice` contract and what
+  WebGPU actually offers: a push-constant ring buffer (WebGPU has no push constants), subpass
+  flattening (no subpasses), and split combined samplers.
+- **SPIR-V → WGSL at runtime.** Godot's shaders compile to SPIR-V as usual; a preprocessing pass
+  rewrites the constructs WGSL cannot express, and vendored [Tint](https://dawn.googlesource.com/dawn)
+  translates the result. `thirdparty/tint/`, `thirdparty/spirv-tools/` and an expanded
+  `thirdparty/spirv-headers/` come along for that.
+- **Web-platform integration** — WebGPU device and adapter setup in `platform/web/`, and the
+  `webgpu=yes` SCons option that turns all of it on.
+
+## Building
+
+```bash
+# Web export template (the reason this fork exists)
+scons platform=web target=template_debug webgpu=yes opengl3=no threads=no num_jobs=4
+
+# Native editor — unchanged from mainline, and the cheap regression check
+scons platform=macos target=editor arch=arm64
+```
+
+⚠ `webgpu=yes` needs `glslangValidator` on `$PATH` and an Emscripten toolchain. `num_jobs=4` is not
+a suggestion on a 24 GB machine — the Tint and SPIRV-Tools sources will exhaust memory at the default
+job count.
+
+## Status and scope
+
+The WebGPU backend targets the **Mobile** renderer and the **web** platform. Forward+-only features
+(SSAO, SSIL, SSR, volumetric fog, SDFGI, TAA, FSR2, subsurface scattering) are unavailable there, as
+they are on Mobile generally — that is Godot's own constraint, not a WebGPU one.
+
+This is a long-term fork: every mainline release repeats the rebase-forward exercise, so the port
+surface is derived by `./hogdot/port-surface.sh` rather than written down anywhere that could rot.
+
+## Upstream and licence
+
+hogdot tracks [godotengine/godot](https://github.com/godotengine/godot) and is MIT-licensed, exactly
+as Godot is. The WebGPU backend originates with
+[dwalter/godotwebgpu](https://github.com/dwalter/godotwebgpu); its authorship is preserved in this
+repository's history, and every ported commit cites the upstream commits it carries. Bugs in this
+fork are the fork's own — please do not report them to the Godot project.
+
+---
+
 # Godot Engine
 
 <p align="center">
