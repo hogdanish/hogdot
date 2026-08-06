@@ -1,0 +1,53 @@
+{
+  "plansDirectory": ".claude/work/plans",
+  "permissions": {
+    "additionalDirectories": ["/Users/ethan/Projects/commongrounds"],
+    "allow": [
+      "Read(//Users/ethan/Projects/commongrounds/**)",
+      "Bash(./hogdot/port-surface.sh:*)",
+      "Bash(git log:*)",
+      "Bash(git diff:*)",
+      "Bash(git show:*)",
+      "Bash(git status:*)",
+      "Bash(git ls-files:*)",
+      "Bash(git ls-tree:*)",
+      "Bash(git cat-file:*)",
+      "Bash(git rev-parse:*)",
+      "Bash(git rev-list:*)",
+      "Bash(git merge-base:*)",
+      "Bash(git describe:*)",
+      "Bash(git branch:*)",
+      "Bash(git remote:*)",
+      "Bash(git config --get:*)",
+      "Bash(git shortlog:*)",
+      "Bash(rg:*)",
+      "Bash(fd:*)",
+      "Bash(ast-grep:*)",
+      "Bash(sg:*)",
+      "Bash(tokei:*)",
+      "Bash(difft:*)",
+      "Bash(shellcheck:*)",
+      "Bash(shfmt:*)",
+      "Bash(scons:*)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:godotwebgpu.com)",
+      "WebFetch(domain:docs.godotengine.org)",
+      "mcp__claude_ai_Context7__resolve-library-id",
+      "mcp__claude_ai_Context7__query-docs",
+      "mcp__plugin_github_github__get_file_contents",
+      "mcp__plugin_github_github__list_commits",
+      "mcp__plugin_github_github__list_branches",
+      "mcp__plugin_github_github__list_tags",
+      "mcp__plugin_github_github__search_code",
+      "mcp__plugin_github_github__search_issues",
+      "mcp__plugin_github_github__search_pull_requests",
+      "mcp__plugin_github_github__pull_request_read",
+      "mcp__plugin_github_github__issue_read"
+    ],
+    "ask": [
+      "Read(thirdparty/tint/**)",
+      "Read(thirdparty/spirv-tools/**)",
+      "Read(thirdparty/spirv-headers/**)"
+    ]
+  }
+}

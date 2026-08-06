@@ -396,3 +396,10 @@ $RECYCLE.BIN/
 *.msp
 *.lnk
 *.generated.props
+
+# --- hogdot fork-local ---------------------------------------------------------
+# Agent working files: plans, specs, notes, scratch. Durable knowledge belongs in
+# .claude/skills/, never here and never in a docs/ directory.
+/.claude/work/
+# Per-machine Claude Code permission overrides.
+/.claude/settings.local.json
