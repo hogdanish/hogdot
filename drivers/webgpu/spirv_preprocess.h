@@ -112,4 +112,12 @@ Vector<uint8_t> flatten_binding_arrays(const Vector<uint8_t> &p_bytes);
 // Tint to emit var<storage, read> instead of var<storage, read_write>.
 Vector<uint8_t> infer_readonly_storage(const Vector<uint8_t> &p_bytes);
 
+// Strip OpDecorate/OpMemberDecorate NonReadable from StorageBuffer variables
+// (GLSL `writeonly buffer`). Tint maps NonReadable to `ptr<storage, T, write>`,
+// which is not a legal WGSL access mode — the storage address space permits only
+// `read` and `read_write`. Dropping the decoration yields `read_write`, which is
+// a superset of the shader's actual usage. Storage *images* keep theirs: WGSL
+// storage textures do have a `write` access mode, and it is their default.
+Vector<uint8_t> strip_writeonly_storage(const Vector<uint8_t> &p_bytes);
+
 } // namespace spirv_preprocess

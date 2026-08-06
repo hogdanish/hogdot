@@ -1,6 +1,6 @@
 // Fuzz the complete SPIR-V -> WGSL conversion pipeline.
 //
-// Exercises all 12 SPIR-V preprocessing passes followed by Tint parsing,
+// Exercises all 13 SPIR-V preprocessing passes followed by Tint parsing,
 // validation, and WGSL code generation.
 //
 // Tint can abort() on malformed SPIR-V (TINT_UNIMPLEMENTED, TINT_ICE).
@@ -37,7 +37,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
 	spv.resize((int64_t)size);
 	memcpy(spv.ptrw(), data, size);
 
-	// 11 preprocessing passes run in-process (crashes here ARE bugs).
+	// 13 preprocessing passes run in-process (crashes here ARE bugs).
 	spv = spirv_preprocess::freeze_spec_constant_ops(spv);
 	spv = spirv_preprocess::rewrite_copy_logical(spv);
 	spv = spirv_preprocess::rewrite_terminate_invocation(spv);
@@ -50,6 +50,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
 	spv = spirv_preprocess::strip_memory_barrier(spv);
 	spv = spirv_preprocess::fix_nonfinite_literals(spv);
 	spv = spirv_preprocess::flatten_binding_arrays(spv);
+	spv = spirv_preprocess::strip_writeonly_storage(spv);
 	spv = spirv_preprocess::infer_readonly_storage(spv);
 
 	// Bump version to 1.3 (same as tint_convert_cli).

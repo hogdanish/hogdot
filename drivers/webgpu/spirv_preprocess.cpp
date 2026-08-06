@@ -100,6 +100,7 @@ static constexpr uint32_t SC_PUSH_CONSTANT = 9;
 // SPIR-V decoration values.
 static constexpr uint32_t DECO_BUILTIN = 11;
 static constexpr uint32_t DECO_NON_WRITABLE = 24;
+static constexpr uint32_t DECO_NON_READABLE = 25;
 static constexpr uint32_t DECO_SPEC_ID = 1;
 static constexpr uint32_t DECO_BINDING = 33;
 static constexpr uint32_t DECO_DESCRIPTOR_SET = 34;
@@ -2666,6 +2667,110 @@ Vector<uint8_t> infer_readonly_storage(const Vector<uint8_t> &p_bytes) {
 			push_word(out, to_add[i]);
 			push_word(out, DECO_NON_WRITABLE);
 		}
+	}
+
+	return out;
+}
+
+// ---- strip_writeonly_storage ----
+
+Vector<uint8_t> strip_writeonly_storage(const Vector<uint8_t> &p_bytes) {
+	const uint8_t *data = p_bytes.ptr();
+	int64_t len = p_bytes.size();
+	if (len < 20 || (len % 4) != 0) {
+		return p_bytes;
+	}
+	const uint32_t nwords = (uint32_t)(len / 4);
+
+	// Pass 1: Collect the StorageBuffer variables and the types StorageBuffer
+	// pointers point at. NonReadable is meaningful on storage *images* — WGSL
+	// storage textures really do have a `write` access mode — so only the
+	// buffer-side targets may be stripped.
+	HashSet<uint32_t> storage_vars;
+	HashSet<uint32_t> storage_pointee_types;
+	{
+		uint32_t pos = 5;
+		while (pos < nwords) {
+			uint32_t word0 = read_word(data, len, pos);
+			uint32_t wc = (word0 >> 16) & 0xFFFF;
+			uint16_t op = word0 & 0xFFFF;
+			if (wc == 0 || pos + wc > nwords) {
+				break;
+			}
+			if (op == OP_TYPE_POINTER && wc >= 4) {
+				if (read_word(data, len, pos + 2) == SC_STORAGE_BUFFER) {
+					storage_pointee_types.insert(read_word(data, len, pos + 3));
+				}
+			} else if (op == OP_VARIABLE && wc >= 4) {
+				if (read_word(data, len, pos + 3) == SC_STORAGE_BUFFER) {
+					storage_vars.insert(read_word(data, len, pos + 2));
+				}
+			}
+			pos += wc;
+		}
+	}
+
+	if (storage_vars.is_empty() && storage_pointee_types.is_empty()) {
+		return p_bytes;
+	}
+
+	// Is this instruction a NonReadable decoration on a storage buffer?
+	auto is_stripped = [&](uint16_t p_op, uint32_t p_pos, uint32_t p_wc) {
+		if (p_op == OP_DECORATE && p_wc >= 3) {
+			return read_word(data, len, p_pos + 2) == DECO_NON_READABLE &&
+					storage_vars.has(read_word(data, len, p_pos + 1));
+		}
+		if (p_op == OP_MEMBER_DECORATE && p_wc >= 4) {
+			return read_word(data, len, p_pos + 3) == DECO_NON_READABLE &&
+					storage_pointee_types.has(read_word(data, len, p_pos + 1));
+		}
+		return false;
+	};
+
+	// Pass 2: Bail out without copying if there is nothing to strip.
+	bool found = false;
+	{
+		uint32_t pos = 5;
+		while (pos < nwords) {
+			uint32_t word0 = read_word(data, len, pos);
+			uint32_t wc = (word0 >> 16) & 0xFFFF;
+			uint16_t op = word0 & 0xFFFF;
+			if (wc == 0 || pos + wc > nwords) {
+				break;
+			}
+			if (is_stripped(op, pos, wc)) {
+				found = true;
+				break;
+			}
+			pos += wc;
+		}
+	}
+
+	if (!found) {
+		return p_bytes;
+	}
+
+	// Pass 3: Rebuild without those decorations.
+	Vector<uint8_t> out;
+	append_bytes(out, data, 0, 20); // Copy header.
+
+	uint32_t pos = 5;
+	while (pos < nwords) {
+		uint32_t word0 = read_word(data, len, pos);
+		uint32_t wc = (word0 >> 16) & 0xFFFF;
+		uint16_t op = word0 & 0xFFFF;
+		if (wc == 0) {
+			break;
+		}
+		if (pos + wc > nwords) {
+			append_bytes(out, data, pos * 4, len - pos * 4);
+			break;
+		}
+
+		if (!is_stripped(op, pos, wc)) {
+			append_bytes(out, data, pos * 4, wc * 4);
+		}
+		pos += wc;
 	}
 
 	return out;

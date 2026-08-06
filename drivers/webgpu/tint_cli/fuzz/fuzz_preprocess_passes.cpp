@@ -1,4 +1,4 @@
-// Fuzz all 12 SPIR-V preprocessing passes in sequence.
+// Fuzz all 13 SPIR-V preprocessing passes in sequence.
 //
 // Exercises the passes without Tint parsing, catching crashes in the
 // raw SPIR-V manipulation code (out-of-bounds, integer overflow, etc.).
@@ -30,6 +30,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
 	spv = spirv_preprocess::strip_memory_barrier(spv);
 	spv = spirv_preprocess::fix_nonfinite_literals(spv);
 	spv = spirv_preprocess::flatten_binding_arrays(spv);
+	spv = spirv_preprocess::strip_writeonly_storage(spv);
 	spv = spirv_preprocess::infer_readonly_storage(spv);
 
 	return 0;
