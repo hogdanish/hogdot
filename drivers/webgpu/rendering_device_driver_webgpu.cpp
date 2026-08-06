@@ -9673,6 +9673,11 @@ uint64_t RenderingDeviceDriverWebGPU::api_trait_get(ApiTrait p_trait) {
 		// Eliminates per-draw SetBindGroup for push constant ring buffer.
 		case API_TRAIT_FIRST_INSTANCE_INDEX:
 			return 1;
+		case API_TRAIT_BUFFER_MAP_IS_CPU_SHADOW:
+			// buffer_map() hands back shadow_map, a plain CPU allocation. Writes
+			// only reach the GPU through wgpuQueueWriteBuffer, which buffer_unmap
+			// issues for the dirty range.
+			return 1;
 		default:
 			return RenderingDeviceDriver::api_trait_get(p_trait);
 	}

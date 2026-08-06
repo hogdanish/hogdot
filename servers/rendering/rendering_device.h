@@ -193,6 +193,23 @@ private:
 	Buffer *_get_buffer_from_owner(RID p_buffer);
 	Error _buffer_initialize(Buffer *p_buffer, Span<uint8_t> p_data, uint32_t p_required_align = 32);
 
+	// True when a buffer with initial data should be created via the driver's
+	// buffer_create_with_data() fast path instead of buffer_create() plus
+	// _buffer_initialize(). Callers must use the SAME value for both decisions:
+	// taking the fast path and then also running _buffer_initialize() double-writes,
+	// while taking the slow path without it leaves the buffer uninitialized.
+	//
+	// ⚠ Persistent-dynamic buffers are excluded. buffer_create_with_data() has no
+	// p_frames_drawn parameter, which is what a driver needs to size and phase a
+	// BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT ring (cf. buffer_persistent_map_advance).
+	// The overloads cannot express "persistent ring, with initial data", so that
+	// combination takes buffer_create(), which does get frames_drawn. See RL-006.
+	bool _can_create_buffer_with_data(Span<uint8_t> p_data, BitField<RDD::BufferUsageBits> p_usage) const {
+		return p_data.size() &&
+				driver->api_trait_get(RDD::API_TRAIT_BUFFER_CREATE_MAPPED_AT_CREATION) &&
+				!p_usage.has_flag(RDD::BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT);
+	}
+
 	void update_perf_report();
 	// Flag for batching descriptor sets.
 	bool descriptor_set_batching = true;

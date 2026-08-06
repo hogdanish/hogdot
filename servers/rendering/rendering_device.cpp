@@ -39,6 +39,7 @@
 #include "core/os/os.h"
 #include "core/profiling/profiling.h"
 #include "core/templates/fixed_vector.h"
+#include "core/templates/hashfuncs.h"
 #include "servers/rendering/rendering_device_binds.h"
 #include "servers/rendering/rendering_shader_container.h"
 #include "servers/rendering/shader_include_db.h"
@@ -1508,7 +1509,8 @@ RID RenderingDevice::storage_buffer_create(uint32_t p_size_bytes, Span<uint8_t> 
 		buffer.usage.set_flag(RDD::BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT);
 	}
 
-	if (p_data.size() && driver->api_trait_get(RDD::API_TRAIT_BUFFER_CREATE_MAPPED_AT_CREATION)) {
+	const bool create_with_data = _can_create_buffer_with_data(p_data, buffer.usage);
+	if (create_with_data) {
 		buffer.driver_id = driver->buffer_create_with_data(buffer.size, buffer.usage, RDD::MEMORY_ALLOCATION_TYPE_GPU, p_data.ptr(), p_data.size());
 	} else {
 		buffer.driver_id = driver->buffer_create(buffer.size, buffer.usage, RDD::MEMORY_ALLOCATION_TYPE_GPU, frames_drawn);
@@ -1519,7 +1521,7 @@ RID RenderingDevice::storage_buffer_create(uint32_t p_size_bytes, Span<uint8_t> 
 	buffer.draw_tracker = RDG::resource_tracker_create();
 	buffer.draw_tracker->buffer_driver_id = buffer.driver_id;
 
-	if (p_data.size() && !driver->api_trait_get(RDD::API_TRAIT_BUFFER_CREATE_MAPPED_AT_CREATION)) {
+	if (p_data.size() && !create_with_data) {
 		_buffer_initialize(&buffer, p_data);
 	}
 
@@ -1544,7 +1546,8 @@ RID RenderingDevice::texture_buffer_create(uint32_t p_size_elements, DataFormat 
 	Buffer texture_buffer;
 	texture_buffer.size = size_bytes;
 	BitField<RDD::BufferUsageBits> usage = (RDD::BUFFER_USAGE_TRANSFER_FROM_BIT | RDD::BUFFER_USAGE_TRANSFER_TO_BIT | RDD::BUFFER_USAGE_TEXEL_BIT);
-	if (p_data.size() && driver->api_trait_get(RDD::API_TRAIT_BUFFER_CREATE_MAPPED_AT_CREATION)) {
+	const bool create_with_data = _can_create_buffer_with_data(p_data, usage);
+	if (create_with_data) {
 		texture_buffer.driver_id = driver->buffer_create_with_data(size_bytes, usage, RDD::MEMORY_ALLOCATION_TYPE_GPU, p_data.ptr(), p_data.size());
 	} else {
 		texture_buffer.driver_id = driver->buffer_create(size_bytes, usage, RDD::MEMORY_ALLOCATION_TYPE_GPU, frames_drawn);
@@ -1563,7 +1566,7 @@ RID RenderingDevice::texture_buffer_create(uint32_t p_size_elements, DataFormat 
 		ERR_FAIL_V(RID());
 	}
 
-	if (p_data.size() && !driver->api_trait_get(RDD::API_TRAIT_BUFFER_CREATE_MAPPED_AT_CREATION)) {
+	if (p_data.size() && !create_with_data) {
 		_buffer_initialize(&texture_buffer, p_data);
 	}
 
@@ -4129,7 +4132,8 @@ RID RenderingDevice::vertex_buffer_create(uint32_t p_size_bytes, Span<uint8_t> p
 	if (p_creation_bits.has_flag(BUFFER_CREATION_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT)) {
 		buffer.usage.set_flag(RDD::BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT);
 	}
-	if (p_data.size() && driver->api_trait_get(RDD::API_TRAIT_BUFFER_CREATE_MAPPED_AT_CREATION)) {
+	const bool create_with_data = _can_create_buffer_with_data(p_data, buffer.usage);
+	if (create_with_data) {
 		buffer.driver_id = driver->buffer_create_with_data(buffer.size, buffer.usage, RDD::MEMORY_ALLOCATION_TYPE_GPU, p_data.ptr(), p_data.size());
 	} else {
 		buffer.driver_id = driver->buffer_create(buffer.size, buffer.usage, RDD::MEMORY_ALLOCATION_TYPE_GPU, frames_drawn);
@@ -4142,7 +4146,7 @@ RID RenderingDevice::vertex_buffer_create(uint32_t p_size_bytes, Span<uint8_t> p
 		buffer.draw_tracker->buffer_driver_id = buffer.driver_id;
 	}
 
-	if (p_data.size() && !driver->api_trait_get(RDD::API_TRAIT_BUFFER_CREATE_MAPPED_AT_CREATION)) {
+	if (p_data.size() && !create_with_data) {
 		_buffer_initialize(&buffer, p_data);
 	}
 
@@ -4350,7 +4354,8 @@ RID RenderingDevice::index_buffer_create(uint32_t p_index_count, IndexBufferForm
 	if (p_creation_bits.has_flag(BUFFER_CREATION_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT)) {
 		index_buffer.usage.set_flag(RDD::BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT);
 	}
-	if (p_data.size() && driver->api_trait_get(RDD::API_TRAIT_BUFFER_CREATE_MAPPED_AT_CREATION)) {
+	const bool create_with_data = _can_create_buffer_with_data(p_data, index_buffer.usage);
+	if (create_with_data) {
 		index_buffer.driver_id = driver->buffer_create_with_data(index_buffer.size, index_buffer.usage, RDD::MEMORY_ALLOCATION_TYPE_GPU, p_data.ptr(), p_data.size());
 	} else {
 		index_buffer.driver_id = driver->buffer_create(index_buffer.size, index_buffer.usage, RDD::MEMORY_ALLOCATION_TYPE_GPU, frames_drawn);
@@ -4363,7 +4368,7 @@ RID RenderingDevice::index_buffer_create(uint32_t p_index_count, IndexBufferForm
 		index_buffer.draw_tracker->buffer_driver_id = index_buffer.driver_id;
 	}
 
-	if (p_data.size() && !driver->api_trait_get(RDD::API_TRAIT_BUFFER_CREATE_MAPPED_AT_CREATION)) {
+	if (p_data.size() && !create_with_data) {
 		_buffer_initialize(&index_buffer, p_data);
 	}
 
@@ -4451,7 +4456,12 @@ Vector<uint8_t> RenderingDevice::shader_compile_binary_from_spirv(const Vector<S
 	// Dump SPIR-V to disk when GODOT_DUMP_SPIRV is set (for CI shader validation).
 	static const String dump_dir = OS::get_singleton()->get_environment("GODOT_DUMP_SPIRV");
 	if (!dump_dir.is_empty()) {
-		static const char *stage_suffixes[] = { "vert", "frag", "tesc", "tese", "comp" };
+		// One entry per ShaderStage up to SHADER_STAGE_COMPUTE; the raytracing
+		// stages that follow it fall through to "spv". Sized from the enum so a
+		// future reordering is a compile error rather than a silently wrong suffix.
+		constexpr int STAGE_SUFFIX_COUNT = SHADER_STAGE_COMPUTE + 1;
+		static const char *stage_suffixes[STAGE_SUFFIX_COUNT] = { "vert", "frag", "tesc", "tese", "comp" };
+
 		Ref<DirAccess> da = DirAccess::open(dump_dir);
 		if (da.is_null()) {
 			DirAccess::make_dir_recursive_absolute(dump_dir);
@@ -4460,12 +4470,24 @@ Vector<uint8_t> RenderingDevice::shader_compile_binary_from_spirv(const Vector<S
 			if (p_spirv[i].spirv.is_empty()) {
 				continue;
 			}
-			String stage_ext = (p_spirv[i].shader_stage < 5) ? stage_suffixes[p_spirv[i].shader_stage] : "spv";
+			const int stage = p_spirv[i].shader_stage;
+			String stage_ext = (stage >= 0 && stage < STAGE_SUFFIX_COUNT) ? stage_suffixes[stage] : "spv";
 			String safe_name = p_shader_name.is_empty() ? "unnamed" : p_shader_name.replace("/", "_").replace("\\", "_");
-			String path = dump_dir.path_join(safe_name + "." + stage_ext + ".spv");
+			// ⚠ Shader names are not unique — the same name occurs in different
+			// directories, and one name yields many variants. Without a
+			// discriminator each dump overwrites the last and the run silently
+			// produces a fraction of the modules it compiled. Key on the SPIR-V
+			// itself so identical modules collapse and distinct ones never collide.
+			const uint32_t spirv_hash = hash_murmur3_buffer(p_spirv[i].spirv.ptr(), p_spirv[i].spirv.size());
+			String path = dump_dir.path_join(vformat("%s.%08x.%s.spv", safe_name, spirv_hash, stage_ext));
 			Ref<FileAccess> f = FileAccess::open(path, FileAccess::WRITE);
 			if (f.is_valid()) {
 				f->store_buffer(p_spirv[i].spirv.ptr(), p_spirv[i].spirv.size());
+			} else {
+				// ⚠ Never fail silently here: a dump that wrote nothing is
+				// indistinguishable from one that wrote everything, and the
+				// consumer is CI.
+				WARN_PRINT(vformat("GODOT_DUMP_SPIRV: could not open '%s' for writing (error %d).", path, (int)FileAccess::get_open_error()));
 			}
 		}
 	}
@@ -4630,7 +4652,8 @@ RID RenderingDevice::uniform_buffer_create(uint32_t p_size_bytes, Span<uint8_t> 
 		// stick to the known/intended use cases and scream if we deviate from it.
 		buffer.usage.clear_flag(RDD::BUFFER_USAGE_TRANSFER_TO_BIT);
 	}
-	if (p_data.size() && driver->api_trait_get(RDD::API_TRAIT_BUFFER_CREATE_MAPPED_AT_CREATION)) {
+	const bool create_with_data = _can_create_buffer_with_data(p_data, buffer.usage);
+	if (create_with_data) {
 		buffer.driver_id = driver->buffer_create_with_data(buffer.size, buffer.usage, RDD::MEMORY_ALLOCATION_TYPE_GPU, p_data.ptr(), p_data.size());
 	} else {
 		buffer.driver_id = driver->buffer_create(buffer.size, buffer.usage, RDD::MEMORY_ALLOCATION_TYPE_GPU, frames_drawn);
@@ -4643,7 +4666,7 @@ RID RenderingDevice::uniform_buffer_create(uint32_t p_size_bytes, Span<uint8_t> 
 		buffer.draw_tracker->buffer_driver_id = buffer.driver_id;
 	}
 
-	if (p_data.size() && !driver->api_trait_get(RDD::API_TRAIT_BUFFER_CREATE_MAPPED_AT_CREATION)) {
+	if (p_data.size() && !create_with_data) {
 		_buffer_initialize(&buffer, p_data);
 	}
 
@@ -8437,7 +8460,15 @@ void RenderingDevice::_end_frame() {
 	// texture_update() / buffer_update() lives only in the shadow until
 	// buffer_unmap() flushes it via wgpuQueueWriteBuffer. This must happen
 	// before the command buffer that references these staging buffers is submitted.
-	// On Vulkan/Metal this is a no-op since buffer_map() returns GPU-visible memory.
+	//
+	// ⚠ Gated on API_TRAIT_BUFFER_MAP_IS_CPU_SHADOW. This loop used to run
+	// unconditionally, on the claim that it "is a no-op on Vulkan/Metal since
+	// buffer_map() returns GPU-visible memory". That is false on Vulkan: a
+	// staging block is mapped exactly once at creation and its data_ptr is
+	// cached for the block's lifetime, while buffer_unmap() is vmaUnmapMemory
+	// against an allocation created without VMA_ALLOCATION_CREATE_MAPPED_BIT.
+	// The map counter hit zero on the first _end_frame and every cached
+	// data_ptr dangled from then on. See RL-005.
 	//
 	// Note: we do NOT re-map after unmapping. The shadow buffer persists and
 	// data_ptr remains valid. Re-mapping would unconditionally set map_dirty,
@@ -8447,8 +8478,10 @@ void RenderingDevice::_end_frame() {
 	// specific dirty regions and clear map_dirty, the unmap here is typically a
 	// no-op. Only blocks that weren't handled by command_copy need flushing
 	// (e.g. persistent dynamic buffers).
-	for (int i = 0; i < upload_staging_buffers.blocks.size(); i++) {
-		driver->buffer_unmap(upload_staging_buffers.blocks[i].driver_id);
+	if (driver->api_trait_get(RDD::API_TRAIT_BUFFER_MAP_IS_CPU_SHADOW)) {
+		for (int i = 0; i < upload_staging_buffers.blocks.size(); i++) {
+			driver->buffer_unmap(upload_staging_buffers.blocks[i].driver_id);
+		}
 	}
 
 	// The command buffer must be copied into a stack variable as the driver workarounds can change the command buffer in use.

@@ -1042,6 +1042,21 @@ public:
 		// This eliminates the per-draw SetBindGroup call for push constant rebinding.
 		// On WebGPU, each SetBindGroup IPC crossing costs ~0.3us; this saves one per draw.
 		API_TRAIT_FIRST_INSTANCE_INDEX,
+		// If non-zero, buffer_map() returns a CPU shadow copy rather than
+		// GPU-visible memory, so data written into an upload staging block is
+		// not visible to the GPU until buffer_unmap() flushes it. Backends that
+		// set this get the end-of-frame flush loop in _end_frame(); backends
+		// that do not are skipped entirely.
+		//
+		// ⚠ This trait exists because the loop is NOT a no-op on Vulkan, which
+		// its original comment claimed. A staging block is mapped exactly once,
+		// at creation, and its data_ptr is cached for the block's whole
+		// lifetime; RenderingDeviceDriverVulkan::buffer_unmap is vmaUnmapMemory
+		// and the matching buffer_create does not pass
+		// VMA_ALLOCATION_CREATE_MAPPED_BIT. Unmapping every frame therefore
+		// drives VMA's map counter to zero on the first _end_frame, dangles
+		// every cached data_ptr, and unmaps below zero thereafter. See RL-005.
+		API_TRAIT_BUFFER_MAP_IS_CPU_SHADOW,
 	};
 
 	enum ShaderChangeInvalidation {

@@ -73,6 +73,8 @@ uint64_t RenderingDeviceDriver::api_trait_get(ApiTrait p_trait) {
 			return false;
 		case API_TRAIT_FIRST_INSTANCE_INDEX:
 			return false;
+		case API_TRAIT_BUFFER_MAP_IS_CPU_SHADOW:
+			return false;
 		default:
 			ERR_FAIL_V(0);
 	}
