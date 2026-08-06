@@ -31,6 +31,7 @@
 #ifdef WEBGPU_ENABLED
 
 #include "rendering_context_driver_webgpu.h"
+
 #include "drivers/webgpu/rendering_device_driver_webgpu.h"
 
 // html5_webgpu.h was removed in Emscripten 5.x when USE_WEBGPU was dropped.
@@ -75,7 +76,9 @@ Error RenderingContextDriverWebGPU::initialize() {
 
 	device = (WGPUDevice)(uintptr_t)EM_ASM_PTR({
 		var d = Module["preinitializedWebGPUDevice"];
-		if (!d) { return 0; }
+		if (!d) {
+			return 0;
+		}
 		return WebGPU["importJsDevice"](d);
 	});
 	ERR_FAIL_COND_V_MSG(device == nullptr, ERR_CANT_CREATE, "WebGPU: Failed to get pre-initialized device. Ensure JS shell calls navigator.gpu.requestDevice() before WASM.");

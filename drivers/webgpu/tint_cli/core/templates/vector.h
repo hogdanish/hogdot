@@ -29,7 +29,9 @@ public:
 	// Godot's find() returns index or -1.
 	int64_t find(const T &p_val) const {
 		for (size_t i = 0; i < _data.size(); i++) {
-			if (_data[i] == p_val) return (int64_t)i;
+			if (_data[i] == p_val) {
+				return (int64_t)i;
+			}
 		}
 		return -1;
 	}

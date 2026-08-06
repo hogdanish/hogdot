@@ -159,50 +159,80 @@ static uint64_t eval_spec_op(uint32_t p_opcode, const Vector<uint64_t> &p_operan
 
 	switch (p_opcode) {
 		// Integer arithmetic.
-		case 126: return (uint64_t)(-(int32_t)a()); // SNegate
-		case 128: return a() + b(); // IAdd (wrapping)
-		case 130: return a() - b(); // ISub (wrapping)
-		case 132: return a() * b(); // IMul (wrapping)
-		case 134: return b() != 0 ? a() / b() : 0; // UDiv
+		case 126:
+			return (uint64_t)(-(int32_t)a()); // SNegate
+		case 128:
+			return a() + b(); // IAdd (wrapping)
+		case 130:
+			return a() - b(); // ISub (wrapping)
+		case 132:
+			return a() * b(); // IMul (wrapping)
+		case 134:
+			return b() != 0 ? a() / b() : 0; // UDiv
 		case 135: { // SDiv
 			int32_t d = (int32_t)b();
 			return d != 0 ? (uint64_t)((int32_t)a() / d) : 0;
 		}
-		case 137: return b() != 0 ? a() % b() : 0; // UMod
+		case 137:
+			return b() != 0 ? a() % b() : 0; // UMod
 
 		// Logical.
-		case 164: return (uint64_t)(a() == b()); // LogicalEqual
-		case 165: return (uint64_t)(a() != b()); // LogicalNotEqual
-		case 166: return (uint64_t)((a() != 0) || (b() != 0)); // LogicalOr
-		case 167: return (uint64_t)((a() != 0) && (b() != 0)); // LogicalAnd
-		case 168: return (uint64_t)(a() == 0); // LogicalNot
+		case 164:
+			return (uint64_t)(a() == b()); // LogicalEqual
+		case 165:
+			return (uint64_t)(a() != b()); // LogicalNotEqual
+		case 166:
+			return (uint64_t)((a() != 0) || (b() != 0)); // LogicalOr
+		case 167:
+			return (uint64_t)((a() != 0) && (b() != 0)); // LogicalAnd
+		case 168:
+			return (uint64_t)(a() == 0); // LogicalNot
 
 		// Select: condition, true_val, false_val.
-		case 169: return a() != 0 ? b() : c(); // Select
+		case 169:
+			return a() != 0 ? b() : c(); // Select
 
 		// Integer comparison.
-		case 170: return (uint64_t)(a() == b()); // IEqual
-		case 171: return (uint64_t)(a() != b()); // INotEqual
-		case 172: return (uint64_t)((uint32_t)a() > (uint32_t)b()); // UGreaterThan
-		case 173: return (uint64_t)((int32_t)a() > (int32_t)b()); // SGreaterThan
-		case 174: return (uint64_t)((uint32_t)a() >= (uint32_t)b()); // UGreaterThanEqual
-		case 175: return (uint64_t)((int32_t)a() >= (int32_t)b()); // SGreaterThanEqual
-		case 176: return (uint64_t)((uint32_t)a() < (uint32_t)b()); // ULessThan
-		case 177: return (uint64_t)((int32_t)a() < (int32_t)b()); // SLessThan
-		case 178: return (uint64_t)((uint32_t)a() <= (uint32_t)b()); // ULessThanEqual
-		case 179: return (uint64_t)((int32_t)a() <= (int32_t)b()); // SLessThanEqual
+		case 170:
+			return (uint64_t)(a() == b()); // IEqual
+		case 171:
+			return (uint64_t)(a() != b()); // INotEqual
+		case 172:
+			return (uint64_t)((uint32_t)a() > (uint32_t)b()); // UGreaterThan
+		case 173:
+			return (uint64_t)((int32_t)a() > (int32_t)b()); // SGreaterThan
+		case 174:
+			return (uint64_t)((uint32_t)a() >= (uint32_t)b()); // UGreaterThanEqual
+		case 175:
+			return (uint64_t)((int32_t)a() >= (int32_t)b()); // SGreaterThanEqual
+		case 176:
+			return (uint64_t)((uint32_t)a() < (uint32_t)b()); // ULessThan
+		case 177:
+			return (uint64_t)((int32_t)a() < (int32_t)b()); // SLessThan
+		case 178:
+			return (uint64_t)((uint32_t)a() <= (uint32_t)b()); // ULessThanEqual
+		case 179:
+			return (uint64_t)((int32_t)a() <= (int32_t)b()); // SLessThanEqual
 
 		// Bitwise.
-		case 194: return (uint64_t)((uint32_t)a() >> ((uint32_t)b() & 31)); // ShiftRightLogical
-		case 195: return (uint64_t)((int32_t)a() >> ((uint32_t)b() & 31)); // ShiftRightArithmetic
-		case 196: return (uint64_t)((uint32_t)a() << ((uint32_t)b() & 31)); // ShiftLeftLogical
-		case 197: return a() | b(); // BitwiseOr
-		case 198: return a() ^ b(); // BitwiseXor
-		case 199: return a() & b(); // BitwiseAnd
-		case 200: return (uint64_t)(~(uint32_t)a()); // Not
+		case 194:
+			return (uint64_t)((uint32_t)a() >> ((uint32_t)b() & 31)); // ShiftRightLogical
+		case 195:
+			return (uint64_t)((int32_t)a() >> ((uint32_t)b() & 31)); // ShiftRightArithmetic
+		case 196:
+			return (uint64_t)((uint32_t)a() << ((uint32_t)b() & 31)); // ShiftLeftLogical
+		case 197:
+			return a() | b(); // BitwiseOr
+		case 198:
+			return a() ^ b(); // BitwiseXor
+		case 199:
+			return a() & b(); // BitwiseAnd
+		case 200:
+			return (uint64_t)(~(uint32_t)a()); // Not
 
 		// Composite.
-		case 81: return a(); // CompositeExtract (return first operand)
+		case 81:
+			return a(); // CompositeExtract (return first operand)
 
 		// Conversion (values unchanged for const-eval of integers).
 		case 109:
@@ -210,10 +240,12 @@ static uint64_t eval_spec_op(uint32_t p_opcode, const Vector<uint64_t> &p_operan
 		case 111:
 		case 112:
 		case 113:
-		case 114: return a(); // ConvertF/S/U, UConvert, SConvert
+		case 114:
+			return a(); // ConvertF/S/U, UConvert, SConvert
 
 		// Default: return 0 for unhandled operations.
-		default: return 0;
+		default:
+			return 0;
 	}
 }
 

@@ -32,10 +32,9 @@
 
 #ifdef WEBGPU_ENABLED
 
-#include "drivers/webgpu/webgpu_objects.h"
-
-#include "servers/rendering/rendering_device_driver.h"
 #include "core/templates/hash_map.h"
+#include "drivers/webgpu/webgpu_objects.h"
+#include "servers/rendering/rendering_device_driver.h"
 
 #include <webgpu/webgpu.h>
 
@@ -255,13 +254,13 @@ public:
 	/// Heap-allocated so that pointers remain stable across HashMap rehashes
 	/// and can safely be passed to async WebGPU map callbacks.
 	struct ReadbackEntry {
-		WGPUBuffer staging = nullptr;   ///< Persistent staging buffer (CopyDst | MapRead).
-		uint8_t *shadow = nullptr;      ///< CPU-side shadow buffer.
-		uint64_t size = 0;              ///< Buffer size in bytes.
-		bool map_complete = false;      ///< Set by async map callback.
-		bool map_pending = false;       ///< True while mapAsync is in flight (not yet completed).
-		bool has_data = false;          ///< True after first successful readback.
-		bool cancelled = false;         ///< Source freed while map pending; callback will clean up.
+		WGPUBuffer staging = nullptr; ///< Persistent staging buffer (CopyDst | MapRead).
+		uint8_t *shadow = nullptr; ///< CPU-side shadow buffer.
+		uint64_t size = 0; ///< Buffer size in bytes.
+		bool map_complete = false; ///< Set by async map callback.
+		bool map_pending = false; ///< True while mapAsync is in flight (not yet completed).
+		bool has_data = false; ///< True after first successful readback.
+		bool cancelled = false; ///< Source freed while map pending; callback will clean up.
 	};
 	HashMap<uint64_t, ReadbackEntry *> _readback_cache; ///< Keyed by source buffer/texture pointer.
 	/// Async map callback — copies GPU data to shadow buffer.

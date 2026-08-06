@@ -48,10 +48,10 @@ struct WGBuffer {
 	WGPUBufferUsage usage = 0;
 	uint8_t *shadow_map = nullptr; // For CPU-side mapping emulation.
 	bool map_dirty = false;
-	bool is_readback = false;      // True for staging buffers that need GPU→CPU readback.
-	bool map_complete = false;     // Set by async map callback.
-	bool map_pending = false;      // True while wgpuBufferMapAsync callback is in flight.
-	bool freed = false;            // Source freed while map pending; callback will clean up.
+	bool is_readback = false; // True for staging buffers that need GPU→CPU readback.
+	bool map_complete = false; // Set by async map callback.
+	bool map_pending = false; // True while wgpuBufferMapAsync callback is in flight.
+	bool freed = false; // Source freed while map pending; callback will clean up.
 
 	// Dirty range tracking for shadow buffer flushes. On WebGPU, buffer_unmap()
 	// must copy shadow_map data to the GPU buffer via wgpuQueueWriteBuffer. Without
@@ -236,7 +236,8 @@ struct WGFramebuffer {
 // =============================================================================
 
 struct WGPipelineWrapper {
-	enum Type { RENDER, COMPUTE };
+	enum Type { RENDER,
+		COMPUTE };
 	Type type = RENDER;
 	union {
 		WGPURenderPipeline render_handle;
@@ -337,7 +338,9 @@ struct WGCommandBuffer {
 	WGPURenderPassEncoder render_encoder = nullptr;
 	WGPUComputePassEncoder compute_encoder = nullptr;
 
-	enum ActiveEncoder { NONE, RENDER, COMPUTE };
+	enum ActiveEncoder { NONE,
+		RENDER,
+		COMPUTE };
 	ActiveEncoder active_encoder = NONE;
 
 	// Push constant emulation state.
@@ -387,9 +390,13 @@ struct WGCommandBuffer {
 		uint32_t current_pass_attachment_count = 0;
 		void reset_current_pass_attachments() { current_pass_attachment_count = 0; }
 		void add_current_pass_attachment(WGPUTexture t) {
-			if (!t) return;
+			if (!t) {
+				return;
+			}
 			for (uint32_t i = 0; i < current_pass_attachment_count; i++) {
-				if (current_pass_attachments[i] == t) return;
+				if (current_pass_attachments[i] == t) {
+					return;
+				}
 			}
 			if (current_pass_attachment_count < MAX_ATTACHMENT_TEXTURES) {
 				current_pass_attachments[current_pass_attachment_count++] = t;
@@ -451,7 +458,7 @@ struct WGFence {
 	bool signaled = false;
 	uint64_t submission_id = 0;
 	bool work_done_pending = false; // True while wgpuQueueOnSubmittedWorkDone callback is in flight.
-	bool freed = false;             // Freed while callback pending; callback will delete.
+	bool freed = false; // Freed while callback pending; callback will delete.
 };
 
 // =============================================================================
@@ -474,8 +481,8 @@ struct WGQueryPool {
 	// Shadow CPU buffer for async readback results.
 	uint64_t *cpu_results = nullptr;
 	bool readback_pending = false;
-	uint32_t map_generation = 0;    // Incremented each time mapAsync is issued; stale callbacks are ignored.
-	bool freed = false;             // Freed while readback pending; callback will clean up.
+	uint32_t map_generation = 0; // Incremented each time mapAsync is issued; stale callbacks are ignored.
+	bool freed = false; // Freed while readback pending; callback will clean up.
 };
 
 #endif // WEBGPU_ENABLED

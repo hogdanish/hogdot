@@ -12,15 +12,16 @@
 #include "../spirv_preprocess.h"
 #include "../tint_wrapper.h"
 
+#include <fcntl.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <fcntl.h>
 #include <fstream>
 #include <iostream>
 #include <string>
-#include <sys/wait.h>
-#include <unistd.h>
 #include <vector>
 
 // Read a binary file into a byte vector.
@@ -103,12 +104,24 @@ static std::string json_escape(const std::string &p_str) {
 	out.reserve(p_str.size() + p_str.size() / 8);
 	for (char c : p_str) {
 		switch (c) {
-			case '"': out += "\\\""; break;
-			case '\\': out += "\\\\"; break;
-			case '\n': out += "\\n"; break;
-			case '\r': out += "\\r"; break;
-			case '\t': out += "\\t"; break;
-			default: out += c; break;
+			case '"':
+				out += "\\\"";
+				break;
+			case '\\':
+				out += "\\\\";
+				break;
+			case '\n':
+				out += "\\n";
+				break;
+			case '\r':
+				out += "\\r";
+				break;
+			case '\t':
+				out += "\\t";
+				break;
+			default:
+				out += c;
+				break;
 		}
 	}
 	return out;

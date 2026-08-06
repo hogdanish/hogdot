@@ -7,14 +7,15 @@
 //   ./fuzz_target corpus_file1.spv corpus_file2.spv ...
 //   ./fuzz_target --iterations 500000 corpus/*.spv
 
+#include <unistd.h>
+
+#include <csignal>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <fstream>
-#include <csignal>
-#include <unistd.h>
 #include <vector>
 
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
@@ -24,7 +25,7 @@ static int g_current_iter = -1;
 
 static void crash_handler(int sig) {
 	const char *signame = sig == SIGSEGV ? "SIGSEGV" : sig == SIGABRT ? "SIGABRT"
-			: sig == SIGFPE                                           ? "SIGFPE"
+			: sig == SIGFPE											  ? "SIGFPE"
 																	  : "UNKNOWN";
 	fprintf(stderr, "\n[FUZZ] CRASH: %s at iteration %d (seed: %s)\n",
 			signame, g_current_iter, g_current_seed ? g_current_seed : "mutation");

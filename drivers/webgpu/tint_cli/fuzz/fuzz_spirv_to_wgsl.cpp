@@ -12,13 +12,14 @@
 #include "../../spirv_preprocess.h"
 #include "../../tint_wrapper.h"
 
+#include <fcntl.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <fcntl.h>
-#include <sys/wait.h>
-#include <unistd.h>
 
 static bool initialized = false;
 
