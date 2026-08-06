@@ -34,6 +34,14 @@ silently out of the conflict set.
 (`thirdparty/spirv-headers/include/spirv/unified1/spirv.hpp11`, which mainline grew its own copy of) ·
 13 clean · **39 conflicts** · 0 deletions.
 
+⚠ **The collision is resolved in the fork's favour** (`ef55f41`, Phase 2). Phase 1 kept mainline's copy
+and was wrong: the fork's is the newer SPIRV-Headers drop, and the vendored SPIRV-Tools does not
+compile against mainline's. ⚠ **Decide a collision with a set-difference over identifiers, not with
+line counts or tree recency** — `comm -23` of the two files' enumerator names showed 43 additions and
+**zero removals**, which is what made the swap safe for mainline's glslang. ⚠ And note *when* it
+surfaced: mainline's copy built the macOS editor and the vanilla web template happily through all of
+Phase 1, because SPIRV-Tools is only ever compiled under `webgpu=yes`.
+
 **1,500 files sounds daunting and isn't.** 1,221 of the additions are vendored third-party drops
 (`thirdparty/tint` 824, `thirdparty/spirv-tools` 389, `thirdparty/spirv-headers` 8). The fork's own
 hand-written engine code is **26 files in `drivers/webgpu/`** (17,095 lines) plus those 39 conflicts.
