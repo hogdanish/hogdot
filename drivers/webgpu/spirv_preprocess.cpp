@@ -85,10 +85,10 @@ static constexpr uint16_t OP_TYPE_ARRAY = 28;
 static constexpr uint16_t OP_TYPE_RUNTIME_ARRAY = 29;
 static constexpr uint16_t OP_IN_BOUNDS_ACCESS_CHAIN = 66;
 static constexpr uint16_t OP_PTR_ACCESS_CHAIN = 67;
-static constexpr uint16_t OP_COPY_MEMORY = 38;
-static constexpr uint16_t OP_COPY_MEMORY_SIZED = 39;
+static constexpr uint16_t OP_COPY_MEMORY = 63;
+static constexpr uint16_t OP_COPY_MEMORY_SIZED = 64;
 static constexpr uint16_t OP_ATOMIC_STORE = 228;
-static constexpr uint16_t OP_IN_BOUNDS_PTR_ACCESS_CHAIN = 216;
+static constexpr uint16_t OP_IN_BOUNDS_PTR_ACCESS_CHAIN = 70;
 static constexpr uint16_t OP_DECORATION_GROUP = 73;
 
 // SPIR-V storage class values.
@@ -2187,31 +2187,49 @@ Vector<uint8_t> fix_nonfinite_literals(const Vector<uint8_t> &p_bytes) {
 // Is word `p_index` of an instruction with opcode `p_op` a literal rather than an
 // <id>? Word 0 is the opcode/word-count and is never passed here.
 //
-// Only the opcodes that actually carry numeric or string literals need an entry;
-// everything else is all-<id> and falls through to `false`, which preserves the
-// original behavior for opcodes not listed. Adding an opcode here can only make
-// the pass more conservative.
+// ⚠ The `default: return false` fall-through is the *permissive* direction — an
+// opcode with no entry has its literals treated as ids and therefore stays
+// rewritable, which is the RL-028 failure mode. So this table is not a
+// best-effort list: it must cover every opcode carrying a literal.
+//
+// It does. Every entry below was generated from the vendored SPIRV-Tools
+// grammar tables (`thirdparty/spirv-tools/generated/core_tables_body.inc`,
+// which encode `spirv.core.grammar.json`) by selecting every core opcode up to
+// SPIR-V 1.6 whose operand list contains a non-<id> operand — 105 opcodes.
+// Regenerate the same way after a SPIRV-Tools bump. See ledger RL-030.
 static bool _is_literal_operand(uint16_t p_op, uint32_t p_index) {
 	switch (p_op) {
 		// Debug/annotation instructions. The string payloads are the dangerous ones:
 		// a short name like "m" packs to 0x6D, well inside the id range.
 		case 3: // OpSource: <literal lang> <literal version> [<id file> [<literal source>]]
 			return p_index != 3;
+		case 2: // OpSourceContinued
 		case 4: // OpSourceExtension
 		case 10: // OpExtension
 		case 17: // OpCapability
 		case 14: // OpMemoryModel
+		case 330: // OpModuleProcessed
 			return true;
 		case OP_NAME: // OpName: <id target> <literal name>
 		case 7: // OpString: <id result> <literal string>
 		case 11: // OpExtInstImport: <id result> <literal name>
+		case 31: // OpTypeOpaque: <id result> <literal name>
 			return p_index >= 2;
 		case 6: // OpMemberName: <id type> <literal member> <literal name>
 		case 8: // OpLine: <id file> <literal line> <literal column>
 		case 16: // OpExecutionMode: <id entry> <literal mode> <literals...>
 		case OP_DECORATE: // <id target> <literal decoration> <literals...>
 		case OP_MEMBER_DECORATE: // <id type> <literal member> <literal decoration> <literals...>
+		case 5632: // OpDecorateString: same shape as OpDecorate
+		case 5633: // OpMemberDecorateString: same shape as OpMemberDecorate
 			return p_index >= 2;
+		// ⚠ The *Id forms take <id> parameters after the decoration/mode enum, so
+		// only the enum word itself is a literal — the opposite of the two above.
+		case 331: // OpExecutionModeId: <id entry> <literal mode> <id params>...
+		case 332: // OpDecorateId: <id target> <literal decoration> <id params>...
+			return p_index == 2;
+		case 75: // OpGroupMemberDecorate: <id group> (<id target> <literal member>)...
+			return p_index >= 3 && ((p_index - 3) % 2 == 0);
 		// OpEntryPoint mixes a literal execution model, an id, a literal name and
 		// then interface ids. None of this pass's maps can appear in it, so treat
 		// the whole instruction as literal rather than parse the embedded string.
@@ -2220,7 +2238,8 @@ static bool _is_literal_operand(uint16_t p_op, uint32_t p_index) {
 
 		// Type declarations with literal operands.
 		case OP_TYPE_INT: // <id result> <literal width> <literal signedness>
-		case OP_TYPE_FLOAT: // <id result> <literal width>
+		case OP_TYPE_FLOAT: // <id result> <literal width> [<literal fp encoding>]
+		case 38: // OpTypePipe: <id result> <literal access qualifier>
 			return p_index >= 2;
 		case OP_TYPE_VECTOR: // <id result> <id component> <literal count>
 		case 24: // OpTypeMatrix: <id result> <id column> <literal count>
@@ -2236,7 +2255,43 @@ static bool _is_literal_operand(uint16_t p_op, uint32_t p_index) {
 		case OP_SPEC_CONSTANT:
 			return p_index >= 3;
 		case 45: // OpConstantSampler: <id result type> <id result> <literal addressing/param/filter>
+		case 323: // OpConstantPipeStorage: <id result type> <id result> <literal packet size/alignment/capacity>
 			return p_index >= 3;
+		case OP_SPEC_CONSTANT_OP: // <id result type> <id result> <literal wrapped opcode> <operands>...
+			return p_index == 3;
+
+		// Extended instruction sets. ⚠ Word 4 is the GLSL.std.450 instruction
+		// number and its value range (1..81) overlaps low <id>s in every module —
+		// rewriting it silently calls a different builtin.
+		case 12: // OpExtInst: <id result type> <id result> <id set> <literal instruction> <id operands>...
+			return p_index == 4;
+
+		// Image instructions: exactly one literal, the image-operands bitmask. The
+		// words after it are <id>s (Bias, Lod, ConstOffset, Grad, Sample, MinLod).
+		case 99: // OpImageWrite
+			return p_index == 4;
+		case 87: // OpImageSampleImplicitLod
+		case 88: // OpImageSampleExplicitLod
+		case 91: // OpImageSampleProjImplicitLod
+		case 92: // OpImageSampleProjExplicitLod
+		case 95: // OpImageFetch
+		case 98: // OpImageRead
+		case 305: // OpImageSparseSampleImplicitLod
+		case 306: // OpImageSparseSampleExplicitLod
+		case 313: // OpImageSparseFetch
+		case 320: // OpImageSparseRead
+			return p_index == 5;
+		case 89: // OpImageSampleDrefImplicitLod
+		case 90: // OpImageSampleDrefExplicitLod
+		case 93: // OpImageSampleProjDrefImplicitLod
+		case 94: // OpImageSampleProjDrefExplicitLod
+		case 96: // OpImageGather
+		case 97: // OpImageDrefGather
+		case 307: // OpImageSparseSampleDrefImplicitLod
+		case 308: // OpImageSparseSampleDrefExplicitLod
+		case 314: // OpImageSparseGather
+		case 315: // OpImageSparseDrefGather
+			return p_index == 6;
 
 		// Instructions with trailing literal indices or flags.
 		case OP_FUNCTION: // <id result type> <id result> <literal control> <id fn type>
@@ -2244,9 +2299,11 @@ static bool _is_literal_operand(uint16_t p_op, uint32_t p_index) {
 		case OP_VARIABLE: // <id result type> <id result> <literal storage class> [<id init>]
 			return p_index == 3;
 		case OP_LOAD: // <id result type> <id result> <id ptr> [<literal memory operands>...]
+		case OP_COPY_MEMORY_SIZED: // <id target> <id source> <id size> [<literal memory operands>...]
+		case 68: // OpArrayLength: <id result type> <id result> <id struct> <literal member>
+		case 123: // OpGenericCastToPtrExplicit: <id result type> <id result> <id ptr> <literal storage class>
 			return p_index >= 4;
 		case OP_STORE: // <id ptr> <id object> [<literal memory operands>...]
-			return p_index >= 3;
 		case OP_COPY_MEMORY: // <id target> <id source> [<literal memory operands>...]
 			return p_index >= 3;
 		case 79: // OpVectorShuffle: <id result type> <id result> <id v1> <id v2> <literal components>...
@@ -2258,7 +2315,52 @@ static bool _is_literal_operand(uint16_t p_op, uint32_t p_index) {
 		case 246: // OpLoopMerge: <id merge> <id continue> <literal control>...
 			return p_index >= 3;
 		case 247: // OpSelectionMerge: <id merge> <literal control>
+		case 256: // OpLifetimeStart: <id ptr> <literal size>
+		case 257: // OpLifetimeStop: <id ptr> <literal size>
 			return p_index == 2;
+		case 250: // OpBranchConditional: <id cond> <id true> <id false> <literal weights>...
+			return p_index >= 4;
+
+		// Group operations: word 4 is the literal GroupOperation.
+		case 264: // OpGroupIAdd
+		case 265: // OpGroupFAdd
+		case 266: // OpGroupFMin
+		case 267: // OpGroupUMin
+		case 268: // OpGroupSMin
+		case 269: // OpGroupFMax
+		case 270: // OpGroupUMax
+		case 271: // OpGroupSMax
+		case 342: // OpGroupNonUniformBallotBitCount
+		case 349: // OpGroupNonUniformIAdd
+		case 350: // OpGroupNonUniformFAdd
+		case 351: // OpGroupNonUniformIMul
+		case 352: // OpGroupNonUniformFMul
+		case 353: // OpGroupNonUniformSMin
+		case 354: // OpGroupNonUniformUMin
+		case 355: // OpGroupNonUniformFMin
+		case 356: // OpGroupNonUniformSMax
+		case 357: // OpGroupNonUniformUMax
+		case 358: // OpGroupNonUniformFMax
+		case 359: // OpGroupNonUniformBitwiseAnd
+		case 360: // OpGroupNonUniformBitwiseOr
+		case 361: // OpGroupNonUniformBitwiseXor
+		case 362: // OpGroupNonUniformLogicalAnd
+		case 363: // OpGroupNonUniformLogicalOr
+		case 364: // OpGroupNonUniformLogicalXor
+			return p_index == 4;
+
+		// Integer dot product: trailing literal PackedVectorFormat.
+		case 4450: // OpSDot
+		case 4451: // OpUDot
+		case 4452: // OpSUDot
+			return p_index >= 5;
+		case 4453: // OpSDotAccSat
+		case 4454: // OpUDotAccSat
+		case 4455: // OpSUDotAccSat
+			return p_index >= 6;
+
+		// OpSwitch (251) is deliberately absent: its literal/label alternation is
+		// handled by the caller, which knows the instruction's word count.
 
 		default:
 			return false;
@@ -2467,11 +2569,17 @@ Vector<uint8_t> flatten_binding_arrays(const Vector<uint8_t> &p_bytes) {
 		// Determine which word positions hold literal values (not IDs)
 		// and must be excluded from replacement — see _is_literal_operand.
 		// OpConstantComposite/OpSpecConstantComposite: words 3+ are constituent IDs (DO replace).
-		// OpSwitch: alternating case literals starting at word 3 (word 3=literal, 4=label, 5=literal...).
+		// OpSwitch: <id selector> <id default> then (<literal case> <id label>) pairs,
+		// so the literals sit at words 3, 5, 7, … ⚠ This read 2, 4, 6, … until
+		// RL-033 — which both froze the default label (harmless: label ids are never
+		// in this pass's maps) and left every case literal rewritable, i.e. the
+		// RL-028 defect still live inside its own fix. 64-bit selectors would make a
+		// case literal two words wide; Godot has none, and glslang does not emit
+		// them for GLSL.
 		const bool switch_alternating = (op == 251 /* OpSwitch */);
 		auto is_literal = [&](uint32_t p_i) {
 			if (switch_alternating) {
-				return p_i >= 2 && ((p_i - 2) % 2 == 0);
+				return p_i >= 3 && ((p_i - 3) % 2 == 0);
 			}
 			return _is_literal_operand(op, p_i);
 		};
