@@ -51,6 +51,7 @@ func _ready() -> void:
 	_setup_canvas_2d()
 	_setup_skeleton_mesh()
 	_setup_multimesh()
+	_setup_varying_stress()
 
 	print("[ShaderCoverage] Scene built. Rendering %d frames..." % FRAMES_TO_RENDER)
 
@@ -760,6 +761,41 @@ func _generate_noise_texture() -> NoiseTexture2D:
 	tex.width = 64
 	tex.height = 64
 	return tex
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# VARYING STRESS — custom spatial shader with 4 user varyings (gates RL-029)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Puts a custom spatial shader carrying four user varyings on screen.
+##
+## This is the coverage every earlier phase lacked: nothing else in this project
+## uses a custom spatial shader with varyings at all, so the mobile renderer's
+## inter-stage location ceiling on WebGPU was invisible to the gate. Four is the
+## worst case measured across CommonGrounds' shaders. If the ceiling regresses,
+## this fails loudly at shader compile with "Too many varyings used in shader".
+func _setup_varying_stress() -> void:
+	var shader: Shader = load("res://shaders/varying_stress.gdshader")
+	if shader == null:
+		errors.append("varying_stress.gdshader failed to load")
+		push_error("[ShaderCoverage] varying_stress.gdshader failed to load")
+		return
+
+	var mat := ShaderMaterial.new()
+	mat.shader = shader
+
+	# Two instances so the batching path sees them as well.
+	for i in 2:
+		var mesh_inst := MeshInstance3D.new()
+		var torus := TorusMesh.new()
+		torus.inner_radius = 0.35
+		torus.outer_radius = 0.8
+		mesh_inst.mesh = torus
+		mesh_inst.material_override = mat
+		mesh_inst.position = Vector3(3.0 + float(i) * 2.0, 1.2, -3.0)
+		add_child(mesh_inst)
+
+	print("  [OK] Varying stress: custom spatial shader with 4 user varyings x2")
 
 
 func _report_results() -> void:
