@@ -45,7 +45,7 @@ investigation before it can be classified).
 `isnan(color)` with `notEqual(color, color)`, presumably because Tint/WGSL does not give usable
 `isinf`. The NaN replacement is exact. The infinity replacement is **not**: `3.0e10` is 28 orders of
 magnitude below `FLT_MAX` (~3.4e38), so ordinary finite HDR values above 3e10 are now clamped to
-`vec4(100.0)` as if they were infinite. This changes glow/luminance behaviour on **every** RD
+`vec4(100.0)` as if they were infinite. This changes glow/luminance behavior on **every** RD
 backend, not just WebGPU, since these shaders are shared.
 **Disposition:** deferred — carried faithfully. Revisit in Phase 5; the honest fix is to gate the
 substitution behind the WebGPU backend, or raise the threshold to just below `FLT_MAX`.

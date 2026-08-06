@@ -15,6 +15,11 @@ Nothing in this repo is proven by reading it. A ported hunk that has not been co
   - **Does it render** → export a CommonGrounds scene and open it. Expensive; last.
 - ⚠ **A failed build's first error is the only real one.** C++ template/macro errors cascade — fix the
   top error and rebuild rather than reading the tail. Pipe to a file and read the head.
+- ⚠ **A successful build proves NOTHING about `.glsl` changes.** Godot's build only embeds shader
+  source into `*.glsl.gen.h`; glslang compiles it to SPIR-V at **runtime**, on first use. A syntax
+  error, a bad `layout(location=)` or a binding mismatch in a shader therefore survives a green build
+  and only surfaces when the scene that uses it is drawn. Shader edits reach *compiles* for free and
+  need **runs** to mean anything — say so rather than letting "the editor built" stand in for it.
 - **Lint through `pre-commit`, never a bare formatter.** `pre-commit` (4.6.1) and `ccache` are installed
   as of 2026-08-06, so Godot's `.pre-commit-config.yaml` runs as-is — `pre-commit run <hook-id> --files
   <path>` while porting, `--all-files` before a commit. ⚠ **`clang-format` is deliberately NOT installed

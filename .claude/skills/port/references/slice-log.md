@@ -85,13 +85,41 @@ after; see the build baselines in the `build-export` skill.
     the vanilla web baseline — the very build meant to prove the toolchain innocent.
   - `skeleton.glsl` looks coupled and is **not**: it renames the `pad1` push-constant field to
     `bone_offset` and adds it to the bone index, but mainline already sets `pad1 = 0`, so it reads
-    zero and behaviour is unchanged until `mesh_storage.cpp` lands in slice 2. Landed in Phase 1.
+    zero and behavior is unchanged until `mesh_storage.cpp` lands in slice 2. Landed in Phase 1.
 - ⚠ **Four additive paths are not in the phase-1 brief's import list** and needed their own calls:
   `GODOT_README.md`, `misc/dist/html/webgpu-full-size.html`, `.github/workflows/webgpu_tests.yml`,
   `.github/copilot-instructions.md`. Re-derive the full additive set from `port-surface.sh` rather
   than trusting the brief's enumeration.
 - ⚠ **BSD `xargs` has no `-a`.** Use `xargs -0 … < file` with `git diff --name-only -z` when checking
   out file lists of this size.
+- ⚠ **`port-surface.sh` does not measure progress and never will.** It diffs
+  `FORK_POINT`↔`WEBGPU_REF` against `FORK_POINT`↔`UPSTREAM_BASE` — three *tags*, no `HEAD` anywhere.
+  The counts are identical before and after an import, by design: it describes the fork delta, not
+  how much of it has landed. To check what is still missing, test the working tree directly:
+  ```bash
+  git diff --no-renames --name-only --diff-filter=A 4.6.2-stable webgpu/webgpu-4.6.2 \
+    | while read -r f; do [ -e "$f" ] || echo "$f"; done
+  ```
+  After Phase 1 that lists exactly 61 paths: 54 `webgpu_notes/`, 5 `webgpu_site/`,
+  `.github/copilot-instructions.md` (all dropped) and `GODOT_README.md` (deferred to slice 8).
+  1,447 − 61 = **1,386 additive files imported**.
+- ⚠ **`drivers/webgpu/` is NOT clang-format clean and must stay that way until Phase 5.** The
+  pre-commit config's global `.*thirdparty/.*` exclude covers the vendored trees, but not
+  `drivers/webgpu/` or `webgpu_tests/`. Running the formatter on it rewrites ~1,667/−1,009 lines,
+  2,421 of them in `rendering_device_driver_webgpu.cpp`. Doing that before the driver is adapted to
+  the 4.7.1 API would make `git diff` against `webgpu/webgpu-4.6.2` useless, and that diff is how
+  every adaptation gets reviewed and justified. Format once, mechanically, after Phase 4. Lint with
+  `--files` while porting, not `--all-files`.
+- ⚠ **SCons passes NO environment to the compiler.** Godot rebuilds `env["ENV"]` from scratch and
+  copies only what its `import_env_vars` option names. Any `FOO=bar scons …` is silently ignored by
+  every tool the build spawns. This is why ccache appeared broken for most of Phase 1 (it ran, but
+  without `HOME`, so it used `~/Library/Caches/ccache` instead of the configured 30G cache) and it
+  applies equally to `EM_CACHE` on web builds. Whenever a build-spawned tool ignores an environment
+  variable, check `import_env_vars` before anything else. Full recipe in the `build-export` skill.
+- ⚠ **A green build says nothing about the shader edits.** Godot embeds `.glsl` as source in
+  `*.glsl.gen.h` and compiles it with glslang at **runtime**. The 6 shader files landed in
+  `7d5f060` reached *compiles* for free and are genuinely unverified until something draws with
+  them — Phase 2's boot gate is the first real test. The `verification` rule now says this.
 
 _The first hand-port entry will be **rd-core** (slice 1); see the `port` skill for why that one goes
 first._

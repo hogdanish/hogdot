@@ -27,7 +27,7 @@ different default.
 | Tool | Version | Notes |
 | --- | --- | --- |
 | `scons` | brew | Godot's build system. |
-| `ccache` | 4.13.6 | ⚠ **NOT automatic — you must pass `cpp_compiler_launcher=ccache c_compiler_launcher=ccache`.** XDG-native; config at `~/.config/ccache/ccache.conf`, cache at `~/.cache/ccache`, cap raised to 30G there (5 GiB stock thrashes on an engine build). |
+| `ccache` | 4.13.6 | ⚠ **NOT automatic, and needs THREE things, not one** — see "Making ccache actually work" below. Config `~/.config/ccache/ccache.conf`, cache `~/.cache/ccache`, cap 30G. |
 | Vulkan SDK | LunarG, installed 2026-08-06 | Needed for `-lMoltenVK` at link time. Installed with `sh misc/scripts/install_vulkan_sdk_macos.sh` — headless, no sudo, lands in `~/VulkanSDK`. Outside Homebrew, so `brewup` does not cover it. |
 | `pre-commit` | 4.6.1 | The only way to run Godot's `.pre-commit-config.yaml`. |
 | `emcc` | 6.0.5 | Web targets only. `EM_CACHE` → `~/.cache/emscripten` (fish `conf.d/xdg-apps.fish`). |
@@ -41,19 +41,20 @@ diff nobody can review. **Always `pre-commit run`, never a bare `clang-format`.*
 
 ```bash
 # macOS editor — the binary CommonGrounds opens. ~4-5 min cold, seconds incremental.
-# ⚠ The two launcher options are what actually enable ccache. Without them the 30G
-#   cache stays empty and every build is uncached (measured 2026-08-06, the hard way).
+# The CCACHE_* exports + import_env_vars are all required; see "Making ccache work".
+export CCACHE_DIR="$HOME/.cache/ccache" CCACHE_CONFIGPATH="$HOME/.config/ccache/ccache.conf"
 scons platform=macos target=editor arch=arm64 -j"$(sysctl -n hw.ncpu)" \
-      cpp_compiler_launcher=ccache c_compiler_launcher=ccache
+      cpp_compiler_launcher=ccache c_compiler_launcher=ccache \
+      import_env_vars=HOME,CCACHE_DIR,CCACHE_CONFIGPATH
 # -> bin/godot.macos.editor.arm64
 
 # web export template, mainline (no WebGPU until the port lands)
-# ⚠ Set EM_CACHE explicitly. Fish's conf.d/xdg-apps.fish redirects it out of the
-#   Cellar, but Claude's Bash tool runs under zsh and never sees that export, so
-#   emcc silently caches its system libs in
-#   /opt/homebrew/Cellar/emscripten/<ver>/libexec/cache — which `brew autoupdate`
-#   deletes every 12 h, forcing a slow sysroot rebuild. Observed 2026-08-06.
-EM_CACHE="$HOME/.cache/emscripten" scons platform=web target=template_release
+# ⚠ EM_CACHE must be BOTH exported AND named in import_env_vars — exporting alone
+#   does nothing, because SCons does not pass the environment through (see below).
+#   Without it emcc caches its system libs inside the Homebrew Cellar, which
+#   `brew autoupdate` deletes every 12 h, forcing a slow sysroot rebuild.
+export EM_CACHE="$HOME/.cache/emscripten"
+scons platform=web target=template_release import_env_vars=HOME,EM_CACHE
 
 # web export template WITH WebGPU — only meaningful after the port
 scons platform=web target=template_release dlink_enabled=yes webgpu=yes opengl3=no threads=no
@@ -67,18 +68,20 @@ pre-commit run <hook-id> --files <path>      # scoped; much faster
 ```
 
 ⚠ **`codespell` rewrites your files in place.** Godot sets `write-changes = true` and the
-`en-GB_to_en-US` builtin in `pyproject.toml`, so a lint run silently converts en-GB spelling
-(`judgement`, `behaviour`, `colour`) to en-US in **any** tracked file, `.claude/skills/**` included.
-**Write US English in this repo** — the alternative is a permanently dirty tree. A "failed" codespell
-run that reports `files were modified by this hook` has already edited your working tree; re-run to
-confirm, don't hand-revert.
+`en-GB_to_en-US` builtin in `pyproject.toml`, so a lint run silently converts British/Canadian
+spelling to American in **any** tracked file, `.claude/skills/**` included — the `-our`/`-ise`/`-gement`
+endings all get rewritten. **Write US English in this repo** (Ethan dropped the global
+Canadian-English preference here for exactly this reason); the alternative is a permanently dirty
+tree. A "failed" codespell run reporting `files were modified by this hook` has **already edited your
+working tree** — re-run to confirm, don't hand-revert. This paragraph deliberately names no en-GB
+word, because codespell would rewrite the example too.
 
 ⚠ **`validate-codeowners` fails on any tracked file with no `.github/CODEOWNERS` entry.** `hogdot/`
 needed its own line (added `7d5f060`-era, commit `e2450de`). `.claude/**` passes only by accident —
 upstream's root catch-all `/*.*` compiles to a regex that matches any path whose first segment
 contains a dot. A new top-level directory without a dot in its name will fail this hook.
 
-⚠ **First `pre-commit run` is slow** — it initialises environments for **every** hook in the config, not
+⚠ **First `pre-commit run` is slow** — it initializes environments for **every** hook in the config, not
 just the one you asked for (clang-format, clang-tidy 21.1.6, ruff, mypy, codespell, check-jsonschema, plus
 local node/eslint/jsdoc/svgo and an xmlschema env) under `~/.cache/pre-commit`. Measured 2026-08-06: a
 single-file `clang-format` run took minutes on a cold cache and seconds after. Run it scoped to touched
@@ -121,13 +124,64 @@ skill and record it here the first time a build is handed over.
 
 `pre-commit run --all-files` on untouched 4.7.1 **passes every hook**. The snapshot is
 `.claude/work/plans/research/lint-baseline.txt`; the only two failures in it were hogdot's own files
-(codespell spelling, unowned `hogdot/`), both fixed in `e2450de`. **Any lint failure from here on is
-ours.** There is no upstream noise to subtract — judge future runs against green, not against a diff.
+(codespell spelling, unowned `hogdot/`), both fixed in `e2450de`. There is no upstream noise to
+subtract — judge future runs against green.
+
+⚠ **One deliberate exception, from Phase 1 onward: `drivers/webgpu/` is not clang-format clean.**
+The vendored trees are covered by the config's global `.*thirdparty/.*` exclude, but
+`drivers/webgpu/` and `webgpu_tests/` are not. Measured 2026-08-06, clang-format v21.1.7 would
+rewrite **~1,667 insertions / 1,009 deletions** across 6 files, 2,421 lines of it in
+`rendering_device_driver_webgpu.cpp` alone.
+
+**Do not format it until Phase 5.** Reformatting before the driver is adapted to the 4.7.1 API
+destroys the only cheap way to diff hogdot's driver against the fork's original, which is what the
+whole provenance scheme rests on. Format once, mechanically, as its own commit, after adaptation is
+done. Until then, lint scoped (`--files`) rather than `--all-files`, and treat a `drivers/webgpu`
+clang-format failure as expected.
+
+## Making ccache actually work (solved 2026-08-06 — three things, all required)
+
+⚠ **This bit everyone once and will bite again. `scons … cpp_compiler_launcher=ccache` alone does
+nothing measurable.** The root cause is that **SCons does not pass your environment to the processes
+it spawns.** Godot builds `env["ENV"]` from scratch and copies over *only* the variables named in its
+`import_env_vars` option (`SConstruct`, "Copy custom environment variables if set"). Anything you
+`export` in the shell is invisible to the compiler unless you list it.
+
+That produced a genuinely confusing failure: `verbose=yes` prints the compile line as
+`ccache clang++ -o … -c …`, so the launcher *is* applied and ccache *is* on the command line — but
+ccache then runs with no `HOME` and no XDG variables, silently falls back to macOS-native paths
+(`~/Library/Caches/ccache`, `~/Library/Preferences/ccache/ccache.conf`), never reads the 30G config,
+and reports nothing to a `ccache -s` that is looking at `~/.cache/ccache`. It is not broken, it is
+answering about a different cache.
+
+All three of these are needed:
+
+```bash
+export CCACHE_DIR="$HOME/.cache/ccache" CCACHE_CONFIGPATH="$HOME/.config/ccache/ccache.conf"
+scons … cpp_compiler_launcher=ccache c_compiler_launcher=ccache \
+        import_env_vars=HOME,CCACHE_DIR,CCACHE_CONFIGPATH
+```
+
+1. the launcher options (puts `ccache` on the command line),
+2. the `CCACHE_*` exports (ccache cannot find the XDG paths without `XDG_*`, which SCons strips),
+3. `import_env_vars` (without it, 1 and 2 never reach the compiler).
+
+**Verified 2026-08-06:** first build of one object → `Cacheable calls: 1/1, Misses: 1`; rebuilding
+the same object → `Hits: 1/2, Direct: 1/1`. `ccache -s` moving during a real build is the *only*
+acceptable proof — the printed command line is not.
+
+⚠ **The same trap applies to `EM_CACHE` for web builds**, and to any other environment variable a
+tool in the build reads. `EM_CACHE=… scons platform=web` **does not work**; it needs
+`import_env_vars=HOME,EM_CACHE`.
+
+⚠ **Stale caches from before this fix were trashed 2026-08-06**: 192 MB in `~/Library/Caches/ccache`
+and 34 MB in `/opt/homebrew/Cellar/emscripten/6.0.5/libexec/cache`. If `~/Library/Caches/ccache`
+reappears, something is building without `CCACHE_DIR` reaching it.
 
 ## Not yet established
 
-- ccache hit rate across a realistic port session, now that the launcher options are actually passed.
-  The 30G cap is still unjustified by measurement.
+- ccache hit rate across a realistic port session, and whether the 30G cap is justified. Now
+  measurable, since ccache demonstrably records.
 - Whether `platform=web` **links** on Emscripten 6.0.5 (compilation is confirmed; see status table).
 - The CommonGrounds handoff above.
 
