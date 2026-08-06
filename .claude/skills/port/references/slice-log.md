@@ -526,3 +526,23 @@ RL-005 open.
   mid-build may or may not have been scanned yet. The fix is cheap — run a second incremental build
   and check its `Compiling …` lines actually name the files you changed — but the first build's
   green cannot be trusted for those files.
+
+### phase-3 gate (web half) — 2026-08-06
+
+**Verification:** **compiles + links (web).** `scons platform=web target=template_debug webgpu=yes
+opengl3=no threads=no num_jobs=4` under `nice -n 10` — **0 compile errors**, 9m27s, producing
+`bin/godot.web.template_debug.wasm32.nothreads.zip` (9.68 MB). The link was the gate's optional tier
+and it succeeded, so Phase 4 inherits a template that already builds end to end.
+
+Every file this phase touched compiled for web, verified by name in the log rather than inferred from
+a green exit: all 5 `drivers/webgpu/` objects, `texture_storage.cpp`, `mesh_storage.cpp`,
+`light_storage.cpp`, `render_forward_mobile.cpp`, `renderer_canvas_render_rd.cpp`,
+`renderer_compositor_rd.cpp`, `effects/tone_mapper.cpp`.
+
+**Gotchas**
+- ⚠ **Grep for `<file>:<line>:<col>: error:`, not bare `error:`, in a `webgpu=yes` log.** The
+  `wgsl_precompile.py` step legitimately logs GLSL and Tint failures for variants it cannot translate
+  and the build stays green by design (already recorded in the `driver-fixup` entry). A bare
+  `grep -c 'error:'` over this log counts those and reports a healthy build as broken.
+- The `num_jobs=4` + `nice -n 10` discipline held: the machine stayed usable for the whole 9m27s while
+  a second (native, `-j10`) build and two editor runs happened alongside it.
