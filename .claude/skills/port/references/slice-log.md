@@ -121,5 +121,230 @@ after; see the build baselines in the `build-export` skill.
   `7d5f060` reached *compiles* for free and are genuinely unverified until something draws with
   them — Phase 2's boot gate is the first real test. The `verification` rule now says this.
 
-_The first hand-port entry will be **rd-core** (slice 1); see the `port` skill for why that one goes
-first._
+### driver-fixup — 2026-08-06 — `1c9e8e4` (+ `e47c69a` CODEOWNERS prerequisite)
+
+**Source:** adapts the `813189e` driver import to 4.7.1 rather than carrying a fork hunk; checklist
+from `.claude/work/plans/research/api-drift.md`.
+**Verification:** **compiles + links (web).** `scons platform=web target=template_debug webgpu=yes
+opengl3=no threads=no` builds all 5 `drivers/webgpu/` objects and all 5 RD-core objects and produces
+`bin/godot.web.template_debug.wasm32.nothreads.zip` (9.7 MB) — a full template link, which the Phase 2
+gate treats as a bonus tier rather than a requirement. emdawnwebgpu is genuinely linked: the shipped
+`wrapped.js` contains `navigator.gpu` / `requestAdapter`.
+⚠ **Nothing here has been run.** No browser has loaded this template; first boot is Phase 4's gate.
+Native regression re-checked after this commit: macOS editor rebuilds clean (0 errors, 0 warnings)
+and boots headless — see the flakiness note below before trusting a single boot run.
+
+**Adapted** (all of this is hogdot-authored adaptation, not fork code)
+- `rendering_context_driver_webgpu.{h,cpp}` — `DisplayServer::VSyncMode`/`VSYNC_ENABLED` →
+  `DisplayServerEnums::…` (3 sites). 4.7.1 split the enums into
+  `servers/display/display_server_enums.h`; the base header already includes it, so no new include.
+- `rendering_context_driver_webgpu.{h,cpp}` — the **9 new HDR-output pure virtuals**. Stubbed:
+  setters discard, getters return fixed SDR values (200.0f reference / 1000.0f max / 100.0f linear
+  scale, matching `RenderingContextDriverVulkan::Surface`'s defaults) and
+  `surface_get_hdr_output_max_value` returns **1.0f**.
+- `rendering_device_driver_webgpu.{h,cpp}` — `swap_chain_get_color_space` →
+  `COLOR_SPACE_REC709_NONLINEAR_SRGB`, `swap_chain_get_hdr_output_supported` → `false`.
+- `rendering_device_driver_webgpu.{h,cpp}` — `command_pipeline_barrier` gains the 7th parameter. Still
+  a no-op.
+- `rendering_device_driver_webgpu.{h,cpp}` — the **14 raytracing pure virtuals**, all stubs returning
+  invalid IDs / 0 / false, mirroring the driver's existing `buffer_get_device_address` treatment.
+- `rendering_device_driver_webgpu.cpp` — **two toolchain fixes, not API drift** (see gotchas):
+  `#include <cstdio>` for `snprintf`, and `_fence_work_done_callback` gaining Dawn's new
+  `WGPUStringView p_message` parameter.
+- `rendering_device_driver_webgpu.cpp` (`set_object_name`) — a `default:` case. 4.7.1's two new
+  `ObjectType` enumerators hit an exhaustive switch with no default and warn under `-Wswitch`.
+  ⚠ `api-drift.md` had claimed this needed no change because the fork "stubs `set_object_name` as a
+  no-op" — **it does not**; it propagates labels to Dawn through a real switch. That research file is
+  now corrected in place.
+- **8 include paths normalized by `validate-includes`** (`"webgpu_objects.h"` →
+  `"drivers/webgpu/webgpu_objects.h"`, and 7 like it). Applied by Godot's own lint hook, not by hand.
+  See the gotcha below for why these were kept when clang-format's are not.
+
+**Gotchas**
+- ⚠ **Four of `api-drift.md`'s open checklist items needed no work at all**, and each was cheap to
+  settle by grep. All four are now marked VERIFIED in that file. Do this *before* writing code:
+  `api_trait_get` already ends in `default: return RenderingDeviceDriver::api_trait_get(...)`;
+  `has_feature` already ends in `default: return false`; both `switch (uniform.type)` blocks already
+  have a `default:` (and `-Werror` is off by default anyway, `SConstruct:1032`); and
+  `rg 'workarounds' drivers/webgpu/` returns **nothing**, so the removed `Workarounds` struct was
+  never referenced.
+- ⚠ **Emscripten 6.0.5 drift is real and the roadmap's warning earned its place.** Dawn's
+  `WGPUQueueWorkDoneCallback` gained a `WGPUStringView message` parameter between the 5.0.0 the fork
+  shipped on and 6.0.5 — the fork's 3-arg callback no longer matches. **Adapting was right; falling
+  back to the pinned emsdk 5.0.0 would have been wrong.** hogdot is a long-term fork and must track a
+  current toolchain, the fix is 1 line, and the fork itself already chased one round of this
+  (`7f501e8 webgpu: fix Emscripten 5.x Dawn API changes`). Note the shape: the *other* Dawn callbacks
+  in this file (e.g. `_timestamp_readback_callback`) **already** take `WGPUStringView` — Dawn was
+  making the family consistent, so that is the pattern to copy when the next one drifts.
+- ⚠ **`snprintf` undeclared is a transitive-include regression, not a port bug.** The fork relied on
+  something else pulling in `<cstdio>`; on this toolchain nothing does. Expect more of this class from
+  a 4-year-younger libc++, and fix it with the include rather than reaching for the emsdk fallback.
+- ⚠ **`webgpu=yes` runs two host-side build steps before one driver object compiles** — a full native
+  build of `bin/tint_convert_cli` (~570 objects) via `tint_cli/build.sh`, then `wgsl_precompile.py`
+  shelling out to `glslangValidator` over 70 shader files. Neither respects SCons flags. Both are
+  written up in the `build-export` skill; the second one needs a Homebrew `glslang` that was not
+  installed until this slice.
+- ⚠ **The headless editor boot crashed once in 7 runs, at teardown, and did not reproduce.** Observed
+  2026-08-06 on `1c9e8e4`: signal 11 *after* `loading_editor_layout` reported DONE, preceded by
+  `ERROR: Parameter "singleton" is null. at: is_cmdline_mode (editor/editor_node.cpp:6618)` and
+  `WARNING: A Thread object is being destroyed without its completion having been realized`. Six
+  subsequent runs — three on fresh projects, three re-opening the *same* project that crashed — were
+  all clean. **Do not attribute this to the port without new evidence:** it is an EditorNode shutdown
+  race, and headless runs the **dummy** rendering driver, so no RD-core or WebGPU code executes at
+  all. Recorded because it happened on hogdot's binary and an unrecorded crash is worse than a noisy
+  one. ⚠ **Run the boot check more than once** — a single green run would have hidden this, and a
+  single red one would have caused a false regression hunt.
+- ⚠ **`validate-includes` is safe on `drivers/webgpu/`; `clang-format` still is not.** The phase-1
+  gotcha ("`drivers/webgpu/` is NOT clang-format clean and must stay that way until Phase 5") is about
+  *reviewability*: clang-format rewrites ~2,676 lines and destroys the diff against
+  `webgpu/webgpu-4.6.2` that every adaptation is justified from. `validate-includes` changed **8
+  lines**, all of them include-path normalizations required by Godot's own convention, and the diff
+  stays perfectly readable — so these were kept rather than reverted. ⚠ **Run
+  `SKIP=clang-format pre-commit run --files …` on these paths**, not a bare `--files`, which will
+  silently reformat everything you pass it.
+- ⚠ **The rest of `drivers/webgpu/` is still un-normalized.** Only the four files this slice touched
+  got the include fix, so the tree is deliberately half-done. Finish it in the same mechanical pass as
+  clang-format after Phase 4 — don't do it piecemeal.
+- ⚠ **A byte-identical rebuild is not a skipped rebuild.** After the include rewrite, SCons recompiled
+  both `.cpp` files in 3.4 s and then did **not** relink. That is correct: ccache produced
+  byte-identical objects, so SCons's content signature saw no downstream change. Don't read a
+  suspiciously fast "done building targets" as a build that failed to notice your edit — check the
+  `Compiling …` lines in the log.
+- ⚠ **The precompile step's Tint failures are non-fatal and the build stays green.** This run logged
+  11 GLSL failures and 13 Tint failures out of 193 modules and still emitted 141 entries. `error:`
+  lines in a `webgpu=yes` log are therefore **not** proof of a broken build — filter for
+  `<file>.cpp:<line>: error:` before concluding anything. The dropped variants (subpass `textureLoad`
+  on `input_attachment`, several `OpFunctionCall` type-mismatch validation failures) are real gaps to
+  chase in Phase 5, not now.
+
+### thirdparty-collision (supersedes the phase-1 collision decision) — 2026-08-06 — `ef55f41`
+
+**Source:** `f8b3cd0`
+**Verification:** compiles — the error below is gone and the vendored SPIRV-Tools objects build.
+
+⚠ **This entry corrects the `phase-1 imports` entry above.** That entry dropped
+`thirdparty/spirv-headers/include/spirv/unified1/spirv.hpp11` on the reasoning that mainline's copy
+was kept because "upstream code already compiles against it and its tree is the newer of the two."
+**The second half was wrong.** The first `scons platform=web webgpu=yes` build failed on it:
+
+```
+thirdparty/spirv-tools/source/opt/reflect.h:48:29: error: no member named 'OpMemberDecorateIdEXT' in 'spv::Op'
+thirdparty/spirv-tools/source/opcode.cpp:126:19: error: no member named 'OpSpecConstantDataKHR' in 'spv::Op'
+thirdparty/spirv-tools/source/opcode.cpp:157:19: error: no member named 'OpConstantSizeOfEXT' in 'spv::Op'
+```
+
+The **fork's** copy is the newer drop (5,681 lines vs 5,586). The Phase 1 entry's prediction that
+this fallback might be needed was right; its guess about which copy was newer was not.
+
+**Adapted**
+- Nothing — a straight `git show webgpu/webgpu-4.6.2:<path> > <path>`.
+
+**Gotchas**
+- ⚠ **Prove "newer" before choosing a collision winner; line count and tree recency are not
+  evidence.** The cheap, decisive check for a generated header is a set-difference over its
+  identifiers:
+  ```bash
+  rg -o '^\s+([A-Za-z][A-Za-z0-9_]*)\s*=' -r '$1' <file> | sort -u
+  comm -23 main_ids.txt fork_ids.txt   # anything here is a REMOVAL — the actual risk
+  ```
+  It returned empty (43 additions, 0 removals), which is what made the swap safe for mainline's
+  glslang — the other consumer of this header (`thirdparty/README.md:429`). Do this *before*
+  spending a build.
+- ⚠ **`git diff` deletions in a generated SPIR-V header are usually not removals.** This swap shows
+  `-10` lines, all of them `case Op::…:` labels moving position inside the generated
+  `HasResultAndType`/`*ToString` switches as new opcodes are inserted above them. Read the deleted
+  lines rather than trusting the `+/-` counts.
+- ⚠ **A collision file can compile fine on one platform and not another.** Mainline's copy built the
+  macOS editor and the vanilla web template without complaint through all of Phase 1 — SPIRV-Tools
+  is only ever compiled when `webgpu=yes`, so the collision could not surface until the first
+  WebGPU-enabled build. Expect the same shape from any other vendored-tree decision.
+
+### build-wiring — 2026-08-06 — `9a6dde4`
+
+**Source:** `69a9b2f dd41f4c`
+**Verification:** configures — `scons platform=web target=template_debug webgpu=yes opengl3=no
+threads=no --help` reads every SConscript clean and reports `module_glslang_enabled: True`; macOS
+configure unaffected; `pre-commit run --files` clean on all four files. Nothing compiled yet.
+
+A minimal subset of slices 5–6 pulled forward (see the sequencing refinement in the `port` skill) so
+the compiler can referee the driver adaptation instead of errors surfacing two phases late.
+
+**Adapted**
+- Nothing. All four hunks applied at unchanged anchors.
+
+**Dropped**
+- `platform/web/detect.py` — the `use_assertions` rework (fork `ae510cf`): `BoolVariable` → 4-state
+  `auto|no|yes|extra`, plus moving `--profiling-funcs` from `debug_features` to `debug_symbols`.
+  Mainline implemented the same feature itself in `ba3401f81f`; 4.7.1's `detect.py:44–156` is
+  **byte-identical** to the fork's version of that block. Nothing left to carry.
+
+**Gotchas**
+- ⚠ `detect.py`'s fork delta is now **fully resolved**, not partially. Besides the two WebGPU hunks
+  the brief named (`supported: ["webgpu"]` and the `env["webgpu"]` block) there is a third,
+  non-WebGPU hunk — `-sABORTING_MALLOC=0` (fork `dd41f4c`). It was carried here rather than left for
+  Phase 4: Emscripten already implies it under `ALLOW_MEMORY_GROWTH=1`, so it is documentation, and
+  taking it avoids stranding one line of an otherwise-finished file. **Phase 4 has no detect.py work
+  left.**
+- ⚠ **`scons … --help` is a cheap configure-only gate.** Godot's SConstruct runs platform detection
+  and every `config.py` before printing help, so it proves an option is declared, a module's
+  `can_build()` evaluates, and no SConscript raises — in seconds, with nothing compiled. Use it
+  before committing build-system changes rather than starting a real build to find a `KeyError`.
+- ⚠ `module_glslang_enabled: True` in that output is the **option's value**, not the outcome of
+  `can_build()`. It does not by itself prove the glslang fix worked; the proof is that the configure
+  completes at all, since the un-fixed `config.py` raises `KeyError: 'webgpu'` on web.
+
+### rd-core — 2026-08-06 — `c6e453e` (+ `3412db9` lint prerequisite)
+
+**Source:** `574b868 0961c8c 5722105 538f7a8 a0572ce 8887b77 d03b18d babf4f3 00f2cd3 967feb2 4b3a31b fd5f8c8 bdfa1de 4d9d3b6`
+**Verification:** **compiles + links + boots (native, dummy renderer).** `scons platform=macos
+target=editor arch=arm64` — 0 errors, 0 warnings, 4m02s, 133 MB binary.
+`-e --path <trivial project> --headless --quit-after 5` exits 0 after a full filesystem scan and
+editor-layout load. `pre-commit run --files` clean on all five files.
+⚠ **Headless boots the dummy rendering driver — this run exercises no RenderingDevice code at all.**
+Everything in this slice is therefore *compiled*, not *executed*. Say so; do not let a green
+headless boot stand in for a native RD regression check. The first real exercise is Phase 3's
+windowed Mobile-renderer gate.
+
+**Adapted**
+- `servers/rendering/rendering_device.cpp` (`_texture_initialize_layered`) — the fork's new function
+  calls the **6-arg** `command_pipeline_barrier`. 4.7.1 gave that virtual a trailing
+  `VectorView<AccelerationStructureBarrier>` for raytracing; landed as the 7-arg form with an empty
+  `{}` view, matching every mainline call site. This is the single real signature hazard
+  `research/upstream-churn.md` predicted for this slice, and the only one that materialised.
+- `servers/rendering/rendering_device_driver.h` (`ApiTrait`) — the fork inserts its 8 new traits
+  directly after `API_TRAIT_TEXTURE_OUTPUTS_REQUIRE_CLEARS`; 4.7.1 added 4 raytracing traits at
+  exactly that point. Landed **appended after** mainline's four instead, so no mainline enumerator is
+  renumbered. Safe: `ApiTrait` is never serialized and only ever used symbolically through
+  `api_trait_get()`.
+- `servers/rendering/rendering_device.cpp` (buffer-trait fast paths) — `research/upstream-churn.md`
+  warned these would need re-targeting because mainline split `buffer_update` into a wrapper plus a
+  private `_buffer_update(Buffer *, …)`. **It did not.** The split touches `buffer_update` only; all
+  five `buffer_create`/`_buffer_initialize` pairs (storage/texture/vertex/index/uniform) are intact
+  at their fork anchors and took the hunks verbatim. The five new public helpers went in after the
+  new `buffer_update` wrapper, before `driver_callback_add`, exactly as the fork placed them.
+
+**Dropped**
+- `servers/rendering/rendering_device.cpp` (`texture_update`) — a body-less
+  `if (gpu_pixel_size > 0) { /* comment */ }`. Zero semantics; leftover scaffolding. See ledger
+  **RL-007**. The two working lines of that hunk landed unchanged.
+- `servers/rendering/rendering_device.cpp` — two pure-whitespace hunks in `texture_create` (a blank
+  line removed after `// Create.`, another before `return id;`). Diff noise with no content; carrying
+  them would only widen the delta against mainline at the next rebase-forward. Same class as ledger
+  RL-004.
+- `servers/rendering/rendering_device.cpp` — the fork's `#include "core/os/os.h"`. Mainline 4.7.1
+  already includes it (`rendering_device.cpp:39`); the hunk is a no-op, not an omission.
+
+**Gotchas**
+- ⚠ **The fork's `_end_frame` staging-unmap loop is a native-backend hazard, and its own comment is
+  wrong about it.** It claims the loop "is a no-op on Vulkan/Metal"; it is not, and the map/unmap
+  counts do not balance — staging blocks are mapped exactly once at creation and their `data_ptr` is
+  cached for life. Carried faithfully; full analysis and evidence in ledger **RL-005**. This is the
+  first thing to suspect if the native editor misbehaves after this slice.
+- ⚠ **`port-surface.sh --conflicts` says "conflict", not "hard".** Four of this slice's five files
+  (`rendering_device.h`, `rendering_device_graph.cpp/.h`, and most of `rendering_device.cpp`) applied
+  at unchanged anchors despite mainline's very large churn, because mainline's growth here is
+  raytracing plumbing that sits *beside* the fork's hunks rather than through them. Read the churn
+  report's per-file verdict before budgeting time for a "39-conflict" file.
+- ⚠ **`mainline already did it` is a real category in this slice too**, not just in `detect.py`.
+  Check every fork hunk against 4.7.1 before writing it: the `core/os/os.h` include above was already
+  there, and the 7-arg barrier form was already at every mainline call site.

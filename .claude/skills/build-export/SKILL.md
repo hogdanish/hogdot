@@ -22,6 +22,49 @@ restructure a session around a wait that is shorter than a single reference read
 ⚠ **`bin/` did not exist and `arch=arm64` is required** — plain `scons platform=macos` picks a
 different default.
 
+## Parallelism — this machine has 24 GB, and the default `-j` will exhaust it
+
+⚠ **Always pass `num_jobs=4` and `nice -n 10` for `webgpu=yes` web builds.** SCons auto-detects 10
+cores and defaults to **`-j9`**. Nine concurrent `em++` processes on the Tint / SPIRV-Tools
+translation units drove this machine to 100 % RAM and made it unusable (measured 2026-08-06, Ethan
+reported it mid-session). ⚠ **The tell is a pegged machine with quiet fans** — that is swap thrash,
+which is I/O-bound, so it never spins the fans up. Do not read a quiet fan as a healthy build.
+
+Which knobs actually reach the spawned processes — the distinction that matters, because Godot's build
+spawns tools through scripts:
+
+| Knob | Reaches children? | Why |
+| --- | --- | --- |
+| `num_jobs=N` / `-j N` | ✅ | SCons *is* the spawner, so it caps the count directly. |
+| `nice -n 10 scons …` | ✅ | Niceness is inherited across `fork`/`exec`, so it covers every child. |
+| Environment variables | ❌ | The `import_env_vars` trap below — name them or they are silently dropped. |
+
+⚠ **`EMCC_CORES` is an environment variable**, so emcc's *own* internal parallelism is not covered by
+`num_jobs` and is dropped unless named in `import_env_vars`. It is the knob that matters during a
+ThinLTO link, where emcc — not SCons — decides how many backend threads to run.
+
+## LTO — possible here, but not worth it before Phase 5
+
+⚠ **LTO is OFF by default and was never the cause of any memory problem here.** `lto` defaults to
+`"none"` (`SConstruct:183`) and only becomes `"auto"` when `production=yes` is passed
+(`SConstruct:681`). Nothing in Phases 1–2 passed either.
+
+- On web, `lto=auto` resolves to **`thin`**, not `full` (`platform/web/detect.py:173-174`; it falls
+  back to `full` only below Emscripten 4.0.9, which does not apply at 6.0.5). ThinLTO's peak memory is
+  a small multiple of one module, not the whole program — the ~30 GB figure in Godot's docs is for
+  monolithic desktop `-flto`. **A production web template with LTO does fit in 24 GB.**
+- ⚠ **"Push through once so it caches" does not apply to LTO.** ccache caches *object compilations*;
+  LTO does its work at **link** time, which ccache never caches. Every relink pays it again, forever.
+  What does cache is the ordinary compile of Tint + SPIRV-Tools (~1,200 files) — and that happens with
+  `lto=none` anyway.
+- **Therefore: keep `lto=none` for all port iteration; spend LTO exactly once, on the
+  `production=yes` template handed to CommonGrounds.**
+
+⚠ **Linker choice is not a lever.** Web output has no alternative linker — `wasm-ld` is part of the
+LLVM/Emscripten toolchain and `emcc` drives it; `mold`/`lld` swaps do not apply to wasm. On macOS the
+link is seconds inside a ~4-minute build, so it is not the bottleneck, and `mold` has no Mach-O
+support anyway.
+
 ## The toolchain (installed and verified 2026-08-06)
 
 | Tool | Version | Notes |
@@ -31,6 +74,28 @@ different default.
 | Vulkan SDK | LunarG, installed 2026-08-06 | Needed for `-lMoltenVK` at link time. Installed with `sh misc/scripts/install_vulkan_sdk_macos.sh` — headless, no sudo, lands in `~/VulkanSDK`. Outside Homebrew, so `brewup` does not cover it. |
 | `pre-commit` | 4.6.1 | The only way to run Godot's `.pre-commit-config.yaml`. |
 | `emcc` | 6.0.5 | Web targets only. `EM_CACHE` → `~/.cache/emscripten` (fish `conf.d/xdg-apps.fish`). |
+| `glslang` | brew 16.5.0 | ⚠ **Hard dependency of `webgpu=yes` only**, installed 2026-08-06. Provides `glslangValidator` on `$PATH`, which `drivers/webgpu/wgsl_precompile.py` shells out to. Without it the build dies at `wgsl_precompiled.gen.h` — see the WGSL precompile section below. |
+
+⚠ **`webgpu=yes` needs a host toolchain that no other target needs.** Two host-side steps run before a
+single driver object compiles, and both fail in ways that look nothing like a port problem:
+1. `drivers/webgpu/tint_cli/build.sh` compiles a **native** `bin/tint_convert_cli` (~570 objects, 13 MB).
+   It is a separate build inside the build and respects none of SCons's flags.
+2. `wgsl_precompile.py` then shells out to `glslangValidator` for 70 shader files and pipes the SPIR-V
+   through `tint_convert_cli` to generate `drivers/webgpu/wgsl_precompiled.gen.h`.
+
+⚠ **`glslangValidator: Permission denied` means "not installed", not a permissions problem.** `execvp`
+reports `EACCES` rather than `ENOENT` when it walks a `$PATH` containing an unsearchable entry (this
+machine has a stale `/pkg/env/global/bin`), and Python surfaces that as `PermissionError`. Worse,
+`wgsl_precompile.py` catches only `FileNotFoundError`, so the real message never reaches you. Check
+`command -v glslangValidator` before believing the errno.
+
+⚠ **Homebrew's glslang is 16.5.0; Godot vendors 16.1.0** (`thirdparty/README.md:417`,
+`thirdparty/glslang/glslang/build_info.h`). Unlike the `clang-format` trap this is **not** a reason to
+uninstall it: the two never meet in one process, and the precompiled table is keyed on a hash of the
+SPIR-V blob, so a version difference costs cache hits, never correctness. It does mean the table may be
+entirely dead — ledger **RL-009**, to be measured in Phase 5. The Vulkan SDK also ships a `glslang`
+(16.4.0, `~/VulkanSDK/1.4.357.0/macOS/bin/glslang`), but only under the new name, not
+`glslangValidator`.
 
 ⚠ **`clang-format` is deliberately NOT installed and must stay that way.** Godot pins
 `mirrors-clang-format` **v21.1.7** in `.pre-commit-config.yaml` and pre-commit fetches that exact version
@@ -56,8 +121,23 @@ scons platform=macos target=editor arch=arm64 -j"$(sysctl -n hw.ncpu)" \
 export EM_CACHE="$HOME/.cache/emscripten"
 scons platform=web target=template_release import_env_vars=HOME,EM_CACHE
 
-# web export template WITH WebGPU — only meaningful after the port
+# web export template WITH WebGPU — the Phase 2 command, run 2026-08-06.
+# ⚠ num_jobs=4 + nice are REQUIRED here: the default -j9 exhausts 24 GB on the
+#   Tint/SPIRV-Tools sources. See "Parallelism" above.
+# ⚠ Needs `glslangValidator` on $PATH (brew glslang) or it dies generating
+#   wgsl_precompiled.gen.h, long before any driver object compiles.
+export EM_CACHE="$HOME/.cache/emscripten" CCACHE_DIR="$HOME/.cache/ccache" \
+       CCACHE_CONFIGPATH="$HOME/.config/ccache/ccache.conf"
+nice -n 10 scons platform=web target=template_debug webgpu=yes opengl3=no threads=no \
+     num_jobs=4 import_env_vars=HOME,CCACHE_DIR,CCACHE_CONFIGPATH,EM_CACHE
+
+# the eventual release template (adds dlink_enabled; spend LTO only here, via production=yes)
 scons platform=web target=template_release dlink_enabled=yes webgpu=yes opengl3=no threads=no
+
+# ⚠ configure-only smoke test — seconds, compiles nothing. Godot runs platform
+#   detection and every module config.py before printing help, so this catches an
+#   undeclared option, a config.py KeyError or a broken SConscript for free.
+scons platform=web target=template_debug webgpu=yes opengl3=no threads=no --help
 
 # unit tests: build them in, then run the suite
 scons platform=macos target=editor arch=arm64 tests=yes && bin/godot.macos.editor.arm64 --test

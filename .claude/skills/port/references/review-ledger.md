@@ -81,3 +81,79 @@ option. Recorded in the clean-mods slice-log entry.
 semantic content. Carried for faithfulness, but it is pure diff noise against mainline and a
 candidate to drop at the next rebase-forward.
 **Disposition:** deferred — carried faithfully.
+
+### RL-005 — 2026-08-06 — bug
+**Where:** `servers/rendering/rendering_device.cpp` (`_end_frame`, the upload-staging unmap loop)
+**Found while:** slice 1, rd-core
+**What:** The fork adds an unconditional
+`for (…) driver->buffer_unmap(upload_staging_buffers.blocks[i].driver_id);` at the top of
+`_end_frame`, and its own comment asserts this "is a no-op on Vulkan/Metal since buffer_map()
+returns GPU-visible memory". **It is not a no-op and the map/unmap counts do not balance.** A
+staging block is mapped exactly **once**, at block creation (`rendering_device.cpp:896`,
+`block.data_ptr = driver->buffer_map(block.driver_id)`), and its `data_ptr` is then cached and
+used for the block's entire lifetime (e.g. `rendering_device.cpp:1133`, `:2612`).
+`RenderingDeviceDriverVulkan::buffer_unmap` is `vmaUnmapMemory` (`rendering_device_driver_vulkan.cpp:2109`),
+and the matching `buffer_create` for `MEMORY_ALLOCATION_TYPE_CPU` does **not** pass
+`VMA_ALLOCATION_CREATE_MAPPED_BIT` (`:1975–1992`) — so VMA's map counter reaches zero on the very
+first `_end_frame`, every cached `data_ptr` dangles, and every subsequent frame unmaps below zero.
+This is a native-backend regression introduced by a WebGPU-motivated hunk, on the shared path.
+**Disposition:** deferred at port time — carried faithfully in the `rd-core` commit so the diff
+matches its source. Escalate to a fix if the Phase 2 boot gate reproduces it; the likely shape is
+gating the loop behind a driver trait (or routing it through the already-defaulted no-op
+`RenderingDeviceDriver::buffer_flush`) rather than calling `buffer_unmap` on every backend.
+
+### RL-006 — 2026-08-06 — smell
+**Where:** `servers/rendering/rendering_device_driver.h` (`buffer_create_with_data`)
+**Found while:** slice 1, rd-core
+**What:** The new `buffer_create_with_data()` mirrors `buffer_create()` but silently drops its
+`uint64_t p_frames_drawn` parameter. `frames_drawn` is what a driver needs to size and phase a
+`BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT` ring (cf. `buffer_persistent_map_advance(BufferID, uint64_t)`),
+and `storage_buffer_create` can set that flag *and* supply initial data — in which case the fork's
+fast path takes the with-data overload and the driver never learns the frame index. No current
+backend trips it (only WebGPU sets `API_TRAIT_BUFFER_CREATE_MAPPED_AT_CREATION`, and persistent
+buffers are not created with data on the paths hogdot exercises), but the API as declared cannot
+express the combination.
+**Disposition:** deferred — carried faithfully. Add the parameter at the next rebase-forward, or
+have `RenderingDevice` skip the fast path when `BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT` is set.
+
+### RL-007 — 2026-08-06 — smell
+**Where:** `servers/rendering/rendering_device.cpp` (`texture_update`, format-promotion preamble)
+**Found while:** slice 1, rd-core
+**What:** The fork's hunk ends with a body-less conditional whose only content is a comment:
+`if (gpu_pixel_size > 0) { /* Format was promoted by the driver (e.g. R8→R32Float on WebGPU). */ }`.
+It has no semantics — leftover scaffolding from an earlier revision of the hunk.
+**Disposition:** **not carried** — the empty block was dropped; the two lines that do the work
+(`gpu_pixel_size` / `staging_pixel_size`) landed unchanged. Recorded in the `rd-core` commit body
+and slice-log entry per the drop rule.
+
+### RL-008 — 2026-08-06 — smell
+**Where:** `servers/rendering/rendering_device.cpp` (`shader_compile_binary_from_spirv`, `GODOT_DUMP_SPIRV`)
+**Found while:** slice 1, rd-core
+**What:** The CI shader-dump hunk names its output `<shader_name>.<stage>.spv`, so two shaders that
+share a name in different directories overwrite each other, and every `FileAccess::open` failure is
+swallowed silently — a dump that produced nothing looks identical to one that produced everything.
+`(p_spirv[i].shader_stage < 5)` is also a bare magic number against `SHADER_STAGE_*`; it still
+selects the right five names on 4.7.1 (the new raytracing stages sort after `COMPUTE` and fall
+through to the `"spv"` default), so it is correct today but not self-maintaining.
+**Disposition:** deferred — carried faithfully. Debug-only path behind an env var; revisit in Phase 5
+when the fork's CI shader-validation flow is actually run.
+
+### RL-009 — 2026-08-06 — bug
+**Where:** `drivers/webgpu/wgsl_precompile.py` (`precompile_wgsl`, `compute_spv_hash`) and the
+`wgsl_precompiled.gen.h` lookup in `rendering_device_driver_webgpu.cpp`
+**Found while:** slice 1, driver-fixup (first `webgpu=yes` build)
+**What:** The precompiled SPIR-V→WGSL table is keyed by **a hash of the SPIR-V blob**
+(`entries.append((compute_spv_hash(spv_data[key]), wgsl))`). That SPIR-V is produced at *build* time
+by an **external** `glslangValidator` taken from `$PATH`, while at *run* time the engine produces
+SPIR-V with the **vendored** glslang compiled into it (`thirdparty/glslang`, 16.1.0 per
+`thirdparty/README.md:417`). Nothing checks that the two are the same version, or even compares them.
+Any byte of divergence changes the hash, every lookup misses, and the engine silently falls back to
+the runtime `spirv_preprocess` + Tint path. **The failure mode is invisible**: the build is green,
+the table is generated, the rendering is correct, and the entire optimization is simply dead — which
+is the worst possible shape for a performance feature. This machine currently has 16.5.0 on `$PATH`
+against a vendored 16.1.0, so the table is *probably already dead*.
+**Disposition:** deferred — correctness is unaffected (a miss is a slow path, not a wrong shader), so
+this is not a Phase 2 blocker and the port stays faithful. **Measure the hit rate in Phase 5** before
+trusting any WebGPU startup-time benchmark; the honest fixes are to key the table on
+(shader path, variant, defines) instead of a SPIR-V hash, or to have the build assert that the
+external glslang's version matches `GLSLANG_VERSION_*` from `thirdparty/glslang/glslang/build_info.h`.

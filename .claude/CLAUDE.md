@@ -46,9 +46,9 @@ Always-on rules (a shared cost — keep the set lean): **`context-scale`** (surv
 
 ## Toolchain
 
-`scons` · `ccache` 4.13.6 (automatic — pass nothing) · `pre-commit` 4.6.1 · `emcc` 6.0.5. All installed and verified 2026-08-06.
+`scons` · `ccache` 4.13.6 · `pre-commit` 4.6.1 · `emcc` 6.0.5 · `glslang` 16.5.0 (⚠ `webgpu=yes` only). All installed and verified 2026-08-06.
 
-⚠ **`clang-format` is deliberately absent** — Godot pins v21.1.7 through `pre-commit`, which fetches it itself. Always `pre-commit run`, never a bare `clang-format`. ⚠ **No build has ever been run here**; every command is documented-not-observed until someone runs it. Details, and the Emscripten version decision record, are the **`build-export`** skill.
+⚠ **`ccache` is NOT automatic** — SCons passes the compiler no environment, so it needs the launcher option *plus* exported `CCACHE_DIR`/`CCACHE_CONFIGPATH` *plus* `import_env_vars`. ⚠ **`clang-format` is deliberately absent** — Godot pins v21.1.7 through `pre-commit`, which fetches it itself; always `pre-commit run`, never a bare `clang-format`. ⚠ **Pass `num_jobs=4` on `webgpu=yes` web builds** — the default `-j9` exhausts this machine's 24 GB. Every command, the Emscripten decision record and the LTO analysis are the **`build-export`** skill.
 
 ## Keep it current
 
