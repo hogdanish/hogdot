@@ -90,10 +90,19 @@ machine has a stale `/pkg/env/global/bin`), and Python surfaces that as `Permiss
 `command -v glslangValidator` before believing the errno.
 
 ⚠ **Homebrew's glslang is 16.5.0; Godot vendors 16.1.0** (`thirdparty/README.md:417`,
-`thirdparty/glslang/glslang/build_info.h`). Unlike the `clang-format` trap this is **not** a reason to
-uninstall it: the two never meet in one process, and the precompiled table is keyed on a hash of the
-SPIR-V blob, so a version difference costs cache hits, never correctness. It does mean the table may be
-entirely dead — ledger **RL-009**, to be measured in Phase 5. The Vulkan SDK also ships a `glslang`
+`thirdparty/glslang/glslang/build_info.h`). `wgsl_precompile.py` shells out to the **Homebrew** one at
+build time; the engine compiles GLSL→SPIR-V with the **vendored** one at runtime. The precompiled table
+is keyed on a hash of the SPIR-V blob, so the two producing different blobs means the table misses.
+
+⚠⚠ **An earlier version of this file said that skew "costs cache hits, never correctness". That was
+wrong, and the phase-4 boot gate disproved it.** A miss is not a graceful degradation: it falls through
+to live Tint, and live Tint **cannot translate a write-only storage buffer at all** — WGSL has no
+`write` access mode for the storage address space. Skeleton and particles compute shaders fail, and the
+engine traps on `unreachable` before the main loop. See ledger **RL-020** (the blocker) and **RL-009**
+(the dead table, now its suspected cause). Until that is resolved, treat the two glslang versions as a
+**correctness** dependency, not a cache-efficiency one — and do not "just uninstall" the Homebrew copy
+either, since `wgsl_precompile.py` needs `glslangValidator` on `$PATH` by that exact name and the
+vendored build does not provide it. The Vulkan SDK also ships a `glslang`
 (16.4.0, `~/VulkanSDK/1.4.357.0/macOS/bin/glslang`), but only under the new name, not
 `glslangValidator`.
 

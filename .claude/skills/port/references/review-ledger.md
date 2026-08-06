@@ -308,3 +308,54 @@ texture is a placeholder, not a real VRS target) is not written anywhere in the 
 **Disposition:** deferred — carried faithfully and unmodified. Metal reports VRS support on this
 machine, so the branch is not even taken here; a backend without VRS is where this would first
 matter.
+
+### RL-018 — 2026-08-06 — smell
+**Where:** `scene/resources/compressed_texture.cpp:243` (`CompressedTexture2D::get_image`)
+**Found while:** slice 7, core-odds
+**What:** The fork rewrites `get_image()` to reload the image from disk instead of calling
+`RS::texture_2d_get()`, because on single-threaded WASM that starts an async GPU readback which
+returns zeros and never completes. The reasoning is sound, but the new path is **not gated** — no
+`WEB_ENABLED`, no `WEBGPU_ENABLED` — so it changes behavior on every platform. Two consequences the
+comment does not mention: desktop now pays a file open plus a full image decode where it previously
+did a GPU readback, and, more importantly, `get_image()` no longer reflects the *texture* — it
+reflects the *asset on disk*. Anything that modified the texture through RenderingServer will read
+back stale content. The GPU path survives only as a fallback for textures with no `path_to_file`.
+**Disposition:** deferred — carried faithfully. It is correct for the platform this fork exists to
+serve, and the desktop editor is not hogdot's product. Revisit if the editor misbehaves around
+runtime-modified textures.
+
+### RL-019 — 2026-08-06 — bug (latent)
+**Where:** `scene/resources/compressed_texture.cpp:249-262` (same hunk as RL-018)
+**Found while:** slice 7, core-odds
+**What:** The hand-rolled `.ctex` header parse drops two checks the real loader performs 200 lines
+above it: the `version > FORMAT_VERSION` guard, and the `FORMAT_BIT_STREAM` test that decides whether
+`p_size_limit` applies (it hardcodes `0`). A `.ctex` written by a newer Godot is therefore fed
+straight to `load_image_from_file` instead of being rejected with "file is too new". In practice it
+degrades rather than corrupts — a bad parse yields an invalid or empty image and the code falls
+through to the GPU path — so no user-visible defect is claimed today. It becomes real the moment the
+texture format version is bumped, which is exactly when nobody will be looking here.
+**Disposition:** deferred — the skip count itself was verified correct against 4.7.1's writer before
+carrying (magic + 8 × `get_32()`), which is the part that would have silently corrupted data.
+
+### RL-020 — 2026-08-06 — **blocker**
+**Where:** `drivers/webgpu/spirv_preprocess.cpp` (absence) + `drivers/webgpu/wgsl_precompile.py`
+**Found while:** phase-4 boot gate, first browser run
+**What:** Write-only storage buffers cannot be translated. Tint turns SPIR-V `NonReadable` (GLSL
+`writeonly`) into `ptr<storage, T, write>`, which is invalid WGSL — the storage address space permits
+only `read` and `read_write`. Every skeleton and particles compute shader fails, their pipelines and
+uniform sets then fail on a null shader, and the engine hits a WASM `unreachable` trap before the
+main loop. ~150 occurrences from one cause.
+
+This is **not** a dropped port hunk and **not** upstream drift: `writeonly` counts are identical in
+`skeleton.glsl` / `particles.glsl` / `particles_copy.glsl` at 4.6.2 and 4.7.1, and the fork has no
+`NonReadable` handling either — it strips `NonWritable` (the read-only direction) in three places and
+nothing else. The fork evidently never hit this at runtime, which points at its precompiled-WGSL
+table absorbing these shaders. See **RL-009**, now upgraded from a perf question to this blocker's
+suspected cause: the table contains particles entries yet these shaders still reached live Tint, so
+the lookup missed.
+**Disposition:** open, **fix in Phase 5** — this is the phase-5 gate's first task, ahead of any
+rendering-correctness work. Two candidate fixes, cheapest first: (1) pin `wgsl_precompile.py` to
+Godot's vendored glslang so the table's SPIR-V hashes match the runtime's and the entries hit;
+(2) add a `NonReadable`-stripping pass to `spirv_preprocess.cpp` so live translation produces
+`read_write` — the robust general fix, and the only one that helps a shader absent from the table.
+(1) is a hypothesis test; (2) is the real repair. Expect to need both.

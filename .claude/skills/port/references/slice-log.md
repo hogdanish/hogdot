@@ -546,3 +546,133 @@ a green exit: all 5 `drivers/webgpu/` objects, `texture_storage.cpp`, `mesh_stor
   `grep -c 'error:'` over this log counts those and reports a healthy build as broken.
 - The `num_jobs=4` + `nice -n 10` discipline held: the machine stayed usable for the whole 9m27s while
   a second (native, `-j10`) build and two editor runs happened alongside it.
+
+---
+
+## Phase 4 — web platform & first boot (2026-08-06)
+
+### slice 5 — `platform-web` — `880c7fc`
+
+**Verification:** compiles (web + macOS), links, and **the export-plugin hunk is proven at runtime**
+(the exported `index.html` carries `renderingDriver":"webgpu"`).
+
+Four files; `detect.py` and `drivers/SCsub` were already fully resolved in Phase 2 and needed nothing.
+
+- ⚠ **`display_server_web.cpp/.h` was predicted to be the hardest remaining file and it was not.**
+  The churn report was right that a textual patch fails — the fork's ctor block sits between two
+  heavily `DisplayServerEnums::`-renamed regions — but the block itself is byte-identical to 4.6.2,
+  so all five hunks re-attached by hand in one pass. The only mechanical work was requalifying
+  `MAIN_WINDOW_ID` to `DisplayServerEnums::MAIN_WINDOW_ID`.
+- ⚠ **Two Phase-3 carry-over warnings closed with zero work, and both were worth the 30 seconds to
+  check.** (1) `drivers/webgpu/` contains **no** `DisplayServer::` references at all, so the
+  "`DisplayServerEnums::` prefix needed" warning had no target. (2) `window_set_vsync_mode` did not
+  drift in any way that matters: `RenderingContextDriver::window_*` are **non-virtual base helpers**
+  that already take `DisplayServerEnums::VSyncMode`, and `RenderingContextDriverWebGPU` overrides only
+  the `surface_*` virtuals. **Re-derive a carry-over warning before acting on it** — both of these
+  were written from a diff, and the code disagreed.
+- ⚠ **The fork wraps the GLES3 block in `{ }` without re-indenting the body.** clang-format rejects
+  that. Indented here; `pre-commit run` is clean on all four files. Behaviourally identical.
+- `export_plugin.cpp`: no logical conflict, but mainline split `can_export` and renamed
+  `SplashStretchMode`, so both hunks were re-inserted by hand.
+
+### slice 6 remainder — `build-remainder` — `5829f06`
+
+**Verification: applied only.** GitHub Actions does not run locally and nothing simulated it.
+
+Adapted, not reapplied: the fork's two matrix entries predate mainline's `arch=wasm32`/`wasm64` split,
+so copying them verbatim would have left the WebGPU jobs defaulting their architecture while every
+sibling pinned it. Both take `arch=wasm32`. Action-version bumps and the `tests=no` removal needed
+nothing — they live in the shared `steps`/`env` blocks the fork never touched.
+
+### slice 7 — `core-odds` — `57be40c`
+
+**Verification:** compiles + links, **both platforms**, all four files verified by name in both logs.
+
+All four anchors were byte-identical to 4.6.2 despite mainline churn as large as +638/−535
+(`display_server.cpp`) and +227/−101 (`main.cpp`). The churn report's "CLEAN-ISH" verdicts were
+accurate across the board.
+
+- ⚠ **`compressed_texture.cpp` hand-parses the `.ctex` header, so it had to be checked against the
+  writer rather than assumed.** It skips magic + 8 × `get_32()`; 4.7.1 still writes exactly version,
+  width, height, data format, mipmap limit and three reserved words. Verified against this tree's own
+  reader before carrying. Ledger RL-018/RL-019 record what is wrong with the hunk regardless.
+- **Dropped: `scene/resources/2d/tile_set.cpp`** — the fork's entire delta is one added blank line.
+  Zero functional content, not carried, file stays at mainline.
+- **Still deliberately not carried: `renderer_viewport.cpp`** (inert `{ }` stub, dropped in `f503e72`).
+
+### test-project adaptation — `b55db0b`
+
+- ⚠ **`webgpu_tests/test_project` never set `rendering_method.web`, so a web export ran
+  gl_compatibility and did not touch WebGPU at all.** The boot gate would have gone green and proven
+  nothing. Set to `mobile`. This is the third time this class of trap has appeared (Phase 3's
+  `--rendering-method mobile`, and it will recur on the Phase 5 demo ladder) — **check the effective
+  renderer before believing any WebGPU result.**
+- ⚠ **Do NOT install hogdot templates into `~/Library/Application Support/Godot/export_templates/
+  4.7.1.stable/`.** That directory already holds Ethan's stock Godot 4.7.1 templates, and hogdot
+  reports the same `VERSION_FULL_CONFIG` (the `.custom_build` suffix is `VERSION_BUILD` and takes no
+  part in template lookup). Installing there silently repoints every other 4.7.1 project on this
+  machine. Use `custom_template/{debug,release}` instead.
+- ⚠ **`custom_template` paths are resolved relative to the PROJECT directory, not the repo root**,
+  because `--path` chdirs first. `bin/…zip` fails with "Custom debug template not found";
+  `../../bin/…zip` works, and stays committable where an absolute path would not.
+- Noted, not fixed: a preset that fails validation segfaults the headless editor during teardown
+  (`is_cmdline_mode`, "Parameter singleton is null") *after* correctly printing the export error.
+  Mainline 4.7.1 behavior on a path this port does not touch.
+
+### phase-4 gate — 2026-08-06 — **PARTIALLY MET, 2 of 3 clauses**
+
+**Verification: runs (browser), aborts before the main loop.**
+
+| Gate clause | Result |
+| --- | --- |
+| Boots in Chrome | ✅ `Godot Engine v4.7.1.stable.custom_build.5829f0669` |
+| **Creates the WebGPU device** | ✅ `WebGPU 1.0 - Forward Mobile - Using Device #0: Unknown - WebGPU Device` |
+| Reaches the running main loop | ❌ WASM `unreachable` trap; the shell shows "unreachable" over the boot splash |
+
+The first two clauses are the ones this phase's porting work was responsible for, and both passed on
+the first attempt — the display server, the context driver, the device handshake and the JS-side
+`preinitializedWebGPUDevice` import all work end to end. The third fails for a single, fully
+identified reason that is **not** in this phase's slices.
+
+**Root cause — one failure, repeated ~150 times.** Every failing shader is a compute shader (stage 4)
+and every message is the same:
+
+```
+Tint SPIR-V→WGSL failed: error: var: vars in the 'storage' address space must have
+access 'read' or 'read-write'
+  %dst_vertices:ptr<storage, DstVertexData, write> = var undef @binding_point(0, 2)
+```
+
+WGSL permits only `read` or `read_write` in the storage address space; `write` is not a legal access
+mode. Tint is faithfully translating SPIR-V `NonReadable` (GLSL `writeonly`) into something WGSL
+cannot express. Skeleton and particles compute shaders fail, every dependent
+`compute_pipeline_create`/`uniform_set_create` then fails on a null shader, and the engine traps.
+
+**What it is not, established rather than assumed:**
+- **Not upstream drift.** `writeonly` counts in `skeleton.glsl`, `particles.glsl` and
+  `particles_copy.glsl` are **identical** at 4.6.2 and 4.7.1. The fork compiled these exact shaders.
+- **Not a missing port hunk.** `spirv_preprocess.cpp` handles `NonWritable` (read-only) in three
+  places and has **no `NonReadable` handling anywhere** — in the fork either. There is no hunk to
+  have dropped.
+
+**What it points at — ledger RL-009, upgraded from perf to blocker.** `wgsl_precompiled.gen.h` exists
+(1.1 MB, 141 entries) and **does contain particles entries**, yet these shaders still reached runtime
+Tint — so the table lookup missed. The table is generated at build time by `wgsl_precompile.py`
+shelling out to Homebrew `glslangValidator` **16.5.0**, while at runtime Godot compiles GLSL→SPIR-V
+with its own **vendored glslang 16.1.0**. Different SPIR-V blob → different hash → miss → live Tint →
+invalid WGSL → abort. The miss is proven by observation; the version skew as its cause is a strong
+hypothesis and is the first thing Phase 5 should test (pin `wgsl_precompile.py` to the vendored
+glslang and see whether the table starts hitting).
+
+⚠ **This retires a claim in the `build-export` skill that was actively misleading** — it said the
+glslang version difference "costs cache hits, never correctness". A dead table does not degrade
+gracefully here: it turns a cache miss into a hard abort, because nothing else in the pipeline can
+produce valid WGSL for a write-only storage buffer. Corrected in the same change as this entry.
+
+**Gotchas**
+- ⚠ **`caddy file-server` must be killed explicitly at session end** (`pkill -f "caddy file-server"`);
+  a backgrounded one outlives the turn that started it.
+- ⚠ **`read_console_messages` is nearly useless against this failure without a negative pattern.**
+  Each Tint error embeds a full WGSL disassembly, so 615 messages are ~150 real events and any
+  positive filter returns page after page of struct dumps. Probe the live page with `javascript_tool`
+  instead — `document.body.innerText` gave the actual outcome ("unreachable") in one call.
