@@ -241,31 +241,52 @@ bool CompressedTexture2D::has_alpha() const {
 }
 
 Ref<Image> CompressedTexture2D::get_image() const {
-	// Reload image from disk when path is available.
-	// On WebGPU (single-threaded WASM), RS::texture_2d_get() triggers an async
-	// GPU readback that returns zeros and never completes synchronously.
-	// Loading from disk is always correct and avoids the GPU round-trip.
+#ifdef WEB_ENABLED
+	// Reload the image from disk when a path is available.
+	//
+	// On the web, RS::texture_2d_get() triggers an async GPU readback that
+	// returns zeros and never completes synchronously — there is no way to block
+	// the browser's event loop waiting for the map to fire. Reading the source
+	// asset back is the only synchronous answer available.
+	//
+	// ⚠ Gated to WEB_ENABLED deliberately. This path does NOT return the
+	// *texture*, it returns the *asset on disk*, so anything that modified the
+	// texture through RenderingServer reads back stale content — and on desktop
+	// it also trades a GPU readback for a file open plus a full image decode.
+	// The fork shipped this ungated; hogdot restores mainline behaviour
+	// everywhere the synchronous readback actually works. See RL-018.
 	if (!path_to_file.is_empty()) {
 		Ref<FileAccess> f = FileAccess::open(path_to_file, FileAccess::READ);
 		if (f.is_valid()) {
 			uint8_t header[4];
 			f->get_buffer(header, 4);
 			if (header[0] == 'G' && header[1] == 'S' && header[2] == 'T' && header[3] == '2') {
-				f->get_32(); // version
-				f->get_32(); // width
-				f->get_32(); // height
-				f->get_32(); // data format
-				f->get_32(); // mipmap limit
-				f->get_32(); // reserved
-				f->get_32(); // reserved
-				f->get_32(); // reserved
-				Ref<Image> img = load_image_from_file(f, 0);
-				if (img.is_valid() && !img->is_empty()) {
-					return img;
+				// ⚠ Mirror _load_data()'s checks. Skipping them fed a too-new or
+				// non-streamed .ctex straight to load_image_from_file(). See RL-019.
+				const uint32_t version = f->get_32();
+				if (version <= FORMAT_VERSION) {
+					f->get_32(); // width
+					f->get_32(); // height
+					f->get_32(); // data format
+					f->get_32(); // mipmap limit
+					f->get_32(); // reserved
+					f->get_32(); // reserved
+					f->get_32(); // reserved
+
+					// The size limit stays 0: _load_data()'s FORMAT_BIT_STREAM test
+					// only ever *clears* a caller-supplied limit, and get_image()
+					// wants the full image, so there is nothing to gate here.
+					Ref<Image> img = load_image_from_file(f, 0);
+					if (img.is_valid() && !img->is_empty()) {
+						return img;
+					}
+				} else {
+					WARN_PRINT(vformat("Compressed texture file is too new: %s.", path_to_file));
 				}
 			}
 		}
 	}
+#endif
 	if (texture.is_valid()) {
 		return RS::get_singleton()->texture_2d_get(texture);
 	}
