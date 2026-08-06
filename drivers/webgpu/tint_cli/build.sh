@@ -19,8 +19,18 @@ SPIRV_HEADERS_DIR="thirdparty/spirv-headers"
 BUILD_DIR="drivers/webgpu/tint_cli/.build"
 SHIM_DIR="drivers/webgpu/tint_cli"
 
-JOBS=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
+JOBS="${JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
 CXX="${CXX:-c++}"
+
+# Wait until fewer than $JOBS background compiles are running.
+# `wait -n` needs bash >= 4.3; macOS ships bash 3.2, where it fails instantly and
+# leaves the caller with no throttle at all (i.e. ~1200 concurrent compilers).
+# This poll works on every bash.
+throttle() {
+    while (( $(jobs -r | wc -l) >= JOBS )); do
+        sleep 0.05
+    done
+}
 
 # Parse args.
 CLEAN=false
@@ -138,12 +148,9 @@ while IFS= read -r src; do
     objname="${objname%.cpp}.o"
     obj="$BUILD_DIR/spirv_tools/$objname"
     SPIRV_TOOLS_OBJS+=("$obj")
-    # Run in parallel via background jobs.
+    # Run in parallel via background jobs, bounded by $JOBS.
+    throttle
     compile_one "$src" "$obj" "c++17" "${SPIRV_TOOLS_INCLUDES[@]}" &
-    # Limit parallelism.
-    if (( $(jobs -r | wc -l) >= JOBS )); then
-        wait -n 2>/dev/null || true
-    fi
 done < <(find "$SPIRV_TOOLS_DIR/source" -name '*.cpp' -not -name '*test*' -not -name '*_test.cpp' -not -path '*/test/*' | sort)
 wait
 
@@ -163,10 +170,8 @@ while IFS= read -r src; do
     objname="${objname%.cc}.o"
     obj="$BUILD_DIR/tint/$objname"
     TINT_OBJS+=("$obj")
+    throttle
     compile_one "$src" "$obj" "c++20" "${TINT_INCLUDES[@]}" "${TINT_DEFINES[@]}" &
-    if (( $(jobs -r | wc -l) >= JOBS )); then
-        wait -n 2>/dev/null || true
-    fi
 done < <(find "$TINT_DIR/src/tint" -name '*.cc' \
     -not -name '*_test.cc' \
     -not -name '*_bench*.cc' \
