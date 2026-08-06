@@ -15,8 +15,27 @@ const REPORT_PATH := "user://shader_coverage_report.json"
 var frame_count := 0
 var errors: Array[String] = []
 var shader_count := 0
+var _hold := false
+
+
+## Whether to keep the scene on screen after reporting instead of quitting.
+## Pass `?hold` in the URL on web, or `-- --hold` natively. Without this the
+## engine exits the moment the report is written and the canvas goes black,
+## which makes the render impossible to inspect or screenshot.
+func _wants_hold() -> bool:
+	if "--hold" in OS.get_cmdline_user_args():
+		return true
+	if OS.has_feature("web"):
+		# ⚠ Ask for a number, not a boolean. `JavaScriptBridge.eval` hands a JS `true`
+		# back as a Variant of type FLOAT, so a `typeof(res) == TYPE_BOOL` guard
+		# silently rejects every hold request.
+		var res: Variant = JavaScriptBridge.eval("location.search.indexOf('hold') >= 0 ? 1 : 0", true)
+		return res != null and bool(res)
+	return false
+
 
 func _ready() -> void:
+	_hold = _wants_hold()
 	print("[ShaderCoverage] Starting comprehensive shader coverage test...")
 	print("[ShaderCoverage] Building scene with all rendering features...")
 
@@ -40,6 +59,10 @@ func _process(_delta: float) -> void:
 	frame_count += 1
 	if frame_count >= FRAMES_TO_RENDER:
 		_report_results()
+		if _hold:
+			print("[ShaderCoverage] Holding for inspection — the scene keeps rendering.")
+			set_process(false)
+			return
 		get_tree().quit(0 if errors.is_empty() else 1)
 
 
