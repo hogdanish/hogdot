@@ -48,7 +48,9 @@ void RendererCompositorRD::blit_render_targets_to_screen(DisplayServerEnums::Win
 
 	BlitPipelines blit_pipelines = _get_blit_pipelines_for_format(RD::get_singleton()->screen_get_framebuffer_format(p_screen));
 
-	RD::DrawListID draw_list = RD::get_singleton()->draw_list_begin_for_screen(p_screen);
+	// WebGPU/Dawn requires the swapchain to have a defined clear value; an
+	// undefined load op leaves the canvas translucent in the browser compositor.
+	RD::DrawListID draw_list = RD::get_singleton()->draw_list_begin_for_screen(p_screen, Color(0, 0, 0, 1));
 	ERR_FAIL_COND(draw_list == RD::INVALID_ID);
 
 	const RD::ColorSpace color_space = RD::get_singleton()->screen_get_color_space(p_screen);
