@@ -676,3 +676,85 @@ produce valid WGSL for a write-only storage buffer. Corrected in the same change
   Each Tint error embeds a full WGSL disassembly, so 615 messages are ~150 real events and any
   positive filter returns page after page of struct dumps. Probe the live page with `javascript_tool`
   instead — `document.body.innerText` gave the actual outcome ("unreachable") in one call.
+
+---
+
+## Phase 5 — runtime debugging (2026-08-06)
+
+### The native shader-translation harness (build this first, every session)
+
+Phase 4 debugged shaders through a 40 s web build plus a browser round trip. That is unnecessary:
+**`drivers/webgpu/tint_cli/build.sh` produces `bin/tint_convert_cli`, a native macOS binary that runs
+the exact same preprocessing passes plus Tint.** Reproducing RL-020 with it took seconds. Everything
+below assumes it exists.
+
+```bash
+JOBS=6 nice -n 10 ./drivers/webgpu/tint_cli/build.sh     # ~570 objects; minutes cold, seconds warm
+```
+
+⚠ **`build.sh` was a machine hazard until `e8d8611`** — its throttle used `wait -n` (bash >= 4.3) and
+macOS ships bash 3.2, so it spawned ~1,200 concurrent compilers. See RL-021. `wgsl_precompile.py`
+runs this script from inside every `webgpu=yes` SCons build, so phase 4 already paid that cost.
+
+**Getting a whole corpus in one command.** `wgsl_precompile.py` assembles 193 SPIR-V modules from the
+engine's 70 registered shader files and pipes them all through `tint_convert_cli`; run it standalone
+against a scratch output and every translation failure is named on stderr:
+
+```bash
+python3 drivers/webgpu/wgsl_precompile.py . /tmp/scratch.gen.h 2>&1 | rg "Tint error for"
+```
+
+This is the regression check for any change to a preprocessing pass or to Tint: capture the failure
+list before and after and `comm` them. It caught both of this phase's fixes as strict improvements
+(11 → 10 → 9) and would have caught a regression instantly.
+
+**Three scratch tools worth rebuilding** (kept out of the repo deliberately — they are debugging aids,
+not engine code; recipes here so they can be recreated in one turn):
+- `tint_bisect.cpp` — same pipeline as `tint_cli/main.cpp` but takes a **13-character 0/1 mask**
+  selecting which preprocessing passes run, plus `TINT_BISECT_DUMP=<path>` to write the post-pass
+  SPIR-V. This is how `flatten_binding_arrays` was identified as the pass whose output triggered
+  RL-023. Compile with `-Idrivers/webgpu/tint_cli -Idrivers/webgpu` + the Tint includes and link
+  against every `.o` under `tint_cli/.build` except `cli/main.o`.
+- `spv_tool.cpp` — `spvValidateBinary` + `spvBinaryToText` over the SPIRV-Tools objects already in
+  `.build`. Answers "did a pass produce invalid SPIR-V?" directly. ⚠ For RL-023 the answer was **no** —
+  the module validated cleanly and Tint still crashed, which is what redirected the search into Tint.
+- A patched copy of the failing Tint source, compiled into the same link with the stock object
+  excluded. Printing `type->FriendlyName()` at the assert gave `spirv.image<...>` in one run and
+  turned a guessing game into a five-minute diagnosis. ⚠ **Do this early.** Three fixture-based
+  guesses beforehand all passed and proved nothing.
+
+⚠ **`git stash` around a shader-pass change is the cheapest before/after** — stash, rebuild the CLI
+(3 files), run the corpus, pop, rebuild. Two minutes for a real regression baseline.
+
+### RL-020 — write-only storage buffers (fixed, `23f4c20`)
+
+New pass `strip_writeonly_storage` drops `NonReadable` from StorageBuffer variables and from the
+members of types StorageBuffer pointers point at. ⚠ **It must not touch storage images**: WGSL storage
+textures *do* have a `write` access mode and it is their default, so a blanket strip breaks every
+`writeonly image2D`. Both directions are covered by fixtures. Runs **before** `infer_readonly_storage`
+so a buffer that is neither read nor written still ends up `read`.
+
+⚠ **RL-009's glslang-skew hypothesis was never needed.** The ledger nominated "pin `wgsl_precompile.py`
+to the vendored glslang" as the cheap first test; the durable repair (a preprocessing pass) turned out
+to be just as cheap and fixes shaders absent from the table too. RL-009 returns to a perf-only concern.
+
+⚠ **The precompiled table is not rebuilt when a preprocessing pass changes.** SCons does not list
+`spirv_preprocess.cpp` as a dependency of `wgsl_precompiled.gen.h`, so after editing a pass the table
+still holds WGSL produced by the *old* passes. Harmless here (the entries were already stale from the
+hash skew), but it is a live correctness trap the moment the table starts hitting — see RL-009.
+
+### RL-023 — Tint aborts on the main scene shader (fixed, `7c6029c`)
+
+`TINT_ASSERT(tex_ty)` in `spirv/reader/lower/texture.cc`, translating
+`scene_forward_mobile.glsl:color_pass:frag`. Full mechanism in the ledger. Two things to carry forward:
+
+- ⚠ **It is 4.6.2→4.7.1 drift, and the check that proved it is one command:**
+  `git cat-file -e 4.6.2-stable:<path>` and the same against `webgpu/webgpu-4.6.2`.
+  `area_lights_inc.glsl` exists on neither. **Run that check before assuming a dropped hunk** — it is
+  the fastest way to separate "the fork never had this" from "we lost something".
+- Area lights are turning into the recurring 4.7.1 theme: RL-010 (shadow atlas), RL-023 (LTC helpers).
+  Expect the next one there too.
+
+Carried as `thirdparty/tint/patches/0007-*`, following the fork's existing six-patch convention.
+⚠ **Patch the vendored source *and* regenerate the `.patch` file *and* add the README table row** —
+`patches/README.md` is how the next Tint re-vendor knows what to reapply.

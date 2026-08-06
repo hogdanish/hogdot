@@ -367,3 +367,96 @@ Godot's vendored glslang so the table's SPIR-V hashes match the runtime's and th
 (2) add a `NonReadable`-stripping pass to `spirv_preprocess.cpp` so live translation produces
 `read_write` — the robust general fix, and the only one that helps a shader absent from the table.
 (1) is a hypothesis test; (2) is the real repair. Expect to need both.
+
+### RL-021 — 2026-08-06 — bug
+**Where:** `drivers/webgpu/tint_cli/build.sh` (the SPIRV-Tools and Tint compile loops)
+**Found while:** phase 5, standing up the native `tint_convert_cli`
+**What:** The parallelism throttle is `if (( $(jobs -r | wc -l) >= JOBS )); then wait -n 2>/dev/null
+|| true; fi`. **`wait -n` needs bash >= 4.3.** macOS ships bash **3.2.57** as `/bin/bash` and there is
+no Homebrew bash on this machine, so `wait -n` fails instantly with `invalid option`, `2>/dev/null ||
+true` swallows it, and the throttle becomes a no-op — the script then spawns one background `c++` per
+source file with no bound at all (~1,200 concurrent compilers on a 24 GB machine). This is **not
+hypothetical**: `wgsl_precompile.py` invokes `build.sh` from inside every `webgpu=yes` SCons build, so
+it already ran that way in phase 4. `set -e` does not catch it either, because the failures are in
+background jobs.
+**Disposition:** **fixed** in the same commit as RL-020's repair — replaced with a portable
+`throttle()` poll (`while (( $(jobs -r | wc -l) >= JOBS )); do sleep 0.05; done`) that works on bash
+3.2 and 5.x alike, and made `JOBS` overridable from the environment so the build can be capped below
+`hw.ncpu`. Trivial and obviously correct; leaving it would have made every future `webgpu=yes` build
+a machine hazard.
+
+### RL-022 — 2026-08-06 — bug
+**Where:** `drivers/webgpu/tint_cli/build.sh` (link step, `[[ -f "$obj" ]] && LINK_OBJS+=…`)
+**Found while:** phase 5, same build
+**What:** Compile failures are **silently discarded**. `compile_one` runs as a background job, so
+`set -e` cannot see it; `wait` with no arguments always returns 0; and the link step then filters the
+object list with `[[ -f "$obj" ]]`, dropping any object that failed to compile. A build that lost
+half of Tint would still print `Built: bin/tint_convert_cli` and exit 0, failing only if the missing
+code happened to be referenced. Observed here as `199 objects` / `368 objects` against SCsub source
+lists of 389 / 824 — that particular gap is the `find` filters, not failures, but nothing in the
+script distinguishes the two cases.
+**Disposition:** deferred — not blocking (the binary links and runs correctly), and a real fix means
+collecting per-job exit statuses, which is more than a drive-by change. Revisit if a `webgpu=yes`
+build ever produces a `tint_convert_cli` that misbehaves rather than failing.
+
+### RL-023 — 2026-08-06 — **blocker**
+**Where:** `thirdparty/tint/src/tint/lang/spirv/reader/lower/texture.cc`
+(`State::Process` / `ConvertUserCall`), triggered by
+`servers/rendering/renderer_rd/shaders/area_lights_inc.glsl`
+**Found while:** phase 5, first browser run after RL-020's repair
+**What:** Tint aborts with `texture.cc:606 internal compiler error: TINT_ASSERT(tex_ty)`
+translating `scene_forward_mobile.glsl:color_pass:frag` — the main scene shader, so nothing renders.
+Root cause, established by instrumenting a scratch copy of Tint: `ConvertUserCall` forks a function
+when a call site converts one of its handle parameters, retargets that call, and destroys the
+original **only if no remaining usage is a Call**. An original kept alive solely by *another dead
+original* survives with its parameters still typed `spirv.image`. Its texture builtins are still
+reachable through `ir.Instructions()`, so the lowering picks them up and asserts on a non-texture
+type. Observed exactly twice, on `fetch_ltc_lod` and
+`fetch_ltc_filtered_texture_with_form_factor` — the LTC helpers, which take `texture2D`/`sampler2D`
+parameters and are called from more than one site.
+
+⚠ **This is 4.6.2→4.7.1 drift, not a port defect.** `area_lights_inc.glsl` does not exist at
+`4.6.2-stable` and does not exist on the fork (`git cat-file -e` on both). Area lights are a 4.7.1
+addition — the same feature RL-010 flagged on the shadow-atlas side — and they are the first Godot
+shaders to pass sampler/texture handles through functions called from several sites. GodotWebGPU
+could not have hit this.
+**Disposition:** **fixed** — vendored Tint patch `0007-drop-unreachable-functions-in-texture-lowering.patch`,
+following the existing six-patch convention in `thirdparty/tint/patches/`. It sweeps functions
+unreachable from any entry point after `UpdateValues()`, before the builtin worklist is collected.
+Measured over the 193 SPIR-V modules `wgsl_precompile.py` produces: Tint failures 10 → 9, nothing
+newly failing. This is a genuine upstream Tint bug and the best of the seven patches to report
+upstream; recorded as such in `thirdparty/tint/patches/README.md`.
+
+### RL-024 — 2026-08-06 — bug
+**Where:** the SPIR-V preprocessing chain (pass not yet isolated), seen via
+`drivers/webgpu/wgsl_precompile.py`
+**Found while:** phase 5, building a native failure corpus with `bin/tint_convert_cli`
+**What:** Three shader variants fail *SPIR-V validation* after preprocessing, before Tint even
+starts: `effects/tonemap.glsl:bicubic:frag`, `tonemap.glsl:bicubic_1d_lut:frag` and
+`effects/taa_resolve.glsl:default:comp`, all with
+`OpFunctionCall Argument <id> ...'s type does not match Function <id> ...'s parameter type`.
+A preprocessing pass is therefore rewriting either a function signature or its call sites but not
+both — `split_combined_samplers` and `flatten_binding_arrays` are the two that rewrite handle types,
+and both must keep `OpTypeFunction`, `OpFunctionParameter` and `OpFunctionCall` in step. Producing
+invalid SPIR-V is a defect regardless of what Tint does with it.
+**Disposition:** deferred — these three take the live path and fail there too, so they are real, but
+they are effects shaders rather than anything on the boot path. Isolate with the `tint_bisect` recipe
+in the slice log (pass mask + `spv_tool --val`) once the gate scenes render.
+
+### RL-025 — 2026-08-06 — bug
+**Where:** `drivers/webgpu/wgsl_precompile.py` (`SHADER_REGISTRY`)
+**Found while:** phase 5, native corpus run
+**What:** The registry's per-shader define sets have drifted against 4.7.1. Eleven of the 193 modules
+fail at **glslangValidator**, before any WebGPU code is involved — `octmap_downsampler`,
+`octmap_filter`, `octmap_roughness`, `ssao_blur`, `ssil_blur`, `subsurface_scattering`,
+`cluster_render`, `giprobe_write`, plus three `SKIP: (no stage)` entries whose stage names the
+registry no longer matches. The errors are structural, e.g. `ssao_blur`:
+`'sample_blurred_wide' : no matching overloaded function found` followed by `'' : missing #endif` —
+the assembled source is not a valid translation unit because a `#define` the 4.7.1 shader now needs
+is absent from the registry entry. ⚠ **Silent by construction:** `precompile_wgsl` counts the
+failures and carries on, the build stays green, and the shader simply never enters the table.
+**Disposition:** deferred — the table is a build-time optimization, and after RL-020's repair a
+missing entry is a slow path rather than a wrong one. Fix alongside RL-009 (the whole table is
+currently dead from the glslang hash skew, so re-deriving the registry only pays off once the lookup
+hits). ⚠ Do not treat a green `webgpu=yes` build as evidence the registry is current — grep the build
+log for `glsl failures`.
