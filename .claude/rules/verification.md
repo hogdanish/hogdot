@@ -15,8 +15,10 @@ Nothing in this repo is proven by reading it. A ported hunk that has not been co
   - **Does it render** → export a CommonGrounds scene and open it. Expensive; last.
 - ⚠ **A failed build's first error is the only real one.** C++ template/macro errors cascade — fix the
   top error and rebuild rather than reading the tail. Pipe to a file and read the head.
-- ⚠ **`pre-commit` and `clang-format` are NOT installed on this machine.** Godot's
-  `.pre-commit-config.yaml` is therefore not runnable as-is; either install it or match surrounding
-  style by hand, and do not claim a change is lint-clean when nothing linted it.
+- **Lint through `pre-commit`, never a bare formatter.** `pre-commit` (4.6.1) and `ccache` are installed
+  as of 2026-08-06, so Godot's `.pre-commit-config.yaml` runs as-is — `pre-commit run <hook-id> --files
+  <path>` while porting, `--all-files` before a commit. ⚠ **`clang-format` is deliberately NOT installed
+  standalone**; that config pins v21.1.7 and pre-commit fetches it, so a formula copy would reformat the
+  whole engine. Don't claim a change is lint-clean when nothing linted it.
 - Report failures with the actual compiler output. A build that broke is a result, not a setback to
   paper over.

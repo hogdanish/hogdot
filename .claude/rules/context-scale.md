@@ -16,4 +16,9 @@ before reaching anything useful.
 - **Bound history commands.** `git log` over this repo is effectively unbounded — always pass a path,
   a range, and `--oneline` (`git log --oneline 4.6.2-stable..webgpu/webgpu-4.6.2 -- <path>`).
 - ⚠ `rendering_device_driver_webgpu.cpp` is **360 KB** and `spirv_preprocess.cpp` **81 KB**. Read them
-  by `offset`/`limit` around a located symbol, never whole.
+  by `offset`/`limit` around a located symbol, never whole. The same goes for `doc/` — the in-tree
+  `doc/classes/RenderingDevice.xml` is **215 KB**; `rg` for the member, then read around the hit.
+- ⚠ **The fork's 50 imported documents are 1.2 MB** (`.claude/skills/godotwebgpu/references/`) — roughly a
+  third of a context window. **Always enter them through `references/index.md`**, which says which single
+  file answers your question and which are superseded. Never open the tree, never read two when one will
+  do, and `rg` across `notes/`+`site/` when you don't know which file to pick.
