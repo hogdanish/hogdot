@@ -14,6 +14,15 @@ layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 #endif
 
+// `isnan` and `isinf` do not exist in WGSL, so a shader using them cannot be
+// translated for the WebGPU backend at all. These are the substitutions the fork
+// already established for `copy.glsl` and `motion_vectors.glsl`, with an infinity
+// threshold just under FLT_MAX (3.4028235e38) rather than the 3.0e10 used there —
+// see ledger RL-001. Nothing here needs the lower threshold: every value these
+// guard is clamped to 65504.0 immediately afterwards.
+#define VEC4_IS_NAN(m_v) notEqual((m_v), (m_v))
+#define VEC4_IS_INF(m_v) greaterThan(abs(m_v), vec4(3.0e+38))
+
 #include "../cluster_data_inc.glsl"
 #include "../light_data_inc.glsl"
 #include "../oct_inc.glsl"
@@ -801,8 +810,8 @@ void main() {
 	}
 
 	vec4 final_density = vec4(total_light * scattering + emission, total_density);
-	bool is_reprojected_density_invalid = any(isnan(reprojected_density)) || any(isinf(reprojected_density));
-	bool is_final_density_invalid = any(isnan(final_density)) || any(isinf(final_density));
+	bool is_reprojected_density_invalid = any(VEC4_IS_NAN(reprojected_density)) || any(VEC4_IS_INF(reprojected_density));
+	bool is_final_density_invalid = any(VEC4_IS_NAN(final_density)) || any(VEC4_IS_INF(final_density));
 
 	if (is_final_density_invalid) {
 		final_density = is_reprojected_density_invalid ? vec4(0.0) : reprojected_density;
@@ -853,7 +862,7 @@ void main() {
 		prev_z = z;
 
 		vec4 final_fog = vec4(fog_accum.rgb, fog_accum.a);
-		bool is_final_fog_invalid = any(isnan(final_fog)) || any(isinf(final_fog));
+		bool is_final_fog_invalid = any(VEC4_IS_NAN(final_fog)) || any(VEC4_IS_INF(final_fog));
 		final_fog = is_final_fog_invalid ? vec4(0.0) : final_fog;
 		final_fog = clamp(final_fog, vec4(0.0), vec4(65504.0));
 		imageStore(fog_map, fog_pos, final_fog);
