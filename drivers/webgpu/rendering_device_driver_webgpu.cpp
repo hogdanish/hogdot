@@ -200,6 +200,14 @@ static bool _wgsl_binding_is_referenced(const char *p_wgsl, const char *p_decl) 
 // feature either, so the desktop backends this GLSL was written for are not reliably
 // interpolating it in the first place.
 //
+// The alternative — binding a *non-filtering* sampler for these taps, which is legal on
+// a depth texture and would keep textureSampleLevel semantics plus clamp-to-edge for
+// free — was evaluated and rejected (RL-031). It costs one more sampler binding, and
+// this adapter reports `maxSamplersPerShaderStage` = 16 against a scene shader that
+// already declares 18 and only fits because `narrow_visibility()` masks them per stage
+// (RL-026). Spending a sampler to save a clamp is the wrong trade on the one resource
+// with no headroom.
+//
 // Both WGSL-producing paths must call this — shader_create_from_container for the
 // reflection modules and _create_module_with_spec_constants for the specialized ones.
 // Skipping either leaves a module whose bindings disagree with the layout built from
@@ -284,8 +292,20 @@ static void _rewrite_depth_texture_samples(char **r_wgsl) {
 			const String &tex = args[0];
 			const String &coord = args[2];
 			String level = sf.argc >= 4 ? args[3] : String("0i");
-			String repl = "textureLoad(" + tex + ", vec2<i32>((" + coord +
-					") * vec2<f32>(textureDimensions(" + tex + ", " + level + "))), " + level + ")";
+			// ⚠ The clamp is not cosmetic (RL-031). The call being replaced sampled
+			// through SAMPLER_LINEAR_CLAMP, whose clamp-to-edge address mode is
+			// load-bearing: Godot's *directional* blocker search adds an unbounded
+			// screen-space disk offset directly in UV space
+			// (`scene_forward_lights_inc.glsl`), so taps near a PSSM split edge leave
+			// [0,1] by construction. `textureLoad` has no address mode and WGSL
+			// defines an out-of-range texel address as returning zero, which makes
+			// `d > pssm_coord.z` fail and the tap contribute nothing. If every tap
+			// leaves bounds, `blocker_count == 0` takes the "no blockers found" branch
+			// and the shadow disappears — silently, with no validation error.
+			String dims = "vec2<i32>(textureDimensions(" + tex + ", " + level + "))";
+			String repl = "textureLoad(" + tex + ", clamp(vec2<i32>((" + coord +
+					") * vec2<f32>(textureDimensions(" + tex + ", " + level + "))), vec2<i32>(0), " +
+					dims + " - vec2<i32>(1)), " + level + ")";
 			ws = ws.substr(0, p) + repl + ws.substr(q + 1);
 			p += repl.length();
 			rewrites++;
