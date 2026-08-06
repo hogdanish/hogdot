@@ -3,8 +3,6 @@ from misc.utility.scons_hints import *
 
 Import("env")
 
-import wgsl_precompile
-
 env_webgpu = env.Clone()
 
 # =============================================================================
@@ -729,10 +727,11 @@ env_webgpu.add_source_files(env.drivers_sources, webgpu_sources)
 env.drivers_sources += spirv_tools_obj
 env.drivers_sources += tint_obj
 
-# Generate precompiled SPIR-V → WGSL lookup table at build time.
-# The generated header is #included by rendering_device_driver_webgpu.cpp.
-env.CommandNoCache(
-    "#drivers/webgpu/wgsl_precompiled.gen.h",
-    "#drivers/webgpu/wgsl_precompile.py",
-    env.Run(wgsl_precompile.build_wgsl_precompiled),
-)
+# NOTE: there is deliberately no build-time SPIR-V → WGSL precompilation step.
+# The table it produced was keyed on a hash of SPIR-V emitted by an external
+# glslangValidator, while the engine emits its own with the vendored glslang;
+# measured 2026-08-06 it hit 0 times in 600+ runtime lookups against a
+# 141-entry table. See RL-009 in the port skill's review ledger. The native
+# host tool it needed, drivers/webgpu/tint_cli/, is still built on demand by
+# drivers/webgpu/tint_cli/build.sh — it is the tint_convert_cli used for
+# SPIR-V→WGSL bisection when debugging a translation failure.

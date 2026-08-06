@@ -161,12 +161,34 @@ buffer it cannot, because WGSL has no `write` access mode in the storage address
 was therefore load-bearing for correctness without anyone knowing. Confirmed by observation: the table
 contains particles entries, yet the particles compute shaders still reached live Tint and failed. See
 **RL-020**, which this entry is the suspected cause of.
-**Disposition:** open, **fix in Phase 5 as RL-020's first hypothesis test.** Point
-`wgsl_precompile.py` at the vendored glslang and check whether the table starts hitting. Note that a
-hit only *masks* RL-020 — it does not fix it, because any shader absent from the table still takes the
-live path. The durable fixes remain: key the table on (shader path, variant, defines) rather than a
-SPIR-V hash, and have the build assert the external glslang's version matches `GLSLANG_VERSION_*` from
-`thirdparty/glslang/glslang/build_info.h` instead of failing silently.
+**Disposition:** **fixed-in `<RL009-SHA>` — the whole mechanism was deleted, phase 7.**
+
+⚠ **The audit asked for a measurement first, and the measurement is now on record.** A temporary
+`print_line` was added at the lookup site and one `webgpu=yes` template built with it. Result on the
+shader-coverage scene in Chrome: **table_count=141, 600+ lookups, `hits=0`.** Every single lookup
+missed. The mechanism was 100 % dead at runtime and had been for the whole port — every phase-4/5/6/7
+run, including the ones that render with zero validation errors, took the live Tint path.
+
+⚠ **Two earlier claims about this entry were wrong and are corrected here:**
+1. *"The generator version proves the skew."* It does not. External glslangValidator 16.5.0 and the
+   vendored 16.1.0 both report `GetSpirvGeneratorVersion() == 11`, so the SPIR-V header's generator
+   word is **identical** and cannot be used to tell the two apart.
+2. *"`warning: variable '_spv_to_wgsl_precompiled_hits' set but not used` corroborates zero hits."*
+   It does not. That warning fires because the only *read* of the counter sits inside `WEBGPU_DIAG`,
+   which is compiled out (`WEBGPU_VERBOSE` is commented out at
+   `rendering_device_driver_webgpu.cpp:53`). The warning is present whether the table hits or not.
+
+**Why deletion rather than repair.** A repair meant re-deriving `SHADER_REGISTRY`'s define sets
+(RL-025), keying the table on (shader path, variant, defines) instead of a SPIR-V hash, and wiring the
+generated header's SCons dependency to the `.glsl` sources *and* `spirv_preprocess.cpp` (RL-028's
+staleness trap). That is a standing maintenance burden on every rebase-forward, in exchange for a
+startup optimization that has never once been observed to work. Deleting it also removes a **native
+Tint CLI build (~570 objects) from every `webgpu=yes` build** — the SCons hook shelled out to
+`tint_cli/build.sh` on every configure.
+
+⚠ **`drivers/webgpu/tint_cli/` itself is kept and is still buildable on demand** via
+`drivers/webgpu/tint_cli/build.sh`. `bin/tint_convert_cli` is the tool that found RL-026, RL-027 and
+RL-028 and is required by the RL-024 `tint_bisect` recipe. Only the *automatic* build was removed.
 
 ### RL-010 — 2026-08-06 — perf
 **Where:** `servers/rendering/renderer_rd/forward_mobile/render_forward_mobile.cpp`
@@ -468,11 +490,12 @@ registry no longer matches. The errors are structural, e.g. `ssao_blur`:
 the assembled source is not a valid translation unit because a `#define` the 4.7.1 shader now needs
 is absent from the registry entry. ⚠ **Silent by construction:** `precompile_wgsl` counts the
 failures and carries on, the build stays green, and the shader simply never enters the table.
-**Disposition:** deferred — the table is a build-time optimization, and after RL-020's repair a
-missing entry is a slow path rather than a wrong one. Fix alongside RL-009 (the whole table is
-currently dead from the glslang hash skew, so re-deriving the registry only pays off once the lookup
-hits). ⚠ Do not treat a green `webgpu=yes` build as evidence the registry is current — grep the build
-log for `glsl failures`.
+**Disposition:** **moot — `wgsl_precompile.py` and its `SHADER_REGISTRY` were deleted with the rest of
+the precompiled-WGSL mechanism in `<RL009-SHA>` (phase 7). See RL-009.** There is no registry left to
+drift, and nothing in the build reads shader defines at build time any more. Recorded rather than
+closed silently because the underlying observation still matters at the next rebase-forward: **any
+future build-time shader tooling must re-derive its define sets from the engine's own call sites, not
+duplicate them**, or it will drift the same way and fail just as silently.
 
 ### RL-026 — 2026-08-06 — **blocker**
 **Where:** `drivers/webgpu/rendering_device_driver_webgpu.cpp` — `_stages_to_wgpu_visibility()` and
@@ -626,13 +649,13 @@ itself. Opcodes not in the table fall through to the previous behavior, so the c
 the pass more conservative. Verified in Chrome: the per-pass offset scan goes silent, the WGSL loses
 its `@size`, **all GPU validation errors go to zero, and `webgpu_tests/test_project` renders.**
 
-⚠ **`wgsl_precompiled.gen.h` was NOT regenerated by this change** — SCons does not list
-`spirv_preprocess.cpp` as a dependency of the generated table (recorded in the phase-5 slice log). The
-table therefore still holds WGSL produced by the buggy pass. It is harmless today only because the
-table is entirely dead (**RL-009**, glslang hash skew) so every lookup misses and takes the live path.
-⚠ **Fixing RL-009 without first regenerating the table would resurrect this bug**, and it would then
-appear only for shaders that hit the cache — the worst possible failure mode. Regenerate the table in
-the same change as any RL-009 repair.
+⚠ **The stale-table trap this entry warned about is gone as of phase 7** — the whole precompiled-WGSL
+mechanism was deleted in `<RL009-SHA>` after it measured 0 hits in 600+ lookups (**RL-009**). There is
+no `wgsl_precompiled.gen.h`, no generator and no lookup, so there is nothing left holding WGSL from the
+buggy pass and no way to resurrect it. Kept on the record because the *general* defect is not
+engine-specific: **a generated artifact whose SCons dependency list does not name every input that
+determines its content is stale by construction, and stays green while it is wrong.** Any future
+build-time shader artifact must list the `.glsl` sources *and* `spirv_preprocess.cpp` as dependencies.
 
 ### RL-029 — 2026-08-06 — **blocker**
 **Where:** `servers/rendering/renderer_rd/forward_mobile/scene_shader_forward_mobile.cpp:843`

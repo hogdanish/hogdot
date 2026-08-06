@@ -186,13 +186,10 @@ run_test "SPIR-V preprocessing tests (191)" \
     "$SCRIPT_DIR/preprocessing_tests" \
     node run_tests.mjs
 
-run_test "WGSL precompile Python tests" \
-    "$SCRIPT_DIR/wgsl_cache" \
-    python3 test_wgsl_precompile.py
-
-run_test "WGSL precompile JS tests" \
-    "$SCRIPT_DIR/wgsl_cache" \
-    node test_wgsl_cache.mjs
+# NOTE: the wgsl_cache suite is gone. It tested the build-time precompiled
+# SPIR-V → WGSL table, which was removed after it was measured hitting 0 times
+# in 600+ runtime lookups (RL-009). Nothing replaced it — the runtime Tint path
+# it fell through to is covered by preprocessing_tests and the smoketest.
 
 echo ""
 
