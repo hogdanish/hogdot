@@ -853,10 +853,28 @@ over transcribing.
 
 ### Verification reached this batch
 
-**links** — `scons platform=macos target=editor arch=arm64` clean after every C++ commit. ⚠ Four of
-the seven touch `.glsl` or generated WGSL, which a green build proves **nothing** about: Godot embeds
-shader source and compiles it at runtime. RL-001, RL-015, RL-029 and RL-031 all need *renders*, and
-RL-011/RL-012 need a spawn/despawn and a static-pose skeleton respectively. None of that has run yet.
+Both builds clean: macOS editor after every C++ commit, and
+`scons platform=web target=template_debug webgpu=yes opengl3=no threads=no num_jobs=4` in 6:39, zero
+errors. Coverage scene exported and run in Chrome. **Zero GPU validation errors across the whole
+169-message bounded run** — no `[Invalid RenderPipeline]`, no Dawn message of any kind. Suites at
+baseline: `driver_unit_tests` 327/0, `preprocessing_tests` 191/0/1.
+
+⚠ **Per-fix, the tiers differ, and two are lower than the queue asked for:**
+
+| ledger | tier reached | evidence, and what is still missing |
+| --- | --- | --- |
+| RL-029 | **renders** | `[OK] Varying stress: … 4 user varyings x2`, no "Too many varyings", both toruses draw and their varyings visibly drive the shading (facing-driven orange→blue mix, wave-driven emission). This is the gate the queue demanded. |
+| RL-030 / 033 / 034 | **runs, no regression** | Whole shader corpus translates, suites at baseline, zero validation errors. ⚠ **Not proof the new table entries fire** — RL-030 was never firing in the first place (the audit measured zero margin, not a live fault), so "unchanged" is exactly the expected result and cannot distinguish a correct table from an inert one. |
+| RL-031 | **renders** | Shadows present under every casting object; no validation errors. ⚠ **Not compared to a native reference**, so the penumbra behaviour the clamp restores is still unjudged — the same blind spot phase 6 recorded. |
+| RL-001 | **renders** | `copy.glsl` is on the glow path, which Mobile does run. A threshold move from 3e10 to 3e38 is invisible below 3e10, so this is "no regression", not a demonstration. |
+| RL-011 / RL-012 | **runs** | The atlas path is exercised (the scene has a skinned skeleton). ⚠ **Neither defect is demonstrated**: no spawn/despawn cycle, and no static-pose skeleton surviving another skeleton's grow. |
+| RL-015 | **applied only** | ⚠ **The coverage scene cannot exercise it.** Mobile logs `Volumetric fog is only available when using the Forward+ renderer` and disables it outright, so `volumetric_fog_process.glsl` never compiles on the one configuration hogdot ships. The fix is correct by inspection and matches the fork's own established substitutions, but nothing has run it. It becomes testable only when Forward+ on web works (RL-029's `HelperInvocation` blocker) or via a direct shader-compile harness. |
+
+⚠ **The general trap this exposes: a coverage scene run on Mobile silently skips every Forward+-only
+feature**, and the skip is a `WARNING`, not a failure. SSAO, SSIL, SSR, volumetric fog, SDFGI,
+auto-exposure, TAA, FSR2 and subsurface scattering are all requested by `shader_coverage.gd` and all
+declined. Any fix to those shaders is unverifiable here — do not let a green run on this scene imply
+otherwise.
 
 ---
 

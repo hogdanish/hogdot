@@ -278,6 +278,13 @@ so this can only surface when volumetric fog is first drawn on WebGPU.
 all three sites, using the fork's own substitutions but with a `3.0e+38` infinity threshold rather
 than the `3.0e+10` of RL-001. Nothing here depends on the difference: every value these guard is
 clamped to `65504.0` on the next line. Sweep re-run at fix time: still exactly these three hits.
+⚠ **Verification tier is `applied`, not `renders`, and cannot currently be raised.** The Mobile
+renderer disables volumetric fog outright — `webgpu_tests/test_project` logs
+`Volumetric fog is only available when using the Forward+ renderer` — so
+`volumetric_fog_process.glsl` never compiles on the one configuration hogdot ships. The fix is
+correct by inspection and matches the fork's own established substitutions, but **nothing has run
+it.** It becomes testable when Forward+ on web works (blocked by Tint's unimplemented
+`HelperInvocation`, see RL-029) or through a direct shader-compile harness.
 ⚠ Expect more of this shape at every future rebase-forward: mainline adding a WGSL-hostile intrinsic
 to a file the fork never touched is invisible to `port-surface.sh`, which classifies by *fork* delta.
 A cheap standing check is `rg 'modf\(|isnan\(|isinf\(' servers/rendering/renderer_rd/shaders/` after
