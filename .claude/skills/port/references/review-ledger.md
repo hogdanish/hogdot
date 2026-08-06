@@ -460,3 +460,163 @@ missing entry is a slow path rather than a wrong one. Fix alongside RL-009 (the 
 currently dead from the glslang hash skew, so re-deriving the registry only pays off once the lookup
 hits). ⚠ Do not treat a green `webgpu=yes` build as evidence the registry is current — grep the build
 log for `glsl failures`.
+
+### RL-026 — 2026-08-06 — **blocker**
+**Where:** `drivers/webgpu/rendering_device_driver_webgpu.cpp` — `_stages_to_wgpu_visibility()` and
+every BGL entry built from it in `shader_create_from_container()`
+**Found while:** phase 5, first browser run after RL-023's repair
+**What:** Every `SceneForwardMobileShaderRD` pipeline layout is rejected with
+`The number of samplers (18) in the Vertex stage exceeds the maximum per-stage limit (16)`, which
+invalidates every scene render pipeline in turn. The canvas stays black while the engine reports no
+error of its own.
+
+The driver derives a bind-group-layout entry from Godot's *reflection* — i.e. every binding the GLSL
+declares — and gives each one a blanket `Vertex | Fragment` visibility for any shader that uses
+either stage. WebGPU counts each entry against `maxSamplersPerShaderStage` for every stage it is
+visible to, referenced or not. Measured on this machine's adapter (Chrome, apple/metal-3):
+`maxSamplersPerShaderStage` is **16**, and `engine.js` already requests the adapter maximum, so 16 is
+a ceiling rather than a default that could be raised.
+
+⚠ **This is 4.6.2→4.7.1 drift meeting a fork design with zero headroom, not a port defect.**
+`_stages_to_wgpu_visibility` is byte-identical to the fork's. `scene_forward_mobile_inc.glsl`
+declares **exactly 16** `uniform sampler` objects at `4.6.2-stable` — precisely at the limit — and
+4.7.1 adds three area-light uniforms, two of which (`ltc_lut1`, `ltc_lut2` at set 0 bindings 15/16)
+are `sampler2D`. `split_combined_samplers` mints one sampler apiece, giving 18. GodotWebGPU shipped
+one sampler away from this failure and would have hit it on the next upstream release that added any.
+(Third area-lights entry in the RL-010 / RL-023 series.)
+
+Measured with `bin/tint_convert_cli` over the real forward-mobile WGSL, both `color_pass` and
+`uber_color_pass`:
+
+| stage | samplers declared | **referenced** | textures declared | **referenced** |
+| --- | ---: | ---: | ---: | ---: |
+| vertex | 18 | **0** | 12 | **0** |
+| fragment | 18 | **8** | 12 | **9** |
+
+Every one of the vertex stage's 18 samplers appears exactly once in the WGSL — its own declaration.
+glslang does not strip unused uniforms from the SPIR-V and Tint's writer emits every module-scope
+handle it finds, so the declaration list wildly overstates what a stage uses. WGSL itself only
+requires a binding in the pipeline layout when an entry point *statically uses* it.
+
+**Disposition:** **fixed** — `_wgsl_binding_is_referenced()` plus a `narrow_visibility()` post-pass
+over both BGL entry lists (the per-set one and the merged push-constant one). Each stage's WGSL is
+scanned for `@group(G) @binding(B) var NAME`, and the stage bit is recorded only when `NAME` occurs
+more than once with identifier boundaries. Every entry is then masked down to the stages that really
+reference it, and a binding no stage references gets visibility `0`, which is legal and costs no
+slot. Textual reference counting over-approximates static use, so it can only remove a bit that was
+spurious — it can never hide a binding a shader actually reads, and a mistake would surface loudly at
+pipeline creation rather than as silent corruption.
+
+⚠ **Samplers were only the first cap of four.** The first build narrowed sampler and texture entries
+alone, and the browser immediately returned
+`The number of storage buffers (11) in the Vertex stage exceeds the maximum per-stage limit (10)`
+on the same pipeline layouts. Blanket visibility overruns *every* per-stage class Godot gets near, so
+the pass now covers buffer entries too. Adapter limits measured here: 16 samplers, 48 sampled
+textures, 10 storage buffers, 12 uniform buffers.
+
+⚠ The fork's own mechanism for the storage-buffer half of this, the `//SSBO_USED:group,binding`
+metadata the driver parses into `wgsl_buffer_stages`, is **dead**: nothing in the tree emits it
+(`rg SSBO_USED` finds only the parser and the fork's docs), so `wgsl_buffer_stages` is always empty
+and the narrowing at both of its call sites never fires. It was a naga-era feature the Tint migration
+dropped, and its comment — "Firefox/wgpu enforces Metal's limit of 8 storage buffers per shader
+stage" — shows the fork knew about this failure class and believed it was handled. Left in place: it
+is inert, and `narrow_visibility` runs after it and subsumes it. Removing it is cleanup for a later
+pass, not a fix.
+
+### RL-027 — 2026-08-06 — **blocker**
+**Where:** `drivers/webgpu/rendering_device_driver_webgpu.cpp` — the WGSL post-processing in
+`shader_create_from_container()` *and* `_create_module_with_spec_constants()`; the dead
+`wgsl_depth_alias_bindings` machinery
+**Found while:** phase 5, the run after RL-026's repair
+**What:** With the per-stage visibility fixed, every `SceneForwardMobileShaderRD` render pipeline
+still failed, now with a single distinct cause:
+`Texture binding (group:1, binding:8) is TextureSampleType::Depth but used statically with a sampler
+(group:1, binding:28) that's SamplerBindingType::Filtering`. Binding 8 is `shadow_atlas`, binding 28
+is `SAMPLER_LINEAR_CLAMP` (bindings are doubled by the preprocessor, so these are Godot's 4 and 14).
+
+Godot uses one shadow atlas two ways in the same shader:
+`textureSampleCompare(shadow_atlas, shadow_sampler, …)` for the PCF lookup, and
+`textureLod(sampler2D(shadow_atlas, SAMPLER_LINEAR_CLAMP), …)` for the blocker search
+(`scene_forward_lights_inc.glsl`, 7 sites at 4.7.1). `fix_depth2_images` promotes the image's
+`Depth=2` to `Depth=1` so Tint accepts the Dref sample, which makes it a `texture_depth_2d` — and
+WebGPU then permits only comparison or non-filtering samplers on it. **No bind-group layout can
+satisfy both uses:** the atlas is a depth format, whose only legal sample types are `depth` and
+`unfilterable-float`, and neither accepts a filtering sampler.
+
+⚠ **This is a fork defect the naga→Tint migration left behind, not 4.7.1 drift.** The GLSL pattern
+is present at `4.6.2-stable` too (5 sites), and the driver still carries the machinery that used to
+handle it — `wgsl_depth_alias_bindings`, `WGShader::depth_alias_bindings`, the BGL alias entries and
+the `uniform_set_create` binding — all keyed on a WGSL variable named `<orig>_depth_alias`. **Nothing
+produces that name.** `git grep depth_alias webgpu/webgpu-4.6.2` finds only the same consumers on the
+fork's own tip, and there is no producer in `spirv_preprocess.cpp` or in vendored Tint. naga split
+mixed-usage depth textures and named the clone; Tint does not, and the consumer side was never
+retired. GodotWebGPU on 4.6.2 hits this the moment a scene casts a shadow.
+
+**Disposition:** **fixed** — `_rewrite_depth_texture_samples()`, a WGSL pass that turns
+`textureSample`/`textureSampleLevel` on a `texture_depth_2d` into
+`textureLoad(tex, vec2<i32>(coord * vec2<f32>(textureDimensions(tex, level))), level)`. A texel fetch
+takes no sampler, so the conflict disappears. `textureSampleGrad`/`Bias` are deliberately not
+handled: their extra operands have no `textureLoad` equivalent and no Godot shader takes a gradient
+off a depth texture.
+
+The behavioral change is nearest instead of linear sampling on that lookup, and it costs less than
+it sounds: linear filtering of a 32-bit depth format is not a required Vulkan format feature
+(`VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT` is optional for `D32_SFLOAT`), so the desktop
+backends this GLSL was written for are not reliably interpolating it either.
+
+⚠ **The driver has two WGSL-producing paths and they must stay in step.**
+`_create_module_with_spec_constants()` re-runs Tint on spec-constant-patched SPIR-V and repeats only
+*some* of `shader_create_from_container()`'s WGSL passes — its own comment says "must match
+shader_create_from_container", which is a convention, not a mechanism. Adding the rewrite to one path
+only produced a *new* failure rather than a fix:
+`Entry point's stage (ShaderStage::Fragment) is not in the binding visibility in the layout
+(ShaderStage::None)` — the layout was built from rewritten WGSL where `SAMPLER_LINEAR_CLAMP` had
+become unused, while the specialized module still sampled with it. Hence the shared helper. Any
+future WGSL pass must be added to both, and this divergence is itself worth a follow-up cleanup.
+
+### RL-028 — 2026-08-06 — **blocker**
+**Where:** `drivers/webgpu/spirv_preprocess.cpp` — `flatten_binding_arrays()`, the pass-4 rewrite loop
+**Found while:** phase 5, the run after RL-027's repair, when every scene pipeline finally *created*
+**What:** With pipeline creation fixed, every draw failed instead:
+`[Buffer] bound with size 3712 at group 0, binding 14 is too small. The pipeline requires a buffer
+binding which is at least 63744 bytes.` Binding 14 is Godot's set 0 binding 7, the `DirectionalLights`
+UBO — correctly sized at 8 × 464 = 3712 by the engine.
+
+Dumping the generated WGSL showed Tint emitting `@size(7505u)` on `DirectionalLightData.shadow_normal_bias`
+in the **fragment** stage only (the vertex stage was clean). That inflates the struct to 7968 and the
+array to 8 × 7968 = **63744** — the exact number Dawn reported. Tint was faithful: its writer emits
+`@size` when the next member's recorded offset exceeds the natural one, so the *input* offsets were
+wrong. Dumping the SPIR-V offsets straight out of the shader container gave the correct layout
+(`… 80 96 112 128 144 160 176 240 …`), which put the corruption between the container and Tint — i.e.
+in preprocessing. A per-pass scan for implausible `OpMemberDecorate … Offset` values named the pass on
+the first run: **`flatten_binding_arrays`**.
+
+Root cause: the pass eliminates arrays of handle types by **substituting id values word-by-word across
+every instruction in the module**, excluding only `OpConstant`/`OpSpecConstant` values and `OpSwitch`
+case labels. Every other *literal* operand is treated as a candidate id. `OpMemberDecorate %type
+<member> Offset <value>` has two literal words and neither was excluded, so any member offset that
+numerically equals a mapped id gets rewritten into that id. Observed on the forward-mobile fragment
+shader, which has ~8,500 ids: offset 112 → 7601 and offset 160 → 8329.
+
+⚠ **The blast radius is far wider than one struct.** The same substitution runs over `OpDecorate`
+(`Binding`, `DescriptorSet`, `Location`, `ArrayStride`, `SpecId`…), `OpName`/`OpMemberName` string
+payloads (a one-character name packs to a word inside the id range), `OpTypePointer`'s storage class,
+`OpVariable`'s storage class, `OpCompositeExtract`'s literal indices, `OpVectorShuffle`'s components,
+and the memory-operand masks on `OpLoad`/`OpStore`. Any of those can be silently corrupted whenever
+the literal collides with a mapped id — which becomes likelier the bigger the shader. This is a fork
+defect, present at `4.6.2-stable`, not 4.7.1 drift; it simply needs a module with enough ids to
+collide, which is why smaller shaders and the test fixtures never caught it.
+
+**Disposition:** **fixed** — `_is_literal_operand(op, index)`, a per-opcode table of which operand
+words are literals rather than `<id>`s, consulted by both the needs-rewrite scan and the rewrite
+itself. Opcodes not in the table fall through to the previous behavior, so the change can only make
+the pass more conservative. Verified in Chrome: the per-pass offset scan goes silent, the WGSL loses
+its `@size`, **all GPU validation errors go to zero, and `webgpu_tests/test_project` renders.**
+
+⚠ **`wgsl_precompiled.gen.h` was NOT regenerated by this change** — SCons does not list
+`spirv_preprocess.cpp` as a dependency of the generated table (recorded in the phase-5 slice log). The
+table therefore still holds WGSL produced by the buggy pass. It is harmless today only because the
+table is entirely dead (**RL-009**, glslang hash skew) so every lookup misses and takes the live path.
+⚠ **Fixing RL-009 without first regenerating the table would resurrect this bug**, and it would then
+appear only for shaders that hit the cache — the worst possible failure mode. Regenerate the table in
+the same change as any RL-009 repair.
