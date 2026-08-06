@@ -42,7 +42,7 @@ Always-on rules (a shared cost — keep the set lean): `context-scale` · `port-
 
 1. **Locate.** Read the skill's `SKILL.md` and every file under its `references/`. Files containing
    `FILL:` markers are the work.
-2. **Map the scope from the codebase**, not from memory and not from a neighbouring skill. Name the real
+2. **Map the scope from the codebase**, not from memory and not from a neighboring skill. Name the real
    artifacts — classes, files, commands, constants. "The shader pipeline" won't trigger;
    `spirv_preprocess.cpp`, `tint_wrapper.cpp`, `wgsl_precompile.py` will.
 3. **Research when version-sensitive.** Use the `docs` skill's routing — in-tree `doc/classes/` for engine

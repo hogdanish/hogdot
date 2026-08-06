@@ -20,7 +20,7 @@ The measured per-call overhead (~0.2-0.5µs on Mac Studio M3 Ultra) breaks down 
 
 | Layer | Cost per Call | % of Total | Notes |
 |-------|-------------|------------|-------|
-| **WASM→JS trampoline** | ~50-150ns | **30-50%** | Emscripten glue code, parameter marshalling from WASM linear memory |
+| **WASM→JS trampoline** | ~50-150ns | **30-50%** | Emscripten glue code, parameter marshaling from WASM linear memory |
 | JS→Blink C++ IDL entry | ~20-50ns | ~10-20% | V8 calling into Blink's WebGPU IDL bindings |
 | Dawn Wire serialization | ~30-100ns | ~20-30% | Memcpy of small struct into shared memory ring buffer. No IPC. |
 | Dawn Wire validation | ~10-50ns | ~5-15% | Minimal client-side — by design, validation deferred to server |
@@ -40,7 +40,7 @@ The per-call overhead model means that even with all our draw-count optimization
 - **Chromium WebGPU Technical Report:** Dawn Wire commands are nested inside a single `DawnCommands` GPU command buffer entry — multiple commands packed per batch. (chromium.googlesource.com/chromium/src/+/main/docs/security/research/graphics/webgpu_technical_report.md)
 - **Dawn architecture docs:** Wire client uses `GetCmdSpace(size_t)` to allocate in buffer, `Flush()` to send batch. "dawn_wire is meant to do as little state-tracking as possible so that the client can be lean." (dawn.googlesource.com/dawn/+/HEAD/docs/dawn/overview.md)
 - **Mojo IPC latency:** Measured at ~10-20µs minimum per message. Amortized across hundreds of commands per flush. (chromium-mojo mailing list)
-- **WASM→JS crossing cost:** web.dev "WebAssembly performance patterns" reports ~100ns per non-trivial WASM→JS call. Mozilla Hacks (2018) showed ~5ns for trivial numeric-only signatures, but WebGPU bindings involve handle/struct marshalling.
+- **WASM→JS crossing cost:** web.dev "WebAssembly performance patterns" reports ~100ns per non-trivial WASM→JS call. Mozilla Hacks (2018) showed ~5ns for trivial numeric-only signatures, but WebGPU bindings involve handle/struct marshaling.
 - **Figma:** Found Emscripten's built-in WebGPU bindings "weren't performant enough" and wrote custom C++/JS bindings. Now migrating to emdawnwebgpu. (figma.com/blog/figma-rendering-powered-by-webgpu)
 - **juj/wasm_webgpu:** Alternative binding library "manually tuned for absolutely best runtime speed" — its existence confirms the standard Emscripten bindings have measurable overhead. (github.com/juj/wasm_webgpu)
 - **"Characterizing WebGPU Dispatch Overhead for LLM Inference" (April 2026, arxiv 2604.02344):** Full dispatch cycle (encoder→set bindings→dispatch→submit) costs 24-36µs on Vulkan, 32-71µs on Metal. Individual calls within a pass are much cheaper. Backend choice is the dominant factor, with 2.2x variation between Dawn and wgpu on Metal.
@@ -295,7 +295,7 @@ The key insight: **approaches 1-4 share the command stream recorder as common in
 
 ### Step 3: Measure and Iterate
 
-**Goal:** Profile the JS batch replay inner loop. Identify whether the remaining overhead is in JS→WebGPU API calls, handle lookup, or argument marshalling. Apply targeted optimizations (custom bindings, TypedArray views, etc.) based on data.
+**Goal:** Profile the JS batch replay inner loop. Identify whether the remaining overhead is in JS→WebGPU API calls, handle lookup, or argument marshaling. Apply targeted optimizations (custom bindings, TypedArray views, etc.) based on data.
 
 ---
 
@@ -366,7 +366,7 @@ Firefox/wgpu compatibility (question 3):
 
   Approach 5 — Custom Bindings.
   Hand-optimize the hot-path JavaScript binding functions (the emscripten glue) to reduce per-call
-  trampoline cost from ~100-150ns to ~30-50ns. Faster handle lookup, less argument marshalling,
+  trampoline cost from ~100-150ns to ~30-50ns. Faster handle lookup, less argument marshaling,
   TypedArray views into WASM memory. Works universally on every call, no cache. Can also be applied
   to the JS replay function from Approach 2 (optimize the inner loop).
   Est. savings: ~0.6-0.9ms/frame (standalone) or additive on top of batch replay. Effort:
@@ -771,4 +771,3 @@ Option 1 is preferred. Need to investigate emdawnwebgpu's handle representation 
 | 2 | Render bundles (opaque + shadow) | Post-release v1.1 | Command stream infrastructure |
 | 3 | JS replay function optimization | Post-release, data-driven | Profiling of JS inner loop |
 | 4 | Multi-draw-indirect | When spec standardizes | Command stream + indirect buffer |
-

@@ -8,8 +8,8 @@
 
 ## Change 1: Add `webgpu` build option to SConstruct
 
-**File:** `SConstruct`  
-**Lines:** 197–201  
+**File:** `SConstruct`
+**Lines:** 197–201
 **Why:** No `webgpu` SCons option exists. Every other graphics backend (vulkan, opengl3, d3d12, metal) has one.
 
 **Current code:**
@@ -35,7 +35,7 @@ opts.Add(BoolVariable("use_volk", "Use the volk library to load the Vulkan loade
 
 ## Change 2: Register WebGPU as supported in `platform/web/detect.py`
 
-**File:** `platform/web/detect.py`  
+**File:** `platform/web/detect.py`
 **Section A — `get_flags()` (lines 79–95):**
 
 **Current:**
@@ -89,7 +89,7 @@ def get_flags():
 
 ## Change 3: Add WebGPU driver to `drivers/SCsub`
 
-**File:** `drivers/SCsub`  
+**File:** `drivers/SCsub`
 **Lines:** 49–62 (after the `metal` block at line ~62)
 
 **Current (metal block at end):**
@@ -114,7 +114,7 @@ if env["webgpu"]:
 
 ## Change 4: Create `drivers/webgpu/` directory with SCsub and sources
 
-**New directory:** `drivers/webgpu/`  
+**New directory:** `drivers/webgpu/`
 **Files to create:** Copy from `webgpu_notes/stubs/` into `drivers/webgpu/`:
 - `SCsub`
 - `rendering_context_driver_webgpu.h`
@@ -241,7 +241,7 @@ GLOBAL_DEF_RST_BASIC(PropertyInfo(Variant::STRING, "rendering/renderer/rendering
 
 ## Change 7: Enable glslang module for WebGPU builds
 
-**File:** `modules/glslang/config.py`  
+**File:** `modules/glslang/config.py`
 **Lines:** 1–4
 
 **Current:**

@@ -146,7 +146,7 @@ C++ render_pipeline_create_async()
   → EM_ASM: call device.createRenderPipelineAsync(desc) directly in JS
     → Promise resolves → store GPURenderPipeline handle in JS-side Map
       (keyed by pipeline ID, no callback into C++)
-  
+
 Once per frame (between frames, NOT during draw loop):
   → EM_ASM: poll JS Map for completed pipelines
     → for each completed: return handle to C++

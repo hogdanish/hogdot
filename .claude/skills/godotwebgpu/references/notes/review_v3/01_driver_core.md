@@ -318,7 +318,7 @@ WebGPU requires 256-byte row alignment for buffer<->texture copies. Applied in
 3. Process-lifetime cache keyed on 64-bit hash of SPIR-V bytes
 4. Multiple text-replacement passes on WGSL output:
    - 8-bit storage format names -> 32-bit equivalents
-   - 16-bit storage format names -> 32-bit equivalents  
+   - 16-bit storage format names -> 32-bit equivalents
    - `read_write` storage -> `read` for vertex/fragment stages
    - `binding_array<T, N>` -> `T` (Chrome lacks sized_binding_array)
 
@@ -376,7 +376,7 @@ Specialized modules are owned by the `WGPipelineWrapper` and released with it.
    implicit mid-frame `wgpuQueueWriteBuffer` is safe but may cause subtle timing
    issues if the browser coalesces writes differently than expected.
 
-6. **`shader_get_layout_hash` uses pointer as hash** (line 4067): 
+6. **`shader_get_layout_hash` uses pointer as hash** (line 4067):
    `(uint32_t)(uint64_t)(void *)(shader->pipeline_layout)` truncates to 32 bits.
    On 64-bit systems the low 32 bits of heap pointers may have poor distribution.
    This is used for pipeline cache keying and could cause spurious misses.

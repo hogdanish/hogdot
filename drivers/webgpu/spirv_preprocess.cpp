@@ -2359,8 +2359,8 @@ static bool _is_literal_operand(uint16_t p_op, uint32_t p_index) {
 		case 4455: // OpSUDotAccSat
 			return p_index >= 6;
 
-		// OpSwitch (251) is deliberately absent: its literal/label alternation is
-		// handled by the caller, which knows the instruction's word count.
+			// OpSwitch (251) is deliberately absent: its literal/label alternation is
+			// handled by the caller, which knows the instruction's word count.
 
 		default:
 			return false;

@@ -69,7 +69,7 @@ From `rendering_device_driver_webgpu.cpp:4995`:
 - Is `device.createTexture()` fast (~0.5ms) and `queue.writeTexture()` slow (~9ms)?
   Or are all crossings equally expensive?
 - Is Chrome doing a GPU-process IPC roundtrip for each call? Or is it the JS
-  descriptor marshalling from WASM memory?
+  descriptor marshaling from WASM memory?
 
 ## Key source files
 
@@ -87,9 +87,9 @@ From `rendering_device_driver_webgpu.cpp:4995`:
 ## TODO: Root-cause the per-crossing cost
 
 Need to add JS-side timing inside the Emscripten bindings to measure:
-1. Time for `device.createTexture()` alone (the browser API call, excluding marshalling)
+1. Time for `device.createTexture()` alone (the browser API call, excluding marshaling)
 2. Time for `texture.createView()` alone
 3. Time for `queue.writeTexture()` alone
-4. Time for the Emscripten descriptor marshalling (WASM memory -> JS object)
+4. Time for the Emscripten descriptor marshaling (WASM memory -> JS object)
 
 This will tell us whether to fix the bridge (batching) or the browser calls (deferral).

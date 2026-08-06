@@ -106,7 +106,7 @@ The implementation adds new virtual methods and API traits to the base driver in
 
 **Decision**: Store raw SPIR-V in shader containers. At runtime, convert SPIR-V to WGSL using a patched Naga compiled to WASM (`window.nagaSpirvToWgsl`). Cache results keyed by 64-bit hash of SPIR-V bytes.
 
-**Rationale**: 
+**Rationale**:
 - emdawnwebgpu (the Emscripten WebGPU port) only accepts WGSL, not SPIR-V
 - Build-time conversion would lose the ability to apply specialization constants at runtime
 - Naga is well-tested for SPIR-V -> WGSL and is already a Rust project compilable to WASM

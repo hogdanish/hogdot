@@ -865,7 +865,7 @@ baseline: `driver_unit_tests` 327/0, `preprocessing_tests` 191/0/1.
 | --- | --- | --- |
 | RL-029 | **renders** | `[OK] Varying stress: … 4 user varyings x2`, no "Too many varyings", both toruses draw and their varyings visibly drive the shading (facing-driven orange→blue mix, wave-driven emission). This is the gate the queue demanded. |
 | RL-030 / 033 / 034 | **runs, no regression** | Whole shader corpus translates, suites at baseline, zero validation errors. ⚠ **Not proof the new table entries fire** — RL-030 was never firing in the first place (the audit measured zero margin, not a live fault), so "unchanged" is exactly the expected result and cannot distinguish a correct table from an inert one. |
-| RL-031 | **renders** | Shadows present under every casting object; no validation errors. ⚠ **Not compared to a native reference**, so the penumbra behaviour the clamp restores is still unjudged — the same blind spot phase 6 recorded. |
+| RL-031 | **renders** | Shadows present under every casting object; no validation errors. ⚠ **Not compared to a native reference**, so the penumbra behavior the clamp restores is still unjudged — the same blind spot phase 6 recorded. |
 | RL-001 | **renders** | `copy.glsl` is on the glow path, which Mobile does run. A threshold move from 3e10 to 3e38 is invisible below 3e10, so this is "no regression", not a demonstration. |
 | RL-011 / RL-012 | **runs** | The atlas path is exercised (the scene has a skinned skeleton). ⚠ **Neither defect is demonstrated**: no spawn/despawn cycle, and no static-pose skeleton surviving another skeleton's grow. |
 | RL-015 | **applied only** | ⚠ **The coverage scene cannot exercise it.** Mobile logs `Volumetric fog is only available when using the Forward+ renderer` and disables it outright, so `volumetric_fog_process.glsl` never compiles on the one configuration hogdot ships. The fix is correct by inspection and matches the fork's own established substitutions, but nothing has run it. It becomes testable only when Forward+ on web works (RL-029's `HelperInvocation` blocker) or via a direct shader-compile harness. |
@@ -922,3 +922,62 @@ Per path, for anyone tracing a single line:
 ⚠ **The lesson: a bulk `port(clean)` commit spanning many unrelated files cannot carry one honest
 `Webgpu-Source:`.** Both errors are that shape. At the next rebase-forward, either split such a
 commit per source-cluster or write the per-path table into the commit body from the start.
+
+---
+
+## slice 8 — meta (the last port slice) — 2026-08-06 — `42427d3`
+
+**Source:** `26b0cee` `ed50eb6` `b97e30f` `728f8f3` `f8b3cd0` (README.md) · `f8b3cd0`
+(thirdparty/README.md) · `054cc0c` `d6325c3` (.gitignore)
+**Verification:** n/a — documentation and ignore rules, no code.
+
+Closes the eight-slice port. `README.md`, `thirdparty/README.md`, `.gitignore`.
+
+**Adapted, not carried**
+- **`README.md`** — the fork's +247/-53 rewrite replaces Godot's README with GodotWebGPU marketing and
+  moves the original to `GODOT_README.md`. hogdot **prepends a section instead** and leaves Godot's
+  text in place, so the file stays a near-zero-conflict rebase target. `GODOT_README.md` is therefore
+  **not created** — nothing for it to hold. (Planned as a drop in the phase-1 entry; this is where it
+  lands.)
+- **`thirdparty/README.md`** — the fork's `spirv-headers` edit rewrites the version line to its own
+  newer drop. hogdot keeps mainline's version line (mainline's tree is what we ship) and instead
+  documents the two real deltas: the extra `include/spirv/unified1` headers, and that `spirv.hpp11`
+  alone comes from the newer drop. That is the honest description of the tree after the
+  `thirdparty-collision` reversal (`ef55f41`); copying the fork's line verbatim would have described
+  a tree hogdot does not have.
+
+**Dropped**
+- **`.gitignore` → `*.uid`** — Godot generates `.uid` files as *tracked* project content; mainline
+  tracks 8 under `platform/android/`. A repo-wide ignore would silently stop hogdot tracking files
+  upstream does, and read as drift at every rebase-forward. `.chat-history/` and `tmp/` are carried.
+
+**Gotchas**
+
+⚠ **`./hogdot/port-surface.sh` does NOT measure progress, and never reports "zero unported
+conflicts".** It derives the fork's delta against `HOGDOT_UPSTREAM_BASE` — a property of the two trees
+that is invariant to how much has been landed — so it prints **39 conflicts forever**, before and
+after slice 8. The phase-7 brief's clause "after this, `port-surface.sh --all` should report zero
+unported conflicts" is wrong on its own terms, and the first draft of the slice-8 commit message
+repeated the error.
+
+The check that *does* work is per-file, and it is cheap:
+
+```bash
+./hogdot/port-surface.sh --conflicts | awk '...' > conflicts.txt
+while read -r f; do
+    git diff --quiet 4.7.1-stable HEAD -- "$f" && echo "UNCARRIED: $f"
+done < conflicts.txt
+```
+
+Run 2026-08-06 after slice 8: **37 of 39 carry fork content; the 2 that do not are recorded
+deliberate drops** — `scene/resources/2d/tile_set.cpp` (fork delta is one blank line) and
+`servers/rendering/renderer_viewport.cpp` (fork delta is an inert `{ }` diagnostic stub, dropped in
+`f503e72`). That is what "the port surface is fully dispositioned" means here, and it is evidence
+rather than a number from a script.
+
+⚠ **Provenance trailers must be *derived*, never recalled.** The first version of `42427d3` carried
+`Webgpu-Source: 2d13d18 ea9f8be` — two SHAs that correspond to nothing, written from memory instead of
+from `git log --oneline 4.6.2-stable..webgpu/webgpu-4.6.2 -- <path>`. Caught before anything built on
+it and corrected by amending the tip (unpushed, nothing referencing it), so it is **not** in
+§ *Provenance corrections* — that section is for landed, uncorrectable trailers, and diluting it with
+same-minute slips makes it less useful. The rule stands: run the log command, paste the output.

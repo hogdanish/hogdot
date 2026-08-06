@@ -263,7 +263,14 @@ async function initWebGPU() {
 						return Promise.reject(new Error('Service worker already exists.'));
 					}
 					return registration;
-				}).then(() => engine.installServiceWorker()),
+					// A throwaway Engine purely to install the service worker: this
+					// branch runs when required features are MISSING, so the engine
+					// is never started and the WebGPU device is never resolved.
+					// (Upstream full-size.html has a module-scope `engine` to use
+					// here; this file builds its Engine inside the initWebGPU()
+					// callback instead, because the config needs the device, so
+					// there is nothing in scope at this point.)
+				}).then(() => new Engine(GODOT_CONFIG).installServiceWorker()),
 				new Promise((resolve) => {
 					setTimeout(() => resolve(), 2000);
 				}),
@@ -283,7 +290,7 @@ async function initWebGPU() {
 		// The device must be available when the WASM module boots so that
 		// emscripten_webgpu_get_device() can return it synchronously.
 		initWebGPU().then((webgpuDevice) => {
-			const engineConfig = Object.assign({}, GODOT_CONFIG);
+			const engineConfig = { ...GODOT_CONFIG };
 			if (webgpuDevice) {
 				engineConfig['preinitializedWebGPUDevice'] = webgpuDevice;
 			} else {

@@ -84,7 +84,12 @@ ordering dependency so the file is correct on its own terms rather than by luck 
 **What:** The fork's only change to this file is an added blank line before the closing brace — no
 semantic content. Carried for faithfulness, but it is pure diff noise against mainline and a
 candidate to drop at the next rebase-forward.
-**Disposition:** deferred — carried faithfully.
+**Disposition:** **dropped in phase 7 — and not by a decision.** `pre-commit run --all-files` (gate
+clause (f), first time it was ever run over the whole tree) removed the blank line via the
+`file-format` hook. The outcome is the one this entry recommended, so it stands, but the mechanism is
+worth recording: **Godot's own lint gate will silently revert any carried hunk that is pure
+whitespace.** At the next rebase-forward, do not spend effort re-carrying whitespace-only fork deltas
+— run the formatter and let it arbitrate.
 
 ### RL-005 — 2026-08-06 — bug
 **Where:** `servers/rendering/rendering_device.cpp` (`_end_frame`, the upload-staging unmap loop)
@@ -103,7 +108,7 @@ first `_end_frame`, every cached `data_ptr` dangles, and every subsequent frame 
 This is a native-backend regression introduced by a WebGPU-motivated hunk, on the shared path.
 **Disposition:** **fixed-in `f90fccd` (phase 7)** — the loop is now gated on a new
 `API_TRAIT_BUFFER_MAP_IS_CPU_SHADOW`, default `false` in `RenderingDeviceDriver::api_trait_get`, `1`
-on WebGPU. Native backends never enter it; WebGPU's behaviour is unchanged.
+on WebGPU. Native backends never enter it; WebGPU's behavior is unchanged.
 
 ⚠ **`buffer_flush` was evaluated as the alternative and rejected.** It looks ideal — already a
 defaulted no-op on every native driver — but WebGPU's `buffer_flush` deliberately does **not** check
@@ -398,7 +403,7 @@ did a GPU readback, and, more importantly, `get_image()` no longer reflects the 
 reflects the *asset on disk*. Anything that modified the texture through RenderingServer will read
 back stale content. The GPU path survives only as a fallback for textures with no `path_to_file`.
 **Disposition:** **fixed-in `b659667` (phase 7)** — the disk-reload path is now inside
-`#ifdef WEB_ENABLED`. Web keeps the fork's behaviour, which is the only synchronous answer available
+`#ifdef WEB_ENABLED`. Web keeps the fork's behavior, which is the only synchronous answer available
 there; every other platform is back to mainline's `RS::texture_2d_get()`, so the desktop editor no
 longer trades a GPU readback for a file open plus a full decode and no longer reads back the asset
 where the texture was asked for. The comment now says outright that this path returns the file rather
@@ -746,7 +751,7 @@ the original analysis:
    device fell back to the WebGPU default of 16 on an adapter offering far more. Measured in Chrome
    here (apple/metal-3): **adapter 28, default device 16.** One line in `limitsToMax`.
 2. **The engine reserved more locations than it uses.** `scene_forward_mobile.glsl` left locations 10
-   and 11 empty and spread the rest to 14. Repacked into 0..12 with no behavioural change: `dp_clip`
+   and 11 empty and spread the rest to 14. Repacked into 0..12 with no behavioral change: `dp_clip`
    9→7 (sharing with the vertex-lighting pair — `MODE_DUAL_PARABOLOID` only ever appears with
    `MODE_RENDER_DEPTH`, which excludes them), `batch_instance_index` 10→9, `point_coord_interp` 14→10,
    `screen_position` 12→11, `prev_screen_position` 13→12.

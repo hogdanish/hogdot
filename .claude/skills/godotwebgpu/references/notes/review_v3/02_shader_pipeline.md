@@ -142,7 +142,7 @@ Godot binds a single placeholder buffer in multiple writable slots.
 
 **Solution:** Multi-pass analysis:
 1. Collect all StorageBuffer variables
-2. Track pointer derivations (OpAccessChain) and stores (OpStore, atomics, 
+2. Track pointer derivations (OpAccessChain) and stores (OpStore, atomics,
    function calls passing buffer pointers)
 3. Variables never written to get `OpDecorate NonWritable` injected
 

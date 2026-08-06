@@ -42,7 +42,7 @@ they are on Mobile generally — that is Godot's own constraint, not a WebGPU on
 This is a long-term fork: every mainline release repeats the rebase-forward exercise, so the port
 surface is derived by `./hogdot/port-surface.sh` rather than written down anywhere that could rot.
 
-## Upstream and licence
+## Upstream and license
 
 hogdot tracks [godotengine/godot](https://github.com/godotengine/godot) and is MIT-licensed, exactly
 as Godot is. The WebGPU backend originates with

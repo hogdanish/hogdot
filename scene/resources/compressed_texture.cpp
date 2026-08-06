@@ -253,7 +253,7 @@ Ref<Image> CompressedTexture2D::get_image() const {
 	// *texture*, it returns the *asset on disk*, so anything that modified the
 	// texture through RenderingServer reads back stale content — and on desktop
 	// it also trades a GPU readback for a file open plus a full image decode.
-	// The fork shipped this ungated; hogdot restores mainline behaviour
+	// The fork shipped this ungated; hogdot restores mainline behavior
 	// everywhere the synchronous readback actually works. See RL-018.
 	if (!path_to_file.is_empty()) {
 		Ref<FileAccess> f = FileAccess::open(path_to_file, FileAccess::READ);

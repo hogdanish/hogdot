@@ -8,7 +8,7 @@ Frontmatter mechanics and the ⚠ YAML colon trap are in [frontmatter.md](frontm
 ---
 name: <scope>
 description: <What it covers — name the real files, classes and commands.> <Primary use case first.>
-when_to_use: Load when <situation>. Boundary — <this> is X; <neighbour> is Y.
+when_to_use: Load when <situation>. Boundary — <this> is X; <neighbor> is Y.
 user-invocable: false
 ---
 
@@ -36,7 +36,7 @@ user-invocable: false
 <One line on what this file is and what it is derived from.>
 
 ## <Section>
-<The table, catalogue or spec that belongs here — kept out of SKILL.md because it loads on demand.>
+<The table, catalog or spec that belongs here — kept out of SKILL.md because it loads on demand.>
 ```
 
 Placeholder form, when scaffolding a skill to be filled later:

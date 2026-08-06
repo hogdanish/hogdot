@@ -857,5 +857,4 @@ void main() {
 #endif
 
 	frag_color = color;
-
 }

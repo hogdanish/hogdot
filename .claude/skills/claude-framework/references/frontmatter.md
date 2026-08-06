@@ -22,7 +22,7 @@ After editing frontmatter, confirm the skill still appears in the skills listing
 | --- | --- |
 | `name` | Display name in listings. Defaults to the directory name; the command you type (`/name`) comes from the **directory**, not this field. Keep it equal to the dir name. |
 | `description` | *What the skill covers*, primary use case first. Claude matches against this to auto-invoke. Combined with `when_to_use`, truncated at **1,536 chars** in the listing. |
-| `when_to_use` | *When to load it* — trigger phrases, example requests, and the boundary with neighbouring skills. Appended to `description`; counts toward the same cap. |
+| `when_to_use` | *When to load it* — trigger phrases, example requests, and the boundary with neighboring skills. Appended to `description`; counts toward the same cap. |
 | `argument-hint` | Autocomplete hint, e.g. `[skill-name]`. |
 | `arguments` | Named positional args for `$name` substitution. Space-separated string or YAML list; names map to positions in order. |
 | `disable-model-invocation` | `true` = only the user can invoke it (`/name`); **its description leaves Claude's context** (frees listing budget) and it won't preload into subagents or fire from a scheduled task. For side-effectful commands. Default `false`. |
@@ -102,7 +102,7 @@ Named and indexed positionals are shell-tokenized, so `$description` captures on
 
 - `SKILL.md` body: a lean overview. Docs cap it at <500 lines; aim far lower. Once invoked the whole body
   stays in context for the session (re-attached after compaction within a 25k-token pool) — every line recurs.
-- Push API tables, catalogues and specs into `references/*.md`, each linked with a one-line what/when.
+- Push API tables, catalogs and specs into `references/*.md`, each linked with a one-line what/when.
   ⚠ **Don't split off a lone small reference** — a single file under ~250 lines that isn't a living log or
   a fork-injected index belongs inline. A thin body deferring everything to one small ref is pointless
   indirection.

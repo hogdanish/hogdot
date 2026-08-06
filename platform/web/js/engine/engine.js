@@ -317,7 +317,7 @@ const Engine = (function () {
 				desc.requiredFeatures = (desc.requiredFeatures || []).concat(['timestamp-query']);
 			}
 			// Request optional texture format tiers used by Godot (r16snorm, rg16snorm, etc.).
-			var optionalFeatures = [
+			const optionalFeatures = [
 				'readonly-and-readwrite-storage-textures',
 				'texture-formats-tier1',
 				'texture-formats-tier2',
@@ -334,16 +334,16 @@ const Engine = (function () {
 				'texture-compression-etc2',
 				'texture-compression-astc',
 			];
-			for (var i = 0; i < optionalFeatures.length; i++) {
+			for (let i = 0; i < optionalFeatures.length; i++) {
 				if (adapter.features.has(optionalFeatures[i])) {
 					desc.requiredFeatures = (desc.requiredFeatures || []).concat([optionalFeatures[i]]);
 				}
 			}
 			// Request higher limits that Godot's renderer needs.
 			// The adapter may support more than the default; request what it offers.
-			var adapterLimits = adapter.limits || {};
-			desc.requiredLimits = desc.requiredLimits || {};
-			var limitsToMax = [
+			const adapterLimits = adapter.limits || {};
+			desc.requiredLimits ||= {};
+			const limitsToMax = [
 				'maxStorageBuffersPerShaderStage',
 				'maxStorageBufferBindingSize',
 				'maxBufferSize',
@@ -360,8 +360,8 @@ const Engine = (function () {
 				// device never gets the surplus unless it asks for it (RL-029).
 				'maxInterStageShaderVariables',
 			];
-			for (var li = 0; li < limitsToMax.length; li++) {
-				var key = limitsToMax[li];
+			for (let li = 0; li < limitsToMax.length; li++) {
+				const key = limitsToMax[li];
 				if (adapterLimits[key] !== undefined) {
 					desc.requiredLimits[key] = adapterLimits[key];
 				}
@@ -371,6 +371,11 @@ const Engine = (function () {
 				device.lost.then(function (info) {
 					const reason = info.reason || 'unknown';
 					const msg = info.message || '';
+
+					// Device loss is fatal and has no other reporting channel: the
+					// WASM side is already gone by the time this fires, so ERR_PRINT
+					// cannot reach the console.
+					// eslint-disable-next-line no-console
 					console.error(`[Godot] WebGPU device lost (reason: ${reason}): ${msg}`);
 				});
 				device.addEventListener('uncapturederror', function (event) {
@@ -380,6 +385,13 @@ const Engine = (function () {
 					const err = event.error;
 					const kind = (err && err.constructor && err.constructor.name) || 'UnknownError';
 					const msg = (err && err.message) ? err.message : String(err);
+
+					// This is the ONLY place GPU validation errors become visible.
+					// WebGPU reports them asynchronously to this handler, not as a
+					// return value any C++ call can check, so without it a shader or
+					// pipeline defect is silent. Every rendering bug found in this
+					// port was found here.
+					// eslint-disable-next-line no-console
 					console.error(`[Godot] WebGPU uncaptured error: ${kind}: ${msg}`);
 				});
 				return device;

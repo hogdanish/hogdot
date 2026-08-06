@@ -307,7 +307,7 @@ export function runTests() {
             }
         });
 
-        it('should return null for scaled formats (USCALED/SSCALED)', () => {
+        it('should return null for scaled formats (UNSCALED/SSCALED)', () => {
             // R8 scaled
             assert.equal(RD_TO_WGPU_FORMAT[10], null);
             assert.equal(RD_TO_WGPU_FORMAT[11], null);
