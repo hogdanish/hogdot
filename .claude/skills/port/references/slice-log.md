@@ -857,3 +857,50 @@ over transcribing.
 the seven touch `.glsl` or generated WGSL, which a green build proves **nothing** about: Godot embeds
 shader source and compiles it at runtime. RL-001, RL-015, RL-029 and RL-031 all need *renders*, and
 RL-011/RL-012 need a spawn/despawn and a static-pose skeleton respectively. None of that has run yet.
+
+---
+
+## Provenance corrections (forward-only, append-only)
+
+History is never rewritten here (`conventions.md` § git mechanics), so a wrong `Webgpu-Source:`
+trailer is repaired by recording the right SHAs here instead. **Trust this section over the trailer**
+when the two disagree. Found by the phase-6 audit's A4 spot-check as RL-032; re-derived with
+`git log --oneline 4.6.2-stable..webgpu/webgpu-4.6.2 -- <path>`.
+
+**`5829f06` — `port(ci): add the WebGPU web template jobs`.**
+Cites `69a9b2f`, which touches `SConstruct`, `drivers/SCsub` and `drivers/webgpu/` — none of the
+files the commit changes. The correct source for `.github/workflows/web_builds.yml` is the fork's
+sole commit touching it:
+
+```
+Webgpu-Source: 2507016
+```
+
+**`7d5f060` — `port(clean): apply 11 of the 13 conflict-free fork modifications`.**
+Cites `f329e39`, which vendored the naga-converter machinery and touches none of the eleven files.
+The commit spans eleven paths with distinct sources, so the honest trailer is the union:
+
+```
+Webgpu-Source: 45cee3f 7655f1d d16f25b 7f501e8 f8b3cd0 04713bd 5ca1e92 5722105
+               dd378ba 4d1c03c 4bbc72a 3e29284 b2327be d1da774 e9505ca fd5f8c8
+```
+
+Per path, for anyone tracing a single line:
+
+| path | fork commits |
+| --- | --- |
+| `.gitattributes` | `45cee3f` |
+| `misc/dist/html/full-size.html` | `7655f1d` `d16f25b` |
+| `platform/web/js/engine/config.js` | `d16f25b` `7f501e8` |
+| `platform/web/js/engine/engine.js` | `f8b3cd0` `04713bd` `5ca1e92` `5722105` `dd378ba` `4d1c03c` `4bbc72a` `3e29284` `7655f1d` `d16f25b` |
+| `shaders/canvas.glsl` | `b2327be` |
+| `shaders/canvas_sdf.glsl` | `d1da774` |
+| `shaders/effects/copy.glsl` | `d1da774` `e9505ca` |
+| `shaders/effects/resolve.glsl` | `d1da774` |
+| `shaders/effects/smaa_edge_detection.glsl` | `e9505ca` |
+| `shaders/effects/smaa_weight_calculation.glsl` | `e9505ca` |
+| `shaders/skeleton.glsl` | `fd5f8c8` |
+
+⚠ **The lesson: a bulk `port(clean)` commit spanning many unrelated files cannot carry one honest
+`Webgpu-Source:`.** Both errors are that shape. At the next rebase-forward, either split such a
+commit per source-cluster or write the per-path table into the commit body from the start.

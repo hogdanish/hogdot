@@ -24,4 +24,9 @@ fork becomes unmaintainable. This is the single most important convention in the
   commit body. A dropped hunk with no record is indistinguishable from an oversight forever after.
 - **Do not rewrite the `webgpu` or `upstream` remote refs.** They are the evidence. Both have their
   push URLs disabled; keep it that way.
+- ⚠ **A landed trailer is never corrected in place** — history is not rewritten here. Wrong SHAs get a
+  forward-only entry in `.claude/skills/port/references/slice-log.md` § *Provenance corrections*, which
+  **outranks the trailer** when the two disagree. Two commits are already listed there (RL-032).
+- ⚠ **One bulk commit spanning many unrelated files cannot carry one honest `Webgpu-Source:`** — that
+  shape produced both known errors. Split per source-cluster, or put a per-path table in the body.
 - Mixing a port commit with unrelated cleanup destroys the audit trail — keep them separate.
