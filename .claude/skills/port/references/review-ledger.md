@@ -149,14 +149,22 @@ SPIR-V with the **vendored** glslang compiled into it (`thirdparty/glslang`, 16.
 `thirdparty/README.md:417`). Nothing checks that the two are the same version, or even compares them.
 Any byte of divergence changes the hash, every lookup misses, and the engine silently falls back to
 the runtime `spirv_preprocess` + Tint path. **The failure mode is invisible**: the build is green,
-the table is generated, the rendering is correct, and the entire optimization is simply dead — which
-is the worst possible shape for a performance feature. This machine currently has 16.5.0 on `$PATH`
-against a vendored 16.1.0, so the table is *probably already dead*.
-**Disposition:** deferred — correctness is unaffected (a miss is a slow path, not a wrong shader), so
-this is not a Phase 2 blocker and the port stays faithful. **Measure the hit rate in Phase 5** before
-trusting any WebGPU startup-time benchmark; the honest fixes are to key the table on
-(shader path, variant, defines) instead of a SPIR-V hash, or to have the build assert that the
-external glslang's version matches `GLSLANG_VERSION_*` from `thirdparty/glslang/glslang/build_info.h`.
+the table is generated, and the entire optimization is simply dead. This machine currently has 16.5.0
+on `$PATH` against a vendored 16.1.0, so the table is *probably already dead*.
+
+⚠ **Severity raised bug → blocker, 2026-08-06, phase-4 boot gate.** This entry originally read
+"correctness is unaffected (a miss is a slow path, not a wrong shader)" and **that was wrong.** A miss
+is only a slow path if the runtime path can produce valid WGSL at all — and for a write-only storage
+buffer it cannot, because WGSL has no `write` access mode in the storage address space. The dead table
+was therefore load-bearing for correctness without anyone knowing. Confirmed by observation: the table
+contains particles entries, yet the particles compute shaders still reached live Tint and failed. See
+**RL-020**, which this entry is the suspected cause of.
+**Disposition:** open, **fix in Phase 5 as RL-020's first hypothesis test.** Point
+`wgsl_precompile.py` at the vendored glslang and check whether the table starts hitting. Note that a
+hit only *masks* RL-020 — it does not fix it, because any shader absent from the table still takes the
+live path. The durable fixes remain: key the table on (shader path, variant, defines) rather than a
+SPIR-V hash, and have the build assert the external glslang's version matches `GLSLANG_VERSION_*` from
+`thirdparty/glslang/glslang/build_info.h` instead of failing silently.
 
 ### RL-010 — 2026-08-06 — perf
 **Where:** `servers/rendering/renderer_rd/forward_mobile/render_forward_mobile.cpp`
