@@ -23,5 +23,5 @@ stale the moment upstream tags a release; re-deriving takes about a second and i
 
 Roughly 1,500 files sounds like the whole engine and isn't. The overwhelming majority are vendored
 third-party drops (Tint, SPIRV-Tools, SPIRV-Headers) that apply wholesale, plus tests, notes and site
-assets. The files that need human judgement are only those GodotWebGPU modified *and* mainline also
+assets. The files that need human judgment are only those GodotWebGPU modified *and* mainline also
 changed — run `./hogdot/port-surface.sh --conflicts` for the current list.

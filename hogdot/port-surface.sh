@@ -11,7 +11,7 @@
 #   clean     — GodotWebGPU modifies a file mainline has not touched since the
 #               fork point. Applies cleanly.
 #   conflict  — GodotWebGPU modifies a file mainline ALSO changed. This is the
-#               real integration surface: the only files needing human judgement.
+#               real integration surface: the only files needing human judgment.
 set -euo pipefail
 
 here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
