@@ -1060,7 +1060,7 @@ Findings beyond formatting:
   with it. Put the reason on preceding lines and keep the directive bare.
 - ⚠ **`chmod +x` does not satisfy `check-shebang-scripts-are-executable`** — it reads the git index
   mode. Use `git add --chmod=+x`.
-- ⚠ **`header_guards.py` requires `#pragma once` immediately after the licence block**, before any
+- ⚠ **`header_guards.py` requires `#pragma once` immediately after the license block**, before any
   descriptive comment. Three `tint_cli` shim headers had it below their comments and reported
   `REQUIRES MANUAL CHANGES`.
 - ⚠ **The `file-format` hook deleted a carried port hunk** — the fork's lone blank line in

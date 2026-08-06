@@ -8350,7 +8350,7 @@ RDD::PipelineID RenderingDeviceDriverWebGPU::render_pipeline_create(
 		//
 		// An invalid pipeline then invalidates every command buffer that binds it,
 		// so a single stencil-using material takes down whole frames. Dropping the
-		// stencil state here is not a behavioural change: without a stencil aspect
+		// stencil state here is not a behavioral change: without a stencil aspect
 		// there is no stencil to test or write, so the ops could never have had an
 		// effect. See RL-037.
 		const bool ds_has_stencil_aspect =

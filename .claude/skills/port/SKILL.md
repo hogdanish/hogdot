@@ -11,13 +11,22 @@ hogdot exists to run [GodotWebGPU](https://github.com/dwalter/godotwebgpu)'s Web
 mainline Godot. That is a **recurring** exercise, once per mainline release, which is why nothing about the
 port surface is written down as data — it is derived on demand.
 
-**Status (2026-08-06, phase-6 audit):** slices 1–7 are landed — **37 of the 39 conflicts**, all 1,447
-additive files, all 13 clean mods and the one collision. Only **slice 8 (meta)** remains: `README.md`,
-`thirdparty/README.md`, `.gitignore`, `GODOT_README.md`. `webgpu_tests/test_project` **renders in
-Chrome on WebGPU with zero GPU validation errors**. The phase-6 fidelity audit re-derived every
-carried hunk (157 across the seven slices) against the fork and found **zero unrecorded adaptations
-or drops**. Mainline 4.7.1 still contains zero WebGPU references of its own; the entire backend
-arrives from the fork.
+**Status (2026-08-06, end of phase 7):** **all eight slices are landed** — every one of the 39
+conflicts is dispositioned (37 carry fork content; 2 are recorded deliberate drops), plus all 1,447
+additive files, all 13 clean mods and the one collision. `pre-commit run --all-files` passes.
+`webgpu_tests/test_project` **renders in Chrome on WebGPU with zero GPU validation errors**, and
+CommonGrounds boots. The phase-6 fidelity audit re-derived every carried hunk (157 across the first
+seven slices) against the fork and found **zero unrecorded adaptations or drops**. Mainline 4.7.1
+still contains zero WebGPU references of its own; the entire backend arrives from the fork.
+
+⚠ **`port-surface.sh` never reports "zero conflicts" and is not a progress meter** — it derives the
+fork-vs-mainline delta, which is invariant to how much has landed. The per-file check that actually
+answers "did we carry it" is in `references/slice-log.md` § *slice 8*.
+
+⚠ **The gate scenes only exercise the engine's own shaders.** Phase 7's CommonGrounds acceptance run
+found three blockers in an hour (RL-036/037/038) that phases 4–6 could not have reached, because
+`webgpu_tests/test_project` contains no `RDShaderFile`, no `stencil_mode` material and no direct
+`RenderingDevice` use from script. Adding those is queued work.
 
 ## Deriving the surface — never reconstruct it by hand
 

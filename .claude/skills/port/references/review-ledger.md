@@ -954,7 +954,7 @@ Confirmed empirically rather than by reading the bind, via
 `ClassDB.class_get_method_list("RenderingDevice", true)`:
 `args exposed: 5 … _unnamed_arg4 … default_args: 1`.
 
-**Disposition:** **fixed-in `<RL036-SHA>`** — the bind now names `first_instance` and passes two
+**Disposition:** **fixed-in `2a68be7`** — the bind now names `first_instance` and passes two
 `DEFVAL(0)`s, giving 5 exposed args / 2 defaults / **3 required**, which matches the class reference
 and the documented call. `doc/classes/RenderingDevice.xml` gains the fifth parameter in the same
 change.
@@ -1009,10 +1009,10 @@ stencil-using material — Godot's `stencil_mode` is a 4.5+ feature the fork's a
 **coverage hole in the gate**, not just a driver bug: the shader-coverage scene should grow a stencil
 material.
 
-**Disposition:** **fixed-in `<RL037-SHA>`** — the stencil block is now gated on the attachment format
+**Disposition:** **fixed-in `2a68be7`** — the stencil block is now gated on the attachment format
 actually having a stencil aspect (`Stencil8`, `Depth24PlusStencil8`, `Depth32FloatStencil8`);
 otherwise the state is left at the disabled default and a one-shot `WARN_PRINT_ONCE` explains why.
-**Not a behavioural change:** with no stencil aspect there is nothing to test or write, so the ops
+**Not a behavioral change:** with no stencil aspect there is nothing to test or write, so the ops
 could never have taken effect — the only previous outcome was an invalid pipeline.
 
 ⚠ Native backends do not hit this, which is why three phases of native regression runs never saw it:
@@ -1049,7 +1049,7 @@ The gate scenes contain no `RDShaderFile`.
 ⚠ **This is a mainline inconsistency, not a fork hunk** — the hardcoded 1.4 is upstream's, and on
 Vulkan/Metal/D3D12 it is harmless because they accept 1.4. WebGPU is the first backend that cares.
 
-**Disposition:** **fixed-in `<RL038-SHA>`** — the binds path now routes through
+**Disposition:** **fixed-in `2a68be7`** — the binds path now routes through
 `RD::get_singleton()->shader_compile_spirv_from_source()` when a device exists, so both entry points
 derive the version from the same place. The hardcoded call is kept only for the no-device case (the
 editor importer can reach this before a `RenderingDevice` exists).
