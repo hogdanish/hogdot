@@ -1,0 +1,89 @@
+diff --git a/thirdparty/tint/src/tint/lang/spirv/reader/lower/texture.cc b/thirdparty/tint/src/tint/lang/spirv/reader/lower/texture.cc
+--- a/thirdparty/tint/src/tint/lang/spirv/reader/lower/texture.cc
++++ b/thirdparty/tint/src/tint/lang/spirv/reader/lower/texture.cc
+@@ -199,6 +199,7 @@ struct State {
+                 TINT_ICE_ON_NO_MATCH);
+         }
+         UpdateValues();
++        RemoveUnreachableFunctions();
+ 
+         Vector<spirv::ir::BuiltinCall*, 4> builtin_worklist;
+         for (auto* inst : ir.Instructions()) {
+@@ -293,6 +294,77 @@ struct State {
+         }
+     }
+ 
++    // Drop functions that are no longer reachable from an entry point.
++    //
++    // `ConvertUserCall` forks a function when a call site converts one of its handle
++    // parameters, retargets that call site, and destroys the original only when no
++    // *call* usage remains. An original that is kept alive solely by another dead
++    // original therefore survives with its parameters still typed `spirv.image`. Its
++    // texture builtins are still reachable through `ir.Instructions()`, so the lowering
++    // below picks them up and asserts on a non-texture type.
++    //
++    // Godot hits this from `area_lights_inc.glsl`, whose LTC helpers take
++    // `texture2D`/`sampler2D` parameters and are called from more than one site.
++    void RemoveUnreachableFunctions() {
++        Hashmap<core::ir::Block*, core::ir::Function*, 8> block_to_fn;
++        for (auto& fn : ir.functions) {
++            block_to_fn.Add(fn->Block(), fn);
++        }
++        auto containing = [&](core::ir::Instruction* inst) -> core::ir::Function* {
++            auto* b = inst->Block();
++            while (b) {
++                if (auto f = block_to_fn.Get(b)) {
++                    return *f;
++                }
++                auto* parent = b->Parent();
++                if (!parent) {
++                    return nullptr;
++                }
++                b = parent->Block();
++            }
++            return nullptr;
++        };
++
++        Hashmap<core::ir::Function*, Vector<core::ir::Function*, 4>, 8> callees;
++        for (auto* inst : ir.Instructions()) {
++            auto* uc = inst->As<core::ir::UserCall>();
++            if (!uc || !uc->Target()) {
++                continue;
++            }
++            if (auto* caller = containing(uc)) {
++                callees.GetOrAddZero(caller).Push(uc->Target());
++            }
++        }
++
++        Hashset<core::ir::Function*, 8> reachable;
++        Vector<core::ir::Function*, 8> worklist;
++        for (auto& fn : ir.functions) {
++            if (fn->IsEntryPoint() && reachable.Add(fn)) {
++                worklist.Push(fn);
++            }
++        }
++        while (!worklist.IsEmpty()) {
++            auto* fn = worklist.Pop();
++            if (auto cs = callees.Get(fn)) {
++                for (auto* callee : *cs) {
++                    if (reachable.Add(callee)) {
++                        worklist.Push(callee);
++                    }
++                }
++            }
++        }
++
++        Vector<core::ir::Function*, 8> dead;
++        for (auto& fn : ir.functions) {
++            if (!reachable.Contains(fn)) {
++                dead.Push(fn);
++            }
++        }
++        for (auto* fn : dead) {
++            ir.Destroy(fn);
++        }
++    }
++
+     void ReplacePointerToHandle() {
+         Vector<core::ir::Value*, 4> usages_to_update;
+         Hashset<core::ir::Function*, 4> called_functions_to_fixup;

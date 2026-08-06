@@ -23,6 +23,7 @@ done
 | 0004 | shader_io.cc | Point size | Accept non-constant `point_size` stores |
 | 0005 | ir_to_program.cc | Spec constants | `@size` emission guard + capability |
 | 0006 | parse_num.cc | Vendoring | Replace `absl::from_chars` with `std::from_chars` |
+| 0007 | reader/lower/texture.cc | Handle params | Drop unreachable functions before texture lowering |
 
 ## Logical Groups
 
@@ -41,6 +42,17 @@ value first. This patch relaxes that validation. Could potentially be moved to
 
 **Group D — Vendoring (0006)**: Replaces Abseil dependency with C++17 `std::from_chars`.
 Always necessary when vendoring without Abseil.
+
+**Group E — Handle parameters (0007)**: `ConvertUserCall` forks a function when a call
+site converts one of its handle parameters, retargets that call, and destroys the
+original only if no *call* usage remains. An original kept alive solely by another dead
+original survives with parameters still typed `spirv.image`; its texture builtins are
+still in `ir.Instructions()`, so the lowering asserts on a non-texture type. The patch
+sweeps functions unreachable from any entry point after `UpdateValues()`. Godot 4.7.1
+hits this through `area_lights_inc.glsl`, whose LTC helpers take `texture2D`/`sampler2D`
+parameters and are called from more than one site — added by area lights, which do not
+exist in 4.6.2, which is why GodotWebGPU never saw it. This one is a genuine upstream
+Tint bug and is the best candidate of the seven for an upstream report.
 
 ## Upstream Source
 
