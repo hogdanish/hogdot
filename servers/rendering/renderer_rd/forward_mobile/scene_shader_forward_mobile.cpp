@@ -840,7 +840,17 @@ void SceneShaderForwardMobile::init(const String p_defines) {
 		actions.base_texture_binding_index = 1;
 		actions.texture_layout_set = RenderForwardMobile::MATERIAL_UNIFORM_SET;
 		actions.base_uniform_string = "material.";
-		actions.base_varying_index = 15;
+		// First inter-stage location available to user shaders. It must be one past the
+		// highest location `scene_forward_mobile.glsl` reserves — see the varying budget
+		// table at the top of that file's vertex stage.
+		//
+		// The engine packs into locations 0..10, plus 11 and 12 for the motion-vector
+		// pair. That pair only exists in the MODE_RENDER_MOTION_VECTORS variant, which is
+		// multiview-only on this renderer; a driver without multiview support can never
+		// compile it, so those two locations go back to user shaders. This matters on
+		// WebGPU, whose `maxInterStageShaderVariables` floor of 16 left a single user
+		// varying slot at the old flat reservation of 15 (RL-029).
+		actions.base_varying_index = RD::get_singleton()->has_feature(RD::SUPPORTS_MULTIVIEW) ? 13 : 11;
 
 		actions.default_filter = ShaderLanguage::FILTER_LINEAR_MIPMAP;
 		actions.default_repeat = ShaderLanguage::REPEAT_ENABLE;

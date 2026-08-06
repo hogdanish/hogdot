@@ -353,6 +353,12 @@ const Engine = (function () {
 				'maxSamplersPerShaderStage',
 				'maxColorAttachments',
 				'maxBindGroups',
+				// Inter-stage variables are the scene shader's scarcest resource: the
+				// engine reserves the low locations and whatever is left over is what a
+				// user shader may declare as varyings. The WebGPU default is only 16,
+				// while real adapters commonly offer far more (28 on Apple/Metal), and a
+				// device never gets the surplus unless it asks for it (RL-029).
+				'maxInterStageShaderVariables',
 			];
 			for (var li = 0; li < limitsToMax.length; li++) {
 				var key = limitsToMax[li];

@@ -96,6 +96,28 @@ void axis_angle_to_tbn(vec3 axis, float angle, out vec3 tangent, out vec3 binorm
 
 /* Varyings */
 
+// Inter-stage location budget. WebGPU guarantees only 16 inter-stage variables
+// (`maxInterStageShaderVariables`), so every location the engine reserves is one a
+// user shader cannot have — see `actions.base_varying_index` in
+// `scene_shader_forward_mobile.cpp`, which must equal one past the highest location
+// used below. Keep this table accurate when adding a varying:
+//
+//   0      vertex_interp                              always
+//   1      normal_interp                              NORMAL_USED
+//   2      color_interp                               COLOR_USED
+//   3      uv_interp                                  UV_USED
+//   4      uv2_interp                                 UV2_USED || USE_LIGHTMAP
+//   5,6    tangent_interp, binormal_interp            TANGENT_USED && friends
+//   7      diffuse_light_interp | dp_clip             vertex lighting XOR dual paraboloid
+//   8      specular_light_interp                      vertex lighting
+//   9      batch_instance_index                       always
+//   10     point_coord_interp                         POINT_SIZE_USED && POINT_COORD_USED
+//   11,12  screen_position, prev_screen_position      MODE_RENDER_MOTION_VECTORS (multiview only)
+//
+// Location 7 is shared: `dp_clip` only exists under MODE_DUAL_PARABOLOID, which is
+// only ever defined together with MODE_RENDER_DEPTH, and the vertex-lighting pair
+// requires !MODE_RENDER_DEPTH. If that ever stops holding, glslang rejects the
+// aliased location loudly rather than mis-rendering.
 layout(location = 0) out vec3 vertex_interp;
 
 #ifdef NORMAL_USED
@@ -134,13 +156,13 @@ layout(set = MATERIAL_UNIFORM_SET, binding = 0, std140) uniform MaterialUniforms
 
 #ifdef MODE_DUAL_PARABOLOID
 
-layout(location = 9) out float dp_clip;
+layout(location = 7) out float dp_clip;
 
 #endif
 
 #if defined(MODE_RENDER_MOTION_VECTORS)
-layout(location = 12) out highp vec4 screen_position;
-layout(location = 13) out highp vec4 prev_screen_position;
+layout(location = 11) out highp vec4 screen_position;
+layout(location = 12) out highp vec4 prev_screen_position;
 #endif
 
 #ifdef USE_MULTIVIEW
@@ -163,13 +185,13 @@ ivec2 multiview_uv(ivec2 uv) {
 #endif // !USE_MULTIVIEW
 
 #if defined(POINT_SIZE_USED) && defined(POINT_COORD_USED)
-layout(location = 14) out vec2 point_coord_interp;
+layout(location = 10) out vec2 point_coord_interp;
 #endif
 
 // Effective instance index for instanced draw batching.
 // For non-multimesh: batch_instance_index + gl_InstanceIndex (supports N-instance batches).
 // For multimesh: batch_instance_index only (gl_InstanceIndex indexes multimesh data).
-layout(location = 10) flat out uint batch_instance_index;
+layout(location = 9) flat out uint batch_instance_index;
 
 invariant gl_Position;
 
@@ -889,13 +911,13 @@ layout(location = 8) in vec4 specular_light_interp;
 
 #ifdef MODE_DUAL_PARABOLOID
 
-layout(location = 9) in float dp_clip;
+layout(location = 7) in float dp_clip;
 
 #endif
 
 #if defined(MODE_RENDER_MOTION_VECTORS)
-layout(location = 12) in highp vec4 screen_position;
-layout(location = 13) in highp vec4 prev_screen_position;
+layout(location = 11) in highp vec4 screen_position;
+layout(location = 12) in highp vec4 prev_screen_position;
 #endif
 
 #ifdef USE_LIGHTMAP
@@ -979,10 +1001,10 @@ ivec2 multiview_uv(ivec2 uv) {
 #endif // !USE_MULTIVIEW
 
 // Effective instance index from vertex stage (supports instanced draw batching).
-layout(location = 10) flat in uint batch_instance_index;
+layout(location = 9) flat in uint batch_instance_index;
 
 #if defined(POINT_SIZE_USED) && defined(POINT_COORD_USED)
-layout(location = 14) in vec2 point_coord_interp;
+layout(location = 10) in vec2 point_coord_interp;
 #endif
 
 //defines to keep compatibility with vertex
