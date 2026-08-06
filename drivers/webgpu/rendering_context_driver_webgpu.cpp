@@ -31,7 +31,7 @@
 #ifdef WEBGPU_ENABLED
 
 #include "rendering_context_driver_webgpu.h"
-#include "rendering_device_driver_webgpu.h"
+#include "drivers/webgpu/rendering_device_driver_webgpu.h"
 
 // html5_webgpu.h was removed in Emscripten 5.x when USE_WEBGPU was dropped.
 // Device is now created from C++ using the emdawnwebgpu port's Dawn API.
@@ -160,14 +160,58 @@ void RenderingContextDriverWebGPU::surface_set_size(SurfaceID p_surface, uint32_
 	}
 }
 
-void RenderingContextDriverWebGPU::surface_set_vsync_mode(SurfaceID p_surface, DisplayServer::VSyncMode p_vsync_mode) {
+void RenderingContextDriverWebGPU::surface_set_vsync_mode(SurfaceID p_surface, DisplayServerEnums::VSyncMode p_vsync_mode) {
 	ERR_FAIL_COND(!surfaces.has(p_surface));
 	surfaces[p_surface].vsync_mode = p_vsync_mode;
 }
 
-DisplayServer::VSyncMode RenderingContextDriverWebGPU::surface_get_vsync_mode(SurfaceID p_surface) const {
-	ERR_FAIL_COND_V(!surfaces.has(p_surface), DisplayServer::VSYNC_ENABLED);
+DisplayServerEnums::VSyncMode RenderingContextDriverWebGPU::surface_get_vsync_mode(SurfaceID p_surface) const {
+	ERR_FAIL_COND_V(!surfaces.has(p_surface), DisplayServerEnums::VSYNC_ENABLED);
 	return surfaces[p_surface].vsync_mode;
+}
+
+// --- HDR output ---
+//
+// WebGPU exposes no canvas HDR configuration: `GPUCanvasConfiguration` has no
+// luminance or colour-volume fields in the shipped spec, and Chrome's
+// `predictedDynamicRange` is experimental and not something a surface can request.
+// So the surface is permanently SDR: setters are accepted and discarded, getters
+// report fixed SDR values rather than per-surface state. Reference numbers match
+// `RenderingContextDriverVulkan::Surface`'s defaults (200 nits BT.2408 reference,
+// 1000 nits max, 100.0 linear scale) so cross-backend comparisons see the same
+// constants; `surface_get_hdr_output_max_value` returns 1.0, the SDR max linear
+// value and the floor Vulkan's own `max_luminance / reference_luminance` clamps to.
+
+void RenderingContextDriverWebGPU::surface_set_hdr_output_enabled(SurfaceID p_surface, bool p_enabled) {
+}
+
+bool RenderingContextDriverWebGPU::surface_get_hdr_output_enabled(SurfaceID p_surface) const {
+	return false;
+}
+
+void RenderingContextDriverWebGPU::surface_set_hdr_output_reference_luminance(SurfaceID p_surface, float p_reference_luminance) {
+}
+
+float RenderingContextDriverWebGPU::surface_get_hdr_output_reference_luminance(SurfaceID p_surface) const {
+	return 200.0f;
+}
+
+void RenderingContextDriverWebGPU::surface_set_hdr_output_max_luminance(SurfaceID p_surface, float p_max_luminance) {
+}
+
+float RenderingContextDriverWebGPU::surface_get_hdr_output_max_luminance(SurfaceID p_surface) const {
+	return 1000.0f;
+}
+
+void RenderingContextDriverWebGPU::surface_set_hdr_output_linear_luminance_scale(SurfaceID p_surface, float p_linear_luminance_scale) {
+}
+
+float RenderingContextDriverWebGPU::surface_get_hdr_output_linear_luminance_scale(SurfaceID p_surface) const {
+	return 100.0f;
+}
+
+float RenderingContextDriverWebGPU::surface_get_hdr_output_max_value(SurfaceID p_surface) const {
+	return 1.0f;
 }
 
 uint32_t RenderingContextDriverWebGPU::surface_get_width(SurfaceID p_surface) const {
