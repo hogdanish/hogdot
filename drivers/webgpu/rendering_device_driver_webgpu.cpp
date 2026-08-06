@@ -3477,6 +3477,265 @@ static WGPUShaderStage _stages_to_wgpu_visibility(uint32_t p_stage_mask) {
 	return vis;
 }
 
+void RenderingDeviceDriverWebGPU::_apply_common_wgsl_passes(char **r_wgsl, ShaderStage p_stage) {
+	// Every WGSL rewrite that BOTH module-producing paths need lives here.
+	//
+	// ⚠ There are two paths that turn SPIR-V into a WGSL shader module:
+	// shader_create_from_container() for the reflection modules, and
+	// _create_module_with_spec_constants() for the specialized ones. They must
+	// produce textually equivalent WGSL for the same input, because the bind group
+	// layout is built from the first and validated against the second. That used to
+	// be a convention -- the second path's comment literally read "must match
+	// shader_create_from_container" -- and it broke exactly as you would expect:
+	// adding the depth-sample rewrite to one path only produced
+	// "Entry point's stage (ShaderStage::Fragment) is not in the binding visibility
+	// in the layout (ShaderStage::None)", because the layout came from rewritten
+	// WGSL where a sampler had become unused while the specialized module still
+	// sampled with it. See RL-027.
+	//
+	// Add any new shared WGSL pass HERE, not at a call site. Passes that depend on
+	// reflection state (the read_write storage-texture split, the read-only storage
+	// -> sampled conversion) necessarily stay in shader_create_from_container,
+	// because they produce binding side-tables the specialized path does not build.
+	// _rewrite_depth_texture_samples() is likewise NOT folded in here: in
+	// shader_create_from_container it must run AFTER those reflection-dependent
+	// passes, so both paths call it explicitly as their last step.
+	char *wgsl_str = *r_wgsl;
+
+	// Remap unsupported 8-bit storage texture format names in WGSL.
+	// r8* and rg8* are not valid base WebGPU storage texel formats — remap to
+	// 32-bit equivalents. With texture-formats-tier1 these formats are valid
+	// natively, so skip the remap to preserve blendable/filterable properties.
+	if (!has_texture_formats_tier1 &&
+			(strstr(wgsl_str, "r8unorm") || strstr(wgsl_str, "r8snorm") ||
+					strstr(wgsl_str, "r8uint") || strstr(wgsl_str, "r8sint") ||
+					strstr(wgsl_str, "rg8unorm") || strstr(wgsl_str, "rg8snorm") ||
+					strstr(wgsl_str, "rg8uint") || strstr(wgsl_str, "rg8sint"))) {
+		String ws(wgsl_str);
+		ws = ws.replace("rg8unorm", "rg32float");
+		ws = ws.replace("rg8snorm", "rg32float");
+		ws = ws.replace("rg8uint", "rg32uint");
+		ws = ws.replace("rg8sint", "rg32sint");
+		ws = ws.replace("r8unorm", "r32float");
+		ws = ws.replace("r8snorm", "r32float");
+		ws = ws.replace("r8uint", "r32uint");
+		ws = ws.replace("r8sint", "r32sint");
+		free(wgsl_str);
+		CharString cs = ws.utf8();
+		wgsl_str = (char *)malloc(cs.length() + 1);
+		memcpy(wgsl_str, cs.get_data(), cs.length() + 1);
+	}
+
+	// If texture-formats-tier1 is not available, remap 16-bit SNORM/UNORM storage
+	// texture format names to their float equivalents in the WGSL text. The format
+	// string lengths are preserved (pad with spaces) so scan offsets remain valid.
+	// r16snorm  → r16float  (same 8 chars)
+	// r16unorm  → r16float  (same 8 chars)
+	// rg16snorm → rg16float (same 9 chars — "rg16float" is 9 chars, perfect)
+	// rg16unorm → rg16float (same 9 chars)
+	// rgba16snorm → rgba16float (11 vs 11 — perfect)
+	// rgba16unorm → rgba16float (11 vs 11 — perfect)
+	if (!has_texture_formats_tier1) {
+		char *q = wgsl_str;
+		while (*q) {
+			if (strncmp(q, "rgba16snorm", 11) == 0) {
+				memcpy(q, "rgba16float", 11);
+				q += 11;
+			} else if (strncmp(q, "rgba16unorm", 11) == 0) {
+				memcpy(q, "rgba16float", 11);
+				q += 11;
+			} else if (strncmp(q, "rg16snorm", 9) == 0) {
+				memcpy(q, "rg16float", 9);
+				q += 9;
+			} else if (strncmp(q, "rg16unorm", 9) == 0) {
+				memcpy(q, "rg16float", 9);
+				q += 9;
+			} else if (strncmp(q, "r16snorm", 8) == 0) {
+				memcpy(q, "r16float", 8);
+				q += 8;
+			} else if (strncmp(q, "r16unorm", 8) == 0) {
+				memcpy(q, "r16float", 8);
+				q += 8;
+			} else {
+				q++;
+			}
+		}
+	}
+
+	// WebGPU only supports a limited set of storage texel formats (see spec §26.1.1).
+	// 16-bit single/dual-channel formats (r16*, rg16*) are NOT valid for storage.
+	// Remap them to 32-bit equivalents. Also handles rgba16snorm/unorm → rgba32float.
+	// Format names only appear in texture_storage_*<format, access> declarations in WGSL.
+	// All replacements preserve string length (in-place memcpy).
+	{
+		char *q = wgsl_str;
+		while (*q) {
+			// RGBA16 snorm/unorm → rgba16float (rgba16float IS a valid storage format)
+			if (strncmp(q, "rgba16snorm", 11) == 0) {
+				memcpy(q, "rgba16float", 11);
+				q += 11;
+			} else if (strncmp(q, "rgba16unorm", 11) == 0) {
+				memcpy(q, "rgba16float", 11);
+				q += 11;
+			}
+			// RG16 all variants → rg32 equivalents
+			else if (strncmp(q, "rg16float", 9) == 0) {
+				memcpy(q, "rg32float", 9);
+				q += 9;
+			} else if (strncmp(q, "rg16snorm", 9) == 0) {
+				memcpy(q, "rg32float", 9);
+				q += 9;
+			} else if (strncmp(q, "rg16unorm", 9) == 0) {
+				memcpy(q, "rg32float", 9);
+				q += 9;
+			} else if (strncmp(q, "rg16uint", 8) == 0) {
+				memcpy(q, "rg32uint", 8);
+				q += 8;
+			} else if (strncmp(q, "rg16sint", 8) == 0) {
+				memcpy(q, "rg32sint", 8);
+				q += 8;
+			}
+			// R16 all variants → r32 equivalents
+			else if (strncmp(q, "r16float", 8) == 0) {
+				memcpy(q, "r32float", 8);
+				q += 8;
+			} else if (strncmp(q, "r16snorm", 8) == 0) {
+				memcpy(q, "r32float", 8);
+				q += 8;
+			} else if (strncmp(q, "r16unorm", 8) == 0) {
+				memcpy(q, "r32float", 8);
+				q += 8;
+			} else if (strncmp(q, "r16uint", 7) == 0) {
+				memcpy(q, "r32uint", 7);
+				q += 7;
+			} else if (strncmp(q, "r16sint", 7) == 0) {
+				memcpy(q, "r32sint", 7);
+				q += 7;
+			} else {
+				q++;
+			}
+		}
+	}
+
+	// WebGPU restriction: Storage buffers with read_write access cannot be used in vertex shaders.
+	// Tint generates var<storage, read_write> for any SSBO without NonWritable decoration.
+	// For render stages (vertex + fragment), demote all read_write storage to read (in-place,
+	// same string length). This ensures the BGL can use ReadOnlyStorage with Vertex|Fragment
+	// visibility. Compute stages keep read_write for actual writes.
+	if (p_stage == RDD::SHADER_STAGE_VERTEX || p_stage == RDD::SHADER_STAGE_FRAGMENT) {
+		char *q = wgsl_str;
+		while ((q = strstr(q, "var<storage, read_write>")) != nullptr) {
+			// "var<storage, read_write>" = 24 chars → "var<storage, read>      " = 24 chars
+			memcpy(q, "var<storage, read>      ", 24);
+			q += 24;
+		}
+	}
+
+	// Chrome doesn't support the 'sized_binding_array' WGSL language feature.
+	// Tint converts GLSL sampler arrays like "sampler2DArray tex[N]" to
+	// "binding_array<texture_2d_array<f32>, N>" in WGSL. Fix: replace
+	// "binding_array<T, N>" with just "T", and fix "varname[expr]" → "varname".
+	// For N>1 (e.g. lightmap_textures[16]), this degrades to single-element
+	// access — acceptable on web where multi-lightmap scenes are rare.
+	if (strstr(wgsl_str, "binding_array<")) {
+		String ws(wgsl_str);
+		Vector<String> binding_array_vars;
+		int64_t search_from = 0;
+		while (true) {
+			int64_t ba_pos = ws.find(": binding_array<", search_from);
+			if (ba_pos == -1) {
+				break;
+			}
+			int64_t inner_start = ba_pos + (int64_t)strlen(": binding_array<");
+			int depth = 1;
+			int64_t p = inner_start;
+			int64_t ws_len = (int64_t)ws.length();
+			while (p < ws_len && depth > 0) {
+				char32_t c = ws[p];
+				if (c == '<') {
+					depth++;
+				} else if (c == '>') {
+					depth--;
+				}
+				p++;
+			}
+			// ws[inner_start .. p-2] = "TYPE, COUNT"
+			String inner = ws.substr(inner_start, p - 1 - inner_start);
+			int64_t last_comma = inner.rfind(",");
+			if (last_comma == -1) {
+				search_from = p;
+				continue;
+			}
+			String type_part = inner.substr(0, last_comma).strip_edges();
+			{
+				// Extract variable name (identifier immediately before the ':')
+				int64_t name_end = ba_pos;
+				while (name_end > 0 && ws[name_end - 1] == ' ') {
+					name_end--;
+				}
+				int64_t name_start = name_end;
+				while (name_start > 0) {
+					char32_t c = ws[name_start - 1];
+					if (c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
+						name_start--;
+					} else {
+						break;
+					}
+				}
+				String var_name = ws.substr(name_start, name_end - name_start);
+				if (!var_name.is_empty()) {
+					binding_array_vars.push_back(var_name);
+				}
+				// Replace ": binding_array<TYPE, N>" with ": TYPE"
+				String new_type = ": " + type_part;
+				ws = ws.substr(0, ba_pos) + new_type + ws.substr(p);
+				search_from = ba_pos + (int64_t)new_type.length();
+			}
+		}
+		// Replace VAR_NAME[any_expr] with VAR_NAME for all unwrapped binding arrays.
+		// Tint may use a variable index (e.g. varname[_e889]) not just varname[0].
+		for (const String &var : binding_array_vars) {
+			int64_t vlen = (int64_t)var.length();
+			int64_t search_pos = 0;
+			while (true) {
+				String needle = var + "[";
+				int64_t idx_pos = ws.find(needle, search_pos);
+				if (idx_pos == -1) {
+					break;
+				}
+				// Ensure 'var' is not a suffix of a longer identifier
+				if (idx_pos > 0) {
+					char32_t before = ws[idx_pos - 1];
+					if (before == '_' || (before >= 'a' && before <= 'z') || (before >= 'A' && before <= 'Z') || (before >= '0' && before <= '9')) {
+						search_pos = idx_pos + 1;
+						continue;
+					}
+				}
+				// Scan past the matching ']'
+				int64_t p = idx_pos + vlen + 1; // skip var + '['
+				int depth = 1;
+				int64_t ws_len2 = (int64_t)ws.length();
+				while (p < ws_len2 && depth > 0) {
+					if (ws[p] == '[') {
+						depth++;
+					} else if (ws[p] == ']') {
+						depth--;
+					}
+					p++;
+				}
+				ws = ws.substr(0, idx_pos) + var + ws.substr(p);
+				search_pos = idx_pos + vlen;
+			}
+		}
+		free(wgsl_str);
+		CharString cs = ws.utf8();
+		wgsl_str = (char *)malloc(cs.length() + 1);
+		memcpy(wgsl_str, cs.get_data(), cs.length() + 1);
+	}
+
+	*r_wgsl = wgsl_str;
+}
+
 RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Ref<RenderingShaderContainer> &p_shader_container, const Vector<ImmutableSampler> &p_immutable_samplers) {
 	ERR_FAIL_COND_V(p_shader_container.is_null(), ShaderID());
 
@@ -3532,18 +3791,6 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 	// texture.multisampled=true to match sampler2DMS (GLSL) bindings.
 	HashMap<uint32_t, bool> wgsl_is_multisampled_texture;
 
-	// Depth alias bindings: Tint splits mixed-usage depth textures into two globals
-	// (one Depth at binding B, one Float alias at binding B+1). Track (set,B+1) pairs
-	// so we can add extra BGL and bind group entries.
-	// Maps (set_index << 16 | alias_binding) → depth_binding (the adjacent depth texture).
-	HashMap<uint32_t, uint32_t> wgsl_depth_alias_bindings;
-
-	// Maps (set_index << 16 | binding) → WGPUShaderStage bitmask of stages that actually
-	// declare this storage buffer binding in their WGSL.  Used to set per-stage visibility
-	// so fragment-only storage buffers don't consume vertex buffer slots on Metal.
-	// Firefox/wgpu enforces Metal's limit of 8 storage buffers per shader stage.
-	HashMap<uint32_t, uint32_t> wgsl_buffer_stages;
-
 	// Read-write storage texture splits: maps (set << 16 | write_binding) → shadow_read_binding.
 	// Populated when readonly-and-readwrite-storage-textures is unavailable.
 	HashMap<uint32_t, uint32_t> wgsl_rw_storage_splits;
@@ -3584,239 +3831,7 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 			break;
 		}
 
-		// DEPTH_ALIAS parsing removed — depth=2 images are now depth=1 in SPIR-V,
-		// and a single texture_depth_2d variable handles both sampling modes.
-
-		// Remap unsupported 8-bit storage texture format names in WGSL.
-		// r8* and rg8* are not valid base WebGPU storage texel formats — remap to
-		// 32-bit equivalents. With texture-formats-tier1 these formats are valid
-		// natively, so skip the remap to preserve blendable/filterable properties.
-		if (!has_texture_formats_tier1 &&
-				(strstr(wgsl_str, "r8unorm") || strstr(wgsl_str, "r8snorm") ||
-						strstr(wgsl_str, "r8uint") || strstr(wgsl_str, "r8sint") ||
-						strstr(wgsl_str, "rg8unorm") || strstr(wgsl_str, "rg8snorm") ||
-						strstr(wgsl_str, "rg8uint") || strstr(wgsl_str, "rg8sint"))) {
-			String ws(wgsl_str);
-			ws = ws.replace("rg8unorm", "rg32float");
-			ws = ws.replace("rg8snorm", "rg32float");
-			ws = ws.replace("rg8uint", "rg32uint");
-			ws = ws.replace("rg8sint", "rg32sint");
-			ws = ws.replace("r8unorm", "r32float");
-			ws = ws.replace("r8snorm", "r32float");
-			ws = ws.replace("r8uint", "r32uint");
-			ws = ws.replace("r8sint", "r32sint");
-			free(wgsl_str);
-			CharString cs = ws.utf8();
-			wgsl_str = (char *)malloc(cs.length() + 1);
-			memcpy(wgsl_str, cs.get_data(), cs.length() + 1);
-		}
-
-		// If texture-formats-tier1 is not available, remap 16-bit SNORM/UNORM storage
-		// texture format names to their float equivalents in the WGSL text. The format
-		// string lengths are preserved (pad with spaces) so scan offsets remain valid.
-		// r16snorm  → r16float  (same 8 chars)
-		// r16unorm  → r16float  (same 8 chars)
-		// rg16snorm → rg16float (same 9 chars — "rg16float" is 9 chars, perfect)
-		// rg16unorm → rg16float (same 9 chars)
-		// rgba16snorm → rgba16float (11 vs 11 — perfect)
-		// rgba16unorm → rgba16float (11 vs 11 — perfect)
-		if (!has_texture_formats_tier1) {
-			char *q = wgsl_str;
-			while (*q) {
-				if (strncmp(q, "rgba16snorm", 11) == 0) {
-					memcpy(q, "rgba16float", 11);
-					q += 11;
-				} else if (strncmp(q, "rgba16unorm", 11) == 0) {
-					memcpy(q, "rgba16float", 11);
-					q += 11;
-				} else if (strncmp(q, "rg16snorm", 9) == 0) {
-					memcpy(q, "rg16float", 9);
-					q += 9;
-				} else if (strncmp(q, "rg16unorm", 9) == 0) {
-					memcpy(q, "rg16float", 9);
-					q += 9;
-				} else if (strncmp(q, "r16snorm", 8) == 0) {
-					memcpy(q, "r16float", 8);
-					q += 8;
-				} else if (strncmp(q, "r16unorm", 8) == 0) {
-					memcpy(q, "r16float", 8);
-					q += 8;
-				} else {
-					q++;
-				}
-			}
-		}
-
-		// WebGPU only supports a limited set of storage texel formats (see spec §26.1.1).
-		// 16-bit single/dual-channel formats (r16*, rg16*) are NOT valid for storage.
-		// Remap them to 32-bit equivalents. Also handles rgba16snorm/unorm → rgba32float.
-		// Format names only appear in texture_storage_*<format, access> declarations in WGSL.
-		// All replacements preserve string length (in-place memcpy).
-		{
-			char *q = wgsl_str;
-			while (*q) {
-				// RGBA16 snorm/unorm → rgba16float (rgba16float IS a valid storage format)
-				if (strncmp(q, "rgba16snorm", 11) == 0) {
-					memcpy(q, "rgba16float", 11);
-					q += 11;
-				} else if (strncmp(q, "rgba16unorm", 11) == 0) {
-					memcpy(q, "rgba16float", 11);
-					q += 11;
-				}
-				// RG16 all variants → rg32 equivalents
-				else if (strncmp(q, "rg16float", 9) == 0) {
-					memcpy(q, "rg32float", 9);
-					q += 9;
-				} else if (strncmp(q, "rg16snorm", 9) == 0) {
-					memcpy(q, "rg32float", 9);
-					q += 9;
-				} else if (strncmp(q, "rg16unorm", 9) == 0) {
-					memcpy(q, "rg32float", 9);
-					q += 9;
-				} else if (strncmp(q, "rg16uint", 8) == 0) {
-					memcpy(q, "rg32uint", 8);
-					q += 8;
-				} else if (strncmp(q, "rg16sint", 8) == 0) {
-					memcpy(q, "rg32sint", 8);
-					q += 8;
-				}
-				// R16 all variants → r32 equivalents
-				else if (strncmp(q, "r16float", 8) == 0) {
-					memcpy(q, "r32float", 8);
-					q += 8;
-				} else if (strncmp(q, "r16snorm", 8) == 0) {
-					memcpy(q, "r32float", 8);
-					q += 8;
-				} else if (strncmp(q, "r16unorm", 8) == 0) {
-					memcpy(q, "r32float", 8);
-					q += 8;
-				} else if (strncmp(q, "r16uint", 7) == 0) {
-					memcpy(q, "r32uint", 7);
-					q += 7;
-				} else if (strncmp(q, "r16sint", 7) == 0) {
-					memcpy(q, "r32sint", 7);
-					q += 7;
-				} else {
-					q++;
-				}
-			}
-		}
-
-		// WebGPU restriction: Storage buffers with read_write access cannot be used in vertex shaders.
-		// Tint generates var<storage, read_write> for any SSBO without NonWritable decoration.
-		// For render stages (vertex + fragment), demote all read_write storage to read (in-place,
-		// same string length). This ensures the BGL can use ReadOnlyStorage with Vertex|Fragment
-		// visibility. Compute stages keep read_write for actual writes.
-		if (s.shader_stage == RDD::SHADER_STAGE_VERTEX || s.shader_stage == RDD::SHADER_STAGE_FRAGMENT) {
-			char *q = wgsl_str;
-			while ((q = strstr(q, "var<storage, read_write>")) != nullptr) {
-				// "var<storage, read_write>" = 24 chars → "var<storage, read>      " = 24 chars
-				memcpy(q, "var<storage, read>      ", 24);
-				q += 24;
-			}
-		}
-
-		// Chrome doesn't support the 'sized_binding_array' WGSL language feature.
-		// Tint converts GLSL sampler arrays like "sampler2DArray tex[N]" to
-		// "binding_array<texture_2d_array<f32>, N>" in WGSL. Fix: replace
-		// "binding_array<T, N>" with just "T", and fix "varname[expr]" → "varname".
-		// For N>1 (e.g. lightmap_textures[16]), this degrades to single-element
-		// access — acceptable on web where multi-lightmap scenes are rare.
-		if (strstr(wgsl_str, "binding_array<")) {
-			String ws(wgsl_str);
-			Vector<String> binding_array_vars;
-			int64_t search_from = 0;
-			while (true) {
-				int64_t ba_pos = ws.find(": binding_array<", search_from);
-				if (ba_pos == -1) {
-					break;
-				}
-				int64_t inner_start = ba_pos + (int64_t)strlen(": binding_array<");
-				int depth = 1;
-				int64_t p = inner_start;
-				int64_t ws_len = (int64_t)ws.length();
-				while (p < ws_len && depth > 0) {
-					char32_t c = ws[p];
-					if (c == '<') {
-						depth++;
-					} else if (c == '>') {
-						depth--;
-					}
-					p++;
-				}
-				// ws[inner_start .. p-2] = "TYPE, COUNT"
-				String inner = ws.substr(inner_start, p - 1 - inner_start);
-				int64_t last_comma = inner.rfind(",");
-				if (last_comma == -1) {
-					search_from = p;
-					continue;
-				}
-				String type_part = inner.substr(0, last_comma).strip_edges();
-				{
-					// Extract variable name (identifier immediately before the ':')
-					int64_t name_end = ba_pos;
-					while (name_end > 0 && ws[name_end - 1] == ' ') {
-						name_end--;
-					}
-					int64_t name_start = name_end;
-					while (name_start > 0) {
-						char32_t c = ws[name_start - 1];
-						if (c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
-							name_start--;
-						} else {
-							break;
-						}
-					}
-					String var_name = ws.substr(name_start, name_end - name_start);
-					if (!var_name.is_empty()) {
-						binding_array_vars.push_back(var_name);
-					}
-					// Replace ": binding_array<TYPE, N>" with ": TYPE"
-					String new_type = ": " + type_part;
-					ws = ws.substr(0, ba_pos) + new_type + ws.substr(p);
-					search_from = ba_pos + (int64_t)new_type.length();
-				}
-			}
-			// Replace VAR_NAME[any_expr] with VAR_NAME for all unwrapped binding arrays.
-			// Tint may use a variable index (e.g. varname[_e889]) not just varname[0].
-			for (const String &var : binding_array_vars) {
-				int64_t vlen = (int64_t)var.length();
-				int64_t search_pos = 0;
-				while (true) {
-					String needle = var + "[";
-					int64_t idx_pos = ws.find(needle, search_pos);
-					if (idx_pos == -1) {
-						break;
-					}
-					// Ensure 'var' is not a suffix of a longer identifier
-					if (idx_pos > 0) {
-						char32_t before = ws[idx_pos - 1];
-						if (before == '_' || (before >= 'a' && before <= 'z') || (before >= 'A' && before <= 'Z') || (before >= '0' && before <= '9')) {
-							search_pos = idx_pos + 1;
-							continue;
-						}
-					}
-					// Scan past the matching ']'
-					int64_t p = idx_pos + vlen + 1; // skip var + '['
-					int depth = 1;
-					int64_t ws_len2 = (int64_t)ws.length();
-					while (p < ws_len2 && depth > 0) {
-						if (ws[p] == '[') {
-							depth++;
-						} else if (ws[p] == ']') {
-							depth--;
-						}
-						p++;
-					}
-					ws = ws.substr(0, idx_pos) + var + ws.substr(p);
-					search_pos = idx_pos + vlen;
-				}
-			}
-			free(wgsl_str);
-			CharString cs = ws.utf8();
-			wgsl_str = (char *)malloc(cs.length() + 1);
-			memcpy(wgsl_str, cs.get_data(), cs.length() + 1);
-		}
+		_apply_common_wgsl_passes(&wgsl_str, (ShaderStage)s.shader_stage);
 
 		// When readonly-and-readwrite-storage-textures is not available, split
 		// read_write storage textures into separate write + read (shadow) bindings.
@@ -4376,84 +4391,8 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 							wgsl_is_depth_texture[key] = true;
 						}
 					}
-					// Check for depth alias variable: Tint names it "*_depth_alias".
-					// The variable name is between "var " and ":".
-					{
-						const char *var_kw = strstr(p, "var ");
-						if (var_kw && var_kw < semi) {
-							const char *name_start = var_kw + 4;
-							// Skip any <...> (e.g., var<uniform>)
-							if (*name_start == '<') {
-								const char *gt = strchr(name_start, '>');
-								if (gt && gt < semi) {
-									name_start = gt + 1;
-									while (name_start < semi && *name_start == ' ') {
-										name_start++;
-									}
-								}
-							}
-							int name_len = 0;
-							const char *nc = name_start;
-							while (nc < semi && *nc != ':' && *nc != ' ') {
-								nc++;
-								name_len++;
-							}
-							if (name_len > 12) { // "_depth_alias" is 12 chars
-								const char *suffix = name_start + name_len - 12;
-								if (strncmp(suffix, "_depth_alias", 12) == 0) {
-									uint32_t alias_key = ((uint32_t)grp << 16) | (uint32_t)bnd;
-									uint32_t depth_bnd = bnd > 0 ? bnd - 1 : 0;
-									wgsl_depth_alias_bindings[alias_key] = depth_bnd;
-								}
-							}
-						}
-					}
 				}
 				p++;
-			}
-		}
-
-		// Parse storage buffer binding usage metadata from the WGSL translator.
-		// Each "//SSBO_USED:group,binding" line at the top of the WGSL indicates
-		// a storage buffer that the entry point actually uses (via Tint's call-graph
-		// reachability analysis). This lets us set per-stage BGL visibility so
-		// fragment-only storage buffers don't consume vertex buffer slots on Metal.
-		// Firefox/wgpu enforces Metal's limit of 8 storage buffers per shader stage.
-		{
-			WGPUShaderStage current_wgpu_stage = WGPUShaderStage_None;
-			if (s.shader_stage == RDD::SHADER_STAGE_VERTEX) {
-				current_wgpu_stage = WGPUShaderStage_Vertex;
-			} else if (s.shader_stage == RDD::SHADER_STAGE_FRAGMENT) {
-				current_wgpu_stage = WGPUShaderStage_Fragment;
-			} else if (s.shader_stage == RDD::SHADER_STAGE_COMPUTE) {
-				current_wgpu_stage = WGPUShaderStage_Compute;
-			}
-
-			const char *p = wgsl_str;
-			while (strncmp(p, "//SSBO_USED:", 12) == 0) {
-				p += 12;
-				uint32_t group = 0, binding = 0;
-				while (*p >= '0' && *p <= '9') {
-					group = group * 10 + (*p - '0');
-					p++;
-				}
-				if (*p == ',') {
-					p++;
-				}
-				while (*p >= '0' && *p <= '9') {
-					binding = binding * 10 + (*p - '0');
-					p++;
-				}
-				while (*p == '\n' || *p == '\r') {
-					p++;
-				}
-
-				uint32_t key = (group << 16) | binding;
-				if (wgsl_buffer_stages.has(key)) {
-					wgsl_buffer_stages[key] |= (uint32_t)current_wgpu_stage;
-				} else {
-					wgsl_buffer_stages[key] = (uint32_t)current_wgpu_stage;
-				}
 			}
 		}
 
@@ -4947,15 +4886,6 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 						} else {
 							bool is_readonly = wgsl_ssbo_readonly.has(k) ? wgsl_ssbo_readonly[k] : !u.writable;
 							entry.buffer.type = is_readonly ? WGPUBufferBindingType_ReadOnlyStorage : WGPUBufferBindingType_Storage;
-							// Use per-stage visibility from Tint metadata for storage buffers.
-							// Firefox/wgpu enforces Metal's limit of 8 storage buffers per shader stage.
-							if (wgsl_buffer_stages.has(k)) {
-								entry.visibility = (WGPUShaderStage)wgsl_buffer_stages[k];
-							} else if (!wgsl_buffer_stages.is_empty()) {
-								// Buffer is declared in SPIR-V but not used by any entry point.
-								// Set visibility to None — doesn't count against any stage's limit.
-								entry.visibility = (WGPUShaderStage)0;
-							}
 						}
 						bge.layout_entry = entry;
 					} break;
@@ -4995,12 +4925,6 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 							} else {
 								bool is_readonly = wgsl_ssbo_readonly.has(k) ? wgsl_ssbo_readonly[k] : !u.writable;
 								entry.buffer.type = is_readonly ? WGPUBufferBindingType_ReadOnlyStorage : WGPUBufferBindingType_Storage;
-								// Use per-stage visibility from Tint metadata (see UNIFORM_TYPE_STORAGE_BUFFER above).
-								if (wgsl_buffer_stages.has(k)) {
-									entry.visibility = (WGPUShaderStage)wgsl_buffer_stages[k];
-								} else if (!wgsl_buffer_stages.is_empty()) {
-									entry.visibility = (WGPUShaderStage)0;
-								}
 							}
 						}
 						// Only buffer bindings support dynamic offsets; storage textures must not set it.
@@ -5067,25 +4991,6 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 				}
 			}
 
-			// Add BGL entries for depth alias variables.
-			// Tint splits mixed-usage depth textures: original→Depth at binding B,
-			// clone→Float at binding B+1 (named "*_depth_alias").
-			for (const KeyValue<uint32_t, uint32_t> &kv : wgsl_depth_alias_bindings) {
-				uint32_t alias_key = kv.key;
-				uint32_t alias_grp = alias_key >> 16;
-				uint32_t alias_bnd = alias_key & 0xFFFF;
-				if (alias_grp != set) {
-					continue;
-				}
-				WGPUBindGroupLayoutEntry alias_entry = {};
-				alias_entry.binding = alias_bnd;
-				alias_entry.visibility = WGPUShaderStage_Vertex | WGPUShaderStage_Fragment;
-				alias_entry.texture.sampleType = WGPUTextureSampleType_Float;
-				alias_entry.texture.viewDimension = wgsl_tex_dims.has(alias_key) ? wgsl_tex_dims[alias_key] : WGPUTextureViewDimension_2D;
-				alias_entry.texture.multisampled = false;
-				entries.push_back(alias_entry);
-			}
-
 			// Add BGL entries for read_write storage texture shadow read bindings.
 			// Each shadow is a sampled texture at (write_binding + 1), NOT a ReadOnly
 			// storage texture, because ReadOnly access requires the
@@ -5134,9 +5039,6 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 				goto cleanup;
 			}
 		}
-
-		// Store depth alias bindings on the shader for use during uniform_set_create.
-		shader->depth_alias_bindings = wgsl_depth_alias_bindings;
 
 		// Store read_write storage texture splits for bind group creation.
 		shader->rw_storage_splits = wgsl_rw_storage_splits;
@@ -5222,21 +5124,6 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 						merged_entries.push_back(pc_entry);
 					}
 
-					// Add depth alias entries to the merged layout.
-					for (const KeyValue<uint32_t, uint32_t> &kv : wgsl_depth_alias_bindings) {
-						uint32_t alias_grp = kv.key >> 16;
-						uint32_t alias_bnd = kv.key & 0xFFFF;
-						if (alias_grp != i) {
-							continue;
-						}
-						WGPUBindGroupLayoutEntry ae = {};
-						ae.binding = alias_bnd;
-						ae.visibility = WGPUShaderStage_Vertex | WGPUShaderStage_Fragment;
-						ae.texture.sampleType = WGPUTextureSampleType_Float;
-						ae.texture.viewDimension = wgsl_tex_dims.has(kv.key) ? wgsl_tex_dims[kv.key] : WGPUTextureViewDimension_2D;
-						ae.texture.multisampled = false;
-						merged_entries.push_back(ae);
-					}
 					// Add rw_storage split entries to the merged layout (sampled texture, not ReadOnly storage).
 					for (const KeyValue<uint32_t, uint32_t> &kv : wgsl_rw_storage_splits) {
 						uint32_t split_grp = kv.key >> 16;
@@ -5709,45 +5596,6 @@ RDD::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_create(VectorView<Bou
 		}
 	}
 
-	// Add depth alias bind group entries: for each depth alias binding, provide
-	// the same texture view as the paired depth texture at (alias_binding - 1).
-	for (const KeyValue<uint32_t, uint32_t> &kv : shader->depth_alias_bindings) {
-		uint32_t alias_grp = kv.key >> 16;
-		uint32_t alias_bnd = kv.key & 0xFFFF;
-		uint32_t depth_bnd = kv.value;
-		if (alias_grp != p_set_index) {
-			continue;
-		}
-		// Find the texture view from the depth texture entry.
-		WGPUTextureView alias_view = nullptr;
-		for (const auto &e : entries) {
-			if (e.binding == depth_bnd && e.textureView != nullptr) {
-				alias_view = e.textureView;
-				break;
-			}
-		}
-		if (alias_view) {
-			WGPUBindGroupEntry alias_entry = {};
-			alias_entry.binding = alias_bnd;
-			// The alias is supposed to sample depth as Float, but alias_view may
-			// point at a Depth-format texture. Substitute the float fallback.
-			if (alias_view == fallback_float_texture_view) {
-				alias_entry.textureView = alias_view; // Already substituted.
-			} else {
-				// Check if the source texture view came from a depth-format texture.
-				// We can't query the view's format, so check if the alias BGL expects Float.
-				// For safety, always use fallback for depth alias entries since
-				// they always represent Float sampling of depth data.
-				if (fallback_float_texture_view != nullptr) {
-					alias_entry.textureView = fallback_float_texture_view;
-				} else {
-					alias_entry.textureView = alias_view;
-				}
-			}
-			entries.push_back(alias_entry);
-		}
-	}
-
 	// Add shadow read bindings for read_write storage texture splits.
 	// For each split, create a GPU copy of the original texture and bind it
 	// at the shadow read slot (write_binding + 1).
@@ -6013,14 +5861,6 @@ WGPUBindGroup RenderingDeviceDriverWebGPU::_get_compatible_bind_group(WGUniformS
 			if (bge.godot_type == RDD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE) {
 				target_bindings.insert(bge.layout_entry.binding - 1); // Sampler binding.
 			}
-		}
-	}
-	// Add depth alias bindings.
-	for (const KeyValue<uint32_t, uint32_t> &kv : p_target_shader->depth_alias_bindings) {
-		uint32_t alias_grp = kv.key >> 16;
-		uint32_t alias_bnd = kv.key & 0xFFFF;
-		if (alias_grp == p_set_idx) {
-			target_bindings.insert(alias_bnd);
 		}
 	}
 	// Add rw_storage shadow read bindings.
@@ -8207,202 +8047,7 @@ WGPUShaderModule RenderingDeviceDriverWebGPU::_create_module_with_spec_constants
 		return nullptr;
 	}
 
-	// Format remapping passes (must match shader_create_from_container).
-
-	// Remap unsupported 8-bit storage texture format names in WGSL.
-	if (!has_texture_formats_tier1 &&
-			(strstr(wgsl_str, "r8unorm") || strstr(wgsl_str, "r8snorm") ||
-					strstr(wgsl_str, "r8uint") || strstr(wgsl_str, "r8sint") ||
-					strstr(wgsl_str, "rg8unorm") || strstr(wgsl_str, "rg8snorm") ||
-					strstr(wgsl_str, "rg8uint") || strstr(wgsl_str, "rg8sint"))) {
-		String ws(wgsl_str);
-		ws = ws.replace("rg8unorm", "rg32float");
-		ws = ws.replace("rg8snorm", "rg32float");
-		ws = ws.replace("rg8uint", "rg32uint");
-		ws = ws.replace("rg8sint", "rg32sint");
-		ws = ws.replace("r8unorm", "r32float");
-		ws = ws.replace("r8snorm", "r32float");
-		ws = ws.replace("r8uint", "r32uint");
-		ws = ws.replace("r8sint", "r32sint");
-		free(wgsl_str);
-		CharString cs = ws.utf8();
-		wgsl_str = (char *)malloc(cs.length() + 1);
-		memcpy(wgsl_str, cs.get_data(), cs.length() + 1);
-	}
-
-	// Remap 16-bit SNORM/UNORM storage texture formats to float equivalents.
-	if (!has_texture_formats_tier1) {
-		char *q = wgsl_str;
-		while (*q) {
-			if (strncmp(q, "rgba16snorm", 11) == 0) {
-				memcpy(q, "rgba16float", 11);
-				q += 11;
-			} else if (strncmp(q, "rgba16unorm", 11) == 0) {
-				memcpy(q, "rgba16float", 11);
-				q += 11;
-			} else if (strncmp(q, "rg16snorm", 9) == 0) {
-				memcpy(q, "rg16float", 9);
-				q += 9;
-			} else if (strncmp(q, "rg16unorm", 9) == 0) {
-				memcpy(q, "rg16float", 9);
-				q += 9;
-			} else if (strncmp(q, "r16snorm", 8) == 0) {
-				memcpy(q, "r16float", 8);
-				q += 8;
-			} else if (strncmp(q, "r16unorm", 8) == 0) {
-				memcpy(q, "r16float", 8);
-				q += 8;
-			} else {
-				q++;
-			}
-		}
-	}
-
-	// Remap 16-bit storage formats to 32-bit equivalents (WebGPU spec §26.1.1).
-	{
-		char *q = wgsl_str;
-		while (*q) {
-			if (strncmp(q, "rgba16snorm", 11) == 0) {
-				memcpy(q, "rgba16float", 11);
-				q += 11;
-			} else if (strncmp(q, "rgba16unorm", 11) == 0) {
-				memcpy(q, "rgba16float", 11);
-				q += 11;
-			} else if (strncmp(q, "rg16float", 9) == 0) {
-				memcpy(q, "rg32float", 9);
-				q += 9;
-			} else if (strncmp(q, "rg16snorm", 9) == 0) {
-				memcpy(q, "rg32float", 9);
-				q += 9;
-			} else if (strncmp(q, "rg16unorm", 9) == 0) {
-				memcpy(q, "rg32float", 9);
-				q += 9;
-			} else if (strncmp(q, "rg16uint", 8) == 0) {
-				memcpy(q, "rg32uint", 8);
-				q += 8;
-			} else if (strncmp(q, "rg16sint", 8) == 0) {
-				memcpy(q, "rg32sint", 8);
-				q += 8;
-			} else if (strncmp(q, "r16float", 8) == 0) {
-				memcpy(q, "r32float", 8);
-				q += 8;
-			} else if (strncmp(q, "r16snorm", 8) == 0) {
-				memcpy(q, "r32float", 8);
-				q += 8;
-			} else if (strncmp(q, "r16unorm", 8) == 0) {
-				memcpy(q, "r32float", 8);
-				q += 8;
-			} else if (strncmp(q, "r16uint", 7) == 0) {
-				memcpy(q, "r32uint", 7);
-				q += 7;
-			} else if (strncmp(q, "r16sint", 7) == 0) {
-				memcpy(q, "r32sint", 7);
-				q += 7;
-			} else {
-				q++;
-			}
-		}
-	}
-
-	// Demote read_write storage to read for vertex/fragment stages.
-	if (p_stage == SHADER_STAGE_VERTEX || p_stage == SHADER_STAGE_FRAGMENT) {
-		char *q = wgsl_str;
-		while ((q = strstr(q, "var<storage, read_write>")) != nullptr) {
-			memcpy(q, "var<storage, read>      ", 24);
-			q += 24;
-		}
-	}
-
-	// FLATTEN-BA: Remove binding_array<T, N> → T (same pass as in shader_create_from_container).
-	// Chrome doesn't support 'sized_binding_array'; Tint emits it for GLSL texture arrays.
-	if (strstr(wgsl_str, "binding_array<")) {
-		String ws(wgsl_str);
-		Vector<String> binding_array_vars;
-		int64_t search_from = 0;
-		while (true) {
-			int64_t ba_pos = ws.find(": binding_array<", search_from);
-			if (ba_pos == -1) {
-				break;
-			}
-			int64_t inner_start = ba_pos + (int64_t)strlen(": binding_array<");
-			int depth = 1;
-			int64_t p = inner_start;
-			int64_t ws_len = (int64_t)ws.length();
-			while (p < ws_len && depth > 0) {
-				char32_t c = ws[p];
-				if (c == '<') {
-					depth++;
-				} else if (c == '>') {
-					depth--;
-				}
-				p++;
-			}
-			String inner = ws.substr(inner_start, p - 1 - inner_start);
-			int64_t last_comma = inner.rfind(",");
-			if (last_comma == -1) {
-				search_from = p;
-				continue;
-			}
-			String type_part = inner.substr(0, last_comma).strip_edges();
-			{
-				int64_t name_end = ba_pos;
-				while (name_end > 0 && ws[name_end - 1] == ' ') {
-					name_end--;
-				}
-				int64_t name_start = name_end;
-				while (name_start > 0) {
-					char32_t c = ws[name_start - 1];
-					if (c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
-						name_start--;
-					} else {
-						break;
-					}
-				}
-				String var_name = ws.substr(name_start, name_end - name_start);
-				if (!var_name.is_empty()) {
-					binding_array_vars.push_back(var_name);
-				}
-				String new_type = ": " + type_part;
-				ws = ws.substr(0, ba_pos) + new_type + ws.substr(p);
-				search_from = ba_pos + (int64_t)new_type.length();
-			}
-		}
-		for (const String &var : binding_array_vars) {
-			int64_t vlen = (int64_t)var.length();
-			int64_t search_pos = 0;
-			while (true) {
-				String needle = var + "[";
-				int64_t idx_pos = ws.find(needle, search_pos);
-				if (idx_pos == -1) {
-					break;
-				}
-				if (idx_pos > 0) {
-					char32_t before = ws[idx_pos - 1];
-					if (before == '_' || (before >= 'a' && before <= 'z') || (before >= 'A' && before <= 'Z') || (before >= '0' && before <= '9')) {
-						search_pos = idx_pos + 1;
-						continue;
-					}
-				}
-				int64_t pp = idx_pos + vlen + 1;
-				int depth2 = 1;
-				int64_t ws_len2 = (int64_t)ws.length();
-				while (pp < ws_len2 && depth2 > 0) {
-					if (ws[pp] == '[') {
-						depth2++;
-					} else if (ws[pp] == ']') {
-						depth2--;
-					}
-					pp++;
-				}
-				ws = ws.substr(0, idx_pos) + var + ws.substr(pp);
-				search_pos = idx_pos + vlen;
-			}
-		}
-		free(wgsl_str);
-		CharString cs = ws.utf8();
-		wgsl_str = (char *)malloc(cs.length() + 1);
-		memcpy(wgsl_str, cs.get_data(), cs.length() + 1);
-	}
+	_apply_common_wgsl_passes(&wgsl_str, p_stage);
 
 	_rewrite_depth_texture_samples(&wgsl_str);
 

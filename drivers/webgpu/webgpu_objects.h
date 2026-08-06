@@ -169,10 +169,6 @@ struct WGShader {
 	};
 	LocalVector<BindGroupInfo> bind_group_infos;
 
-	// Depth alias bindings: maps (set << 16 | alias_binding) → depth_binding.
-	// Used by uniform_set_create to add extra bind group entries for split depth textures.
-	HashMap<uint32_t, uint32_t> depth_alias_bindings;
-
 	// Read-write storage texture splits: maps (set << 16 | write_binding) → read_shadow_binding.
 	// When readonly-and-readwrite-storage-textures is unavailable, read_write storage
 	// textures are split into separate write (original) + read (shadow) bindings.

@@ -191,6 +191,10 @@ class RenderingDeviceDriverWebGPU : public RenderingDeviceDriver {
 
 	void _flush_push_constants(WGCommandBuffer *p_cmd_buf, WGShader *p_shader);
 	WGPUShaderModule _create_module_with_spec_constants(const PackedByteArray &p_spirv, VectorView<PipelineSpecializationConstant> p_constants, ShaderStage p_stage);
+	// The WGSL rewrites that both module-producing paths must apply identically.
+	// ⚠ Add shared passes here, never at a call site — the two paths diverging is
+	// what RL-027 cost a debugging cycle on. Reallocates *r_wgsl in place.
+	void _apply_common_wgsl_passes(char **r_wgsl, ShaderStage p_stage);
 
 public:
 	RenderingDeviceDriverWebGPU(RenderingContextDriverWebGPU *p_context_driver);
