@@ -758,3 +758,52 @@ hash skew), but it is a live correctness trap the moment the table starts hittin
 Carried as `thirdparty/tint/patches/0007-*`, following the fork's existing six-patch convention.
 ⚠ **Patch the vendored source *and* regenerate the `.patch` file *and* add the README table row** —
 `patches/README.md` is how the next Tint re-vendor knows what to reapply.
+
+### The four blockers between "boots" and "renders" (fixed, `41ddc3b` `6539e48`)
+
+`webgpu_tests/test_project` **renders in Chrome on WebGPU with zero GPU validation errors** as of
+2026-08-06. Getting there took four fixes in one chain; RL-026…RL-028 hold the detail. What is worth
+carrying forward is the *shape* of the chain, because the next one will look the same.
+
+**Each fix unmasked the next.** Nothing rendered, and the engine reported no error of its own — every
+symptom lived in Dawn's validation messages. The order was: sampler cap → storage-buffer cap →
+depth-vs-filtering-sampler → uniform minimum binding size. Four rebuild-and-look cycles, ~40 s each.
+⚠ **Do not read "one error class gone" as "fixed"** — read it as "the next one is now visible".
+
+⚠ **Console flooding destroys the evidence.** Once pipelines are invalid, the driver logs two errors
+per draw call and the DevTools ring buffer (10,000 entries) evicts the *creation* errors that name the
+real cause within a second or two. Reproduce with a **bounded** run — the coverage scene without
+`?hold` quits after 10 frames and yields ~200 messages — then dedupe. `?hold` is only for looking at
+the picture.
+
+⚠ **Two dead naga-era mechanisms, both consumer-only.** `//SSBO_USED:` (per-stage storage-buffer
+visibility) and `*_depth_alias` (splitting mixed-usage depth textures) are parsed by the driver and
+produced by nothing — on our tree *and* on `webgpu/webgpu-4.6.2`. `rg <marker> webgpu/webgpu-4.6.2`
+is the check. When a driver feature looks like it should already handle your bug, verify something
+still emits its input before assuming the port dropped a hunk.
+
+**The recipe that found RL-028** generalizes to any "Tint emitted something absurd" bug, and cost one
+build each:
+1. Print the WGSL declaration and struct body for the binding Dawn named. That gave `@size(7505u)`.
+2. Print the same struct's `OpMemberDecorate … Offset` values straight from `s.code_compressed_bytes`
+   — the shader container, before preprocessing. Correct there ⇒ the corruption is ours.
+3. Drop a one-line sanity scan after **every** pass in `_translate_spirv_to_wgsl` and print the first
+   pass whose output fails it. Named `flatten_binding_arrays` on the first run.
+
+⚠ **`print_line()` beats `WEBGPU_DIAG`/`EM_ASM` for temporary diagnostics** — it reaches the browser
+console through the normal Godot path and takes a `String`, so no pointer marshaling.
+
+⚠ **The driver produces WGSL in two places.** `shader_create_from_container()` and
+`_create_module_with_spec_constants()`, the latter re-running Tint on spec-constant-patched SPIR-V and
+repeating only *some* of the former's passes — its comment says "must match
+shader_create_from_container", which is a convention, not a mechanism. Adding a pass to one produced a
+*new* error rather than a fix: the layout was built from rewritten WGSL, the specialized module was
+not. **Any new WGSL pass goes in a shared helper called from both.**
+
+Also landed: the deferred mechanical clang-format pass (`1be3ba0`), as its own commit now that
+adaptation is done. `drivers/webgpu/` and `webgpu_tests/` are clang-format clean; the Phase 1
+exception no longer applies.
+
+**Regression evidence for the whole chain:** preprocessing_tests 191/0/1 · driver_unit_tests 327/0 ·
+shader_corpus 13/0 · wgsl_cache 20 + 130 · the 193-module corpus unchanged at 173 compiled / 11 glsl
+failures (RL-025) / 9 tint failures · web, macOS editor and native `tint_convert_cli` all build clean.
