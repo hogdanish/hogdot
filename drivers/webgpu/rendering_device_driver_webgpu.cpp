@@ -123,6 +123,184 @@ static bool parse_group_binding(const char *p, unsigned int &r_grp, unsigned int
 	return true;
 }
 
+static bool _is_wgsl_ident_char(char p_c) {
+	return (p_c >= 'a' && p_c <= 'z') || (p_c >= 'A' && p_c <= 'Z') || (p_c >= '0' && p_c <= '9') || p_c == '_';
+}
+
+// Does the shader reference the module-scope variable declared at `p_decl`
+// ("@group(G) @binding(B) var[<...>] NAME : TYPE;") anywhere beyond that
+// declaration itself?
+//
+// WGSL only requires a binding to appear in the pipeline layout when an entry
+// point *statically uses* it, but Tint's writer emits every module-scope handle
+// the SPIR-V declared, used or not — and glslang does not strip unused uniforms
+// out of the SPIR-V either. Forward-mobile's vertex stage therefore declares all
+// 18 scene samplers and references none of them, which is enough to blow
+// WebGPU's hard cap of 16 samplers per stage (see the visibility narrowing in
+// shader_create_from_container).
+//
+// Counting textual references over-approximates static use, so this errs toward
+// keeping a binding visible; it can never hide one the shader actually reads.
+static bool _wgsl_binding_is_referenced(const char *p_wgsl, const char *p_decl) {
+	const char *semi = strchr(p_decl, ';');
+	if (semi == nullptr) {
+		return true; // Malformed — assume used; a spare visibility bit is harmless.
+	}
+	const char *v = strstr(p_decl, " var");
+	if (v == nullptr || v > semi) {
+		return true;
+	}
+	const char *n = v + 4;
+	if (*n == '<') { // var<storage, read> — skip the template arguments.
+		const char *gt = strchr(n, '>');
+		if (gt == nullptr || gt > semi) {
+			return true;
+		}
+		n = gt + 1;
+	}
+	while (*n == ' ' || *n == '\t') {
+		n++;
+	}
+	const char *e = n;
+	while (_is_wgsl_ident_char(*e)) {
+		e++;
+	}
+	size_t len = (size_t)(e - n);
+	char name[128];
+	if (len == 0 || e > semi || len >= sizeof(name)) {
+		return true;
+	}
+	memcpy(name, n, len);
+	name[len] = '\0';
+
+	int hits = 0;
+	for (const char *q = strstr(p_wgsl, name); q != nullptr; q = strstr(q + len, name)) {
+		bool left_ok = (q == p_wgsl) || !_is_wgsl_ident_char(q[-1]);
+		if (left_ok && !_is_wgsl_ident_char(q[len]) && ++hits > 1) {
+			return true;
+		}
+	}
+	return false;
+}
+
+// Rewrite non-comparison samples of depth textures into texel fetches, replacing
+// *r_wgsl in place when anything changed.
+//
+// WebGPU forbids pairing a `depth` texture binding with a `filtering` sampler: only
+// comparison or non-filtering samplers may be used. Godot's shadow code does both on
+// one texture — `textureSampleCompare(shadow_atlas, shadow_sampler, ...)` for the PCF
+// lookup and `textureLod(sampler2D(shadow_atlas, SAMPLER_LINEAR_CLAMP), ...)` for the
+// blocker search (`scene_forward_lights_inc.glsl`). The second is what Dawn rejects,
+// and no bind-group layout can satisfy both: the atlas is a depth format, so its only
+// legal sample types are `depth` and `unfilterable-float`, and neither accepts a
+// filtering sampler.
+//
+// A texel fetch needs no sampler and is legal on a depth texture. It also loses nothing
+// real: linear filtering of a 32-bit depth format is not a required Vulkan format
+// feature either, so the desktop backends this GLSL was written for are not reliably
+// interpolating it in the first place.
+//
+// Both WGSL-producing paths must call this — shader_create_from_container for the
+// reflection modules and _create_module_with_spec_constants for the specialized ones.
+// Skipping either leaves a module whose bindings disagree with the layout built from
+// the other.
+static void _rewrite_depth_texture_samples(char **r_wgsl) {
+	if (strstr(*r_wgsl, "texture_depth_2d") == nullptr) {
+		return;
+	}
+	String ws(*r_wgsl);
+	HashSet<String> depth_names;
+	{
+		// Collect the names of every `texture_depth_2d` (plain 2D only — array and
+		// multisampled variants take different textureLoad signatures) declared either
+		// at module scope or as a function parameter.
+		int p = 0;
+		while ((p = ws.find(": texture_depth_2d", p)) >= 0) {
+			int type_end = p + 18;
+			if (ws[type_end] == '_') { // _array / _multisampled: leave alone.
+				p = type_end;
+				continue;
+			}
+			int name_end = p;
+			while (name_end > 0 && ws[name_end - 1] == ' ') {
+				name_end--;
+			}
+			int name_start = name_end;
+			while (name_start > 0 && ws[name_start - 1] < 128 && _is_wgsl_ident_char((char)ws[name_start - 1])) {
+				name_start--;
+			}
+			if (name_end > name_start) {
+				depth_names.insert(ws.substr(name_start, name_end - name_start));
+			}
+			p = type_end;
+		}
+	}
+	if (depth_names.is_empty()) {
+		return;
+	}
+
+	int rewrites = 0;
+	// Longest first, so "textureSampleLevel(" is never matched as "textureSample(".
+	// Grad and Bias are deliberately absent: their extra operands have no textureLoad
+	// equivalent, and no Godot shader takes a gradient or bias off a depth texture.
+	struct SampleForm {
+		const char *name;
+		int argc;
+	};
+	const SampleForm forms[] = { { "textureSampleLevel(", 4 }, { "textureSample(", 3 } };
+	for (const SampleForm &sf : forms) {
+		int flen = (int)strlen(sf.name);
+		int p = 0;
+		while ((p = ws.find(sf.name, p)) >= 0) {
+			// Split the call's arguments at paren/bracket depth 0.
+			Vector<String> args;
+			int depth = 0;
+			int arg_start = p + flen;
+			int q = arg_start;
+			bool closed = false;
+			while (q < ws.length()) {
+				char32_t c = ws[q];
+				if (c == '(' || c == '[') {
+					depth++;
+				} else if (c == ']') {
+					depth--;
+				} else if (c == ')') {
+					if (depth == 0) {
+						args.push_back(ws.substr(arg_start, q - arg_start).strip_edges());
+						closed = true;
+						break;
+					}
+					depth--;
+				} else if (c == ',' && depth == 0) {
+					args.push_back(ws.substr(arg_start, q - arg_start).strip_edges());
+					arg_start = q + 1;
+				}
+				q++;
+			}
+			if (!closed || args.size() != sf.argc || !depth_names.has(args[0])) {
+				p += flen;
+				continue;
+			}
+			const String &tex = args[0];
+			const String &coord = args[2];
+			String level = sf.argc >= 4 ? args[3] : String("0i");
+			String repl = "textureLoad(" + tex + ", vec2<i32>((" + coord +
+					") * vec2<f32>(textureDimensions(" + tex + ", " + level + "))), " + level + ")";
+			ws = ws.substr(0, p) + repl + ws.substr(q + 1);
+			p += repl.length();
+			rewrites++;
+		}
+	}
+
+	if (rewrites > 0) {
+		WEBGPU_DIAG({ console.log('[DEPTH-FETCH] Rewrote ' + $0 + ' depth-texture sample(s) as textureLoad'); }, rewrites);
+		free(*r_wgsl);
+		CharString cs = ws.utf8();
+		*r_wgsl = (char *)malloc(cs.length() + 1);
+		memcpy(*r_wgsl, cs.get_data(), cs.length() + 1);
+	}
+}
+
 // =============================================================================
 // SPIR-V → WGSL conversion (Tint + SPIR-V preprocessing)
 // =============================================================================
@@ -3348,6 +3526,14 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 	// false if read-write (var<storage, read_write>). Used to correctly set BGL buffer type for SSBOs.
 	HashMap<uint32_t, bool> wgsl_ssbo_readonly;
 
+	// Maps (set_index << 16 | binding) → the OR of the WGPUShaderStage bits whose WGSL
+	// actually *references* that binding, as opposed to merely declaring it. Filled per
+	// stage by the reference scan below and used to narrow sampler/texture BGL visibility.
+	HashMap<uint32_t, uint32_t> wgsl_binding_stages;
+	// False if no stage was scannable (unknown stage kinds), in which case visibility
+	// falls back to the blanket mask rather than narrowing everything to nothing.
+	bool wgsl_binding_use_scanned = false;
+
 	// Maps (set_index << 16 | binding) → storage texture access mode detected from Tint WGSL output.
 	// Tint emits: texture_storage_2d<format, write/read/read_write>. Used for IMAGE BGL entries.
 	HashMap<uint32_t, WGPUStorageTextureAccess> wgsl_storage_tex_access;
@@ -4100,6 +4286,8 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 			}
 		}
 
+		_rewrite_depth_texture_samples(&wgsl_str);
+
 		WGPUShaderSourceWGSL wgsl_source = {};
 		wgsl_source.chain.sType = WGPUSType_ShaderSourceWGSL;
 		wgsl_source.code = WGPUStringView{ wgsl_str, WGPU_STRLEN };
@@ -4288,6 +4476,37 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 					wgsl_buffer_stages[key] |= (uint32_t)current_wgpu_stage;
 				} else {
 					wgsl_buffer_stages[key] = (uint32_t)current_wgpu_stage;
+				}
+			}
+		}
+
+		// Record which bindings this stage's WGSL actually *references*, so BGL entries
+		// can carry per-stage visibility instead of a blanket Vertex|Fragment mask.
+		// WebGPU caps samplers at 16 per shader stage and counts every BGL entry that is
+		// visible to that stage whether the shader reads it or not — and forward-mobile
+		// declares 18 (16 at 4.6.2, plus the two area-light LTC LUTs 4.7.1 added) while
+		// its vertex stage references none of them. See _wgsl_binding_is_referenced.
+		{
+			WGPUShaderStage current_wgpu_stage = WGPUShaderStage_None;
+			if (s.shader_stage == RDD::SHADER_STAGE_VERTEX) {
+				current_wgpu_stage = WGPUShaderStage_Vertex;
+			} else if (s.shader_stage == RDD::SHADER_STAGE_FRAGMENT) {
+				current_wgpu_stage = WGPUShaderStage_Fragment;
+			} else if (s.shader_stage == RDD::SHADER_STAGE_COMPUTE) {
+				current_wgpu_stage = WGPUShaderStage_Compute;
+			}
+
+			if (current_wgpu_stage != WGPUShaderStage_None) {
+				wgsl_binding_use_scanned = true;
+				const char *p = wgsl_str;
+				while ((p = strstr(p, "@group(")) != nullptr) {
+					unsigned int grp = 0, bnd = 0;
+					if (parse_group_binding(p, grp, bnd) && _wgsl_binding_is_referenced(wgsl_str, p)) {
+						uint32_t key = ((uint32_t)grp << 16) | (uint32_t)bnd;
+						uint32_t prev = wgsl_binding_stages.has(key) ? wgsl_binding_stages[key] : 0u;
+						wgsl_binding_stages[key] = prev | (uint32_t)current_wgpu_stage;
+					}
+					p++;
 				}
 			}
 		}
@@ -4554,6 +4773,31 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 
 	{ // Block scope: variables here (LocalVector, String) have non-trivial
 	  // destructors and must not be jumped over by goto.
+
+		// Narrow BGL entry visibility to the stages whose WGSL actually references the
+		// binding, replacing the blanket Vertex|Fragment mask from _stages_to_wgpu_visibility.
+		//
+		// WebGPU caps several binding classes per shader stage and counts every entry a stage
+		// can see, referenced or not. On the Metal adapters Chrome exposes here that is 16
+		// samplers, 48 sampled textures, 10 storage buffers and 12 uniform buffers per stage;
+		// forward-mobile overruns the sampler cap at 18 and the storage-buffer cap at 11 from
+		// its vertex stage alone, which references none of the former and one of the latter.
+		//
+		// Bindings that no stage references end up with visibility 0, which is legal and
+		// consumes no per-stage slot. This can only remove bits, never add them, so a binding
+		// a shader really does read stays visible; and because reference counting
+		// over-approximates static use (see _wgsl_binding_is_referenced), a mistake would
+		// surface at pipeline creation rather than as a silently wrong render.
+		auto narrow_visibility = [&](LocalVector<WGPUBindGroupLayoutEntry> &p_entries, uint32_t p_set) {
+			if (!wgsl_binding_use_scanned) {
+				return;
+			}
+			for (WGPUBindGroupLayoutEntry &e : p_entries) {
+				uint32_t key = (p_set << 16) | (uint32_t)e.binding;
+				uint32_t used = wgsl_binding_stages.has(key) ? wgsl_binding_stages[key] : 0u;
+				e.visibility = (WGPUShaderStage)((uint32_t)e.visibility & used);
+			}
+		};
 
 		// --- Build WGPUBindGroupLayout for each descriptor set ---
 		const uint32_t set_count = (uint32_t)shader_refl.uniform_sets.size();
@@ -4887,6 +5131,8 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 				entries.push_back(shadow_entry);
 			}
 
+			narrow_visibility(entries, set);
+
 			// Log any duplicate binding indices for debugging.
 			for (uint32_t a = 0; a < entries.size(); a++) {
 				for (uint32_t b = a + 1; b < entries.size(); b++) {
@@ -5031,6 +5277,8 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 						se.texture.multisampled = false;
 						merged_entries.push_back(se);
 					}
+
+					narrow_visibility(merged_entries, i);
 
 					WGPUBindGroupLayoutDescriptor merged_desc = {};
 					merged_desc.entryCount = merged_entries.size();
@@ -8178,6 +8426,8 @@ WGPUShaderModule RenderingDeviceDriverWebGPU::_create_module_with_spec_constants
 		wgsl_str = (char *)malloc(cs.length() + 1);
 		memcpy(wgsl_str, cs.get_data(), cs.length() + 1);
 	}
+
+	_rewrite_depth_texture_samples(&wgsl_str);
 
 	WGPUShaderSourceWGSL wgsl_source = {};
 	wgsl_source.chain.sType = WGPUSType_ShaderSourceWGSL;
