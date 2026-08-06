@@ -38,6 +38,7 @@
 /drivers/metal/                               @godotengine/rendering
 /drivers/spirv-reflect/                       @godotengine/rendering
 /drivers/vulkan/                              @godotengine/rendering
+/drivers/webgpu/                              @hogdanish
 
 ## OS
 /drivers/apple/                               @godotengine/macos @godotengine/ios
@@ -290,6 +291,7 @@
 
 /*.*                                          @godotengine/buildsystem
 /hogdot/                                      @hogdanish
+/webgpu_tests/                                @hogdanish
 *.py                                          @godotengine/buildsystem
 SConstruct                                    @godotengine/buildsystem
 SCsub                                         @godotengine/buildsystem
