@@ -55,6 +55,24 @@ uint64_t RenderingDeviceDriver::api_trait_get(ApiTrait p_trait) {
 			return false;
 		case API_TRAIT_TEXTURE_OUTPUTS_REQUIRE_CLEARS:
 			return false;
+		// WebGPU traits. Zero means "behave as a native backend always has", so
+		// every driver that does not opt in keeps its previous behavior.
+		case API_TRAIT_TEXTURE_GET_DATA_VIA_DRIVER:
+			return false;
+		case API_TRAIT_TEXTURE_INITIALIZE_DIRECT_WRITE:
+			return false;
+		case API_TRAIT_BUFFER_CREATE_MAPPED_AT_CREATION:
+			return false;
+		case API_TRAIT_STAGING_BUFFER_MAX_SIZE_MB:
+			return 0; // No driver-imposed cap; the project setting stands.
+		case API_TRAIT_SKELETON_BUFFER_DIRECT_WRITE:
+			return false;
+		case API_TRAIT_FORCE_OMNI_DUAL_PARABOLOID:
+			return false;
+		case API_TRAIT_BATCH_INSTANCE_DRAWS:
+			return false;
+		case API_TRAIT_FIRST_INSTANCE_INDEX:
+			return false;
 		default:
 			ERR_FAIL_V(0);
 	}
