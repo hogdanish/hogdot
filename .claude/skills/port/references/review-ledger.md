@@ -157,3 +157,154 @@ this is not a Phase 2 blocker and the port stays faithful. **Measure the hit rat
 trusting any WebGPU startup-time benchmark; the honest fixes are to key the table on
 (shader path, variant, defines) instead of a SPIR-V hash, or to have the build assert that the
 external glslang's version matches `GLSLANG_VERSION_*` from `thirdparty/glslang/glslang/build_info.h`.
+
+### RL-010 — 2026-08-06 — perf
+**Where:** `servers/rendering/renderer_rd/forward_mobile/render_forward_mobile.cpp`
+(`_render_shadow_pass`, `_render_shadow_end`), `render_forward_mobile.h` (`SceneState::ShadowPass`)
+**Found while:** slice 3, forward-mobile
+**What:** Mainline 4.7.1 added `RSE::LIGHT_AREA`, which renders its shadow into the *same*
+positional shadow atlas framebuffer as omni/spot with `using_dual_paraboloid = true`
+(`render_forward_mobile.cpp:1568`). It therefore lands in `p_render_data->shadows` and flows into
+`scene_state.shadow_passes` — the list the fork's same-framebuffer merge iterates. The fork predates
+area lights entirely, so its merge has never seen one. Line-level reading suggests merging *would*
+be safe (each pass is scoped by its own viewport/scissor to its own atlas rect, and shadow passes
+have no intra-batch read-after-write), but nothing has run it, and the phase brief's standing rule is
+to be correctness-conservative rather than speculatively extend a fork optimization.
+**Disposition:** fixed-in `<this slice>` — added `ShadowPass::mergeable` (default true), cleared for
+area-light passes, and required by the merge loop. Area lights keep one render-pass encoder each on
+WebGPU, i.e. they are unoptimized rather than wrong. **Phase 5 follow-up:** with a browser run
+available, flip the flag on and confirm area-light shadows still render; the exclusion is one field
+and two conditions, so re-enabling is cheap.
+
+### RL-011 — 2026-08-06 — bug
+**Where:** `servers/rendering/renderer_rd/storage_rd/mesh_storage.cpp`
+(`skeleton_allocate_data`, `_skeleton_atlas_ensure_capacity`)
+**Found while:** slice 2, storage-rd
+**What:** The skeleton atlas is a pure bump allocator with **no free list and no reclamation**.
+`skeleton_atlas_used` only ever increases (`skeleton_atlas_used += float_count`). `skeleton_free()`
+calls `skeleton_allocate_data(p_rid, 0)`, which sets `skeleton->size = 0` and so skips the
+allocation block entirely — the dead skeleton's slot is never returned. The same applies to a live
+skeleton that changes bone count: it takes a fresh slot and abandons the old one. Because
+`_skeleton_atlas_ensure_capacity` grows by doubling and **frees and reallocates the GPU buffer** each
+time, a scene that spawns and despawns skeletons (any pooled-enemy or streaming setup — which is
+exactly what CommonGrounds is) grows GPU memory without bound until allocation fails. This only bites
+where `API_TRAIT_SKELETON_BUFFER_DIRECT_WRITE` is set, i.e. WebGPU, where memory is *tightest*.
+**Disposition:** deferred — carried faithfully; it is not a 4.7.1 blocker and the honest fix (a free
+list keyed by slot size, or a compacting rebuild when waste exceeds a threshold) is well past the
+"trivial, obviously correct" bar. Revisit in Phase 5 alongside RL-012, which shares the same
+function.
+
+### RL-012 — 2026-08-06 — bug
+**Where:** `servers/rendering/renderer_rd/storage_rd/mesh_storage.cpp`
+(`_skeleton_atlas_ensure_capacity` + `_update_dirty_skeletons` atlas path)
+**Found while:** slice 2, storage-rd
+**What:** Growing the atlas frees the old storage buffer and creates a new, **uninitialized** one.
+The CPU mirror `skeleton_atlas_data` survives (`LocalVector::resize` preserves contents), but nothing
+re-uploads it: `_update_dirty_skeletons` only writes the range
+`[atlas_dirty_min, atlas_dirty_max)` covering skeletons dirty *this frame*. Every skeleton that is
+not dirty on the frame the atlas grows therefore keeps pointing at garbage GPU memory until it next
+becomes dirty. Animating skeletons are dirty every frame and hide this; a skeleton posed once and
+left static (a ragdoll at rest, a posed prop) renders with undefined bone transforms the moment some
+*other* skeleton triggers a grow.
+**Disposition:** deferred — carried faithfully. The fix is small and obvious in isolation (upload
+`[0, skeleton_atlas_used)` immediately after creating the new buffer), but it changes runtime
+behavior on a path no test exercises yet, and the port's audit trail depends on ported code matching
+its cited source. **Fix in Phase 5, as a separate commit citing this ID**, once a browser run can
+demonstrate the before/after.
+
+### RL-013 — 2026-08-06 — smell
+**Where:** `servers/rendering/renderer_rd/forward_mobile/render_forward_mobile.cpp`
+(`_render_list_template`, instance-batching and firstInstance blocks)
+**Found while:** slice 3, forward-mobile
+**What:** Two inconsistencies in the batching predicates, neither known to misrender:
+(1) the firstInstance fast path compares whole push-constant structs with
+`memcmp(&push_constant, &prev_fi_push_constant, push_constant_size)`, which reads **padding bytes**.
+`prev_fi_push_constant` is zero-initialized but `push_constant` is assembled field-by-field, so
+indeterminate padding can make two semantically identical push constants compare unequal. The
+failure direction is safe — a spurious difference only forces an extra `draw_list_set_push_constant`,
+never a skipped one — so this costs the occasional IPC crossing the optimization exists to avoid.
+(2) the batch predicate rejects a candidate with `next_inst->instance_count == 0`, but the *first*
+element reaches the same test through `instance_count = owner->instance_count > 1 ? … : 1`, which
+silently maps 0 to 1 and accepts it. The two ends of a batch are judged by different rules.
+**Disposition:** deferred — no known defect, and both are inside the fork's own performance work
+where faithful carriage matters most. Worth revisiting if WebGPU draw-call counts come in above what
+the fork's own measurements (`fd5f8c8`, "3.25x to parity") predict.
+
+### RL-014 — 2026-08-06 — bug
+**Where:** `servers/rendering/renderer_rd/shaders/forward_mobile/scene_forward_mobile.glsl`
+(mainline's area-light loop, ~line 2249)
+**Found while:** slice 4, shaders
+**What:** The fork rewrites ~20 `instances.data[draw_call.instance_index]` reads to
+`instances.data[batch_instance_index]` so that instance-batched draws address the right instance
+(`batch_instance_index = sc_multimesh() ? draw_call.instance_index : draw_call.instance_index +
+gl_InstanceIndex`). Mainline 4.7.1 then added an area-light loop that reads
+`instances.data[draw_call.instance_index].area_lights` — the one remaining unmigrated site, sitting
+between an omni loop and a spot loop that the fork *did* migrate. This is not merely unoptimized: the
+batch predicate in `_render_list_template` compares omni, spot, reflection-probe and decal counts but
+**not** `area_light_count`, so two instances with different area lights can land in the same batch,
+and every instance in that batch would read instance 0's `area_lights` bitfield.
+**Disposition:** fixed-in `<slice 4>` — retrofitted to `batch_instance_index`, matching every sibling
+loop. Safe in both directions: with batching off, `gl_InstanceIndex` is 0 and the two expressions are
+identical, so nothing changes on Vulkan/Metal. ⚠ **This deviates from `phase-3-renderer.md`, which
+said to "leave it bypassing".** That instruction was written to avoid speculatively *extending* a
+fork optimization; here, not extending it leaves a genuine mis-render, so the phase brief has been
+corrected in the same change. Compare RL-010, where exclusion *was* the conservative answer because
+the merge could simply be skipped without making anything wrong.
+
+### RL-015 — 2026-08-06 — bug
+**Where:** `servers/rendering/renderer_rd/shaders/environment/volumetric_fog_process.glsl:804,805,856`
+**Found while:** slice 4, shaders
+**What:** 4.7.1 added three `any(isnan(x)) || any(isinf(x))` validity checks to volumetric fog. Both
+intrinsics are unavailable in WGSL, which is exactly why the fork rewrote `isnan` as
+`notEqual(x, x)` in `motion_vectors.glsl` and `isinf` as a magnitude compare in `copy.glsl`
+(see RL-001). The fork never saw this file — `git show 4.6.2-stable:…` and the fork's own copy both
+contain **zero** occurrences — so no fork hunk covers it and nothing in the port surface flags it.
+The build stays green either way: Godot embeds `.glsl` as source and glslang compiles it at runtime,
+so this can only surface when volumetric fog is first drawn on WebGPU.
+**Disposition:** deferred — this is inherited mainline code, not a carried hunk, so there is nothing
+to port faithfully; it is a **new gap the rebase-forward created**. Chase it in Phase 5 with the
+other Tint translation failures, applying the same two substitutions the fork already established.
+⚠ Expect more of this shape at every future rebase-forward: mainline adding a WGSL-hostile intrinsic
+to a file the fork never touched is invisible to `port-surface.sh`, which classifies by *fork* delta.
+A cheap standing check is `rg 'modf\(|isnan\(|isinf\(' servers/rendering/renderer_rd/shaders/` after
+each rebase — that is how this was found.
+
+### RL-016 — 2026-08-06 — blocker
+**Where:** `servers/rendering/rendering_device_driver.cpp` (`RenderingDeviceDriver::api_trait_get`)
+vs `rendering_device_driver.h` (`enum ApiTrait`)
+**Found while:** phase 3 gate, first native windowed run
+**What:** The fork adds 8 enumerators to `ApiTrait` but never adds matching cases to the base
+`api_trait_get`, whose `default:` is `ERR_FAIL_V(0)`. Both the Vulkan and Metal drivers end their own
+switch with `default: return RenderingDeviceDriver::api_trait_get(p_trait)`, so every query for a
+WebGPU trait on a native backend falls through to that `ERR_FAIL_V` and prints. Measured: **189
+`ERROR: Method/function failed. Returning: 0` at `rendering_device_driver.cpp:59`** in a 180-frame
+Mobile-renderer run of `webgpu_tests/test_project`. The *returned* value was already correct — 0 is
+the intended native default for all 8 — so nothing rendered wrong; the defect is pure diagnostic
+noise, but at a volume that buries real errors and fails the phase gate's "no new errors versus
+vanilla" clause. The fork would not have seen this: it is a WebGPU fork and nobody ran its tree on
+Metal.
+**Disposition:** fixed-in `<separate commit>` — added the 8 canonical cases (all 0/false; 0 on
+`API_TRAIT_STAGING_BUFFER_MAX_SIZE_MB` means "no driver cap", per the `if (driver_max_mb > 0)` guard
+at `rendering_device.cpp:8910`). Qualifies for fix-now under the review directive on both counts: it
+blocks the 4.7.1 native path and the change is mechanical and obviously correct.
+⚠ **Standing lesson for the next rebase-forward:** adding an `ApiTrait` enumerator is a **two-file**
+change. The header alone compiles, links, and passes every headless check, because headless runs the
+dummy driver and never queries these traits. Only a windowed native run surfaces it.
+
+### RL-017 — 2026-08-06 — smell
+**Where:** `servers/rendering/renderer_rd/storage_rd/texture_storage.cpp:601-606`
+(`TextureStorage::TextureStorage`, default VRS texture)
+**Found while:** slice 2, storage-rd — gating-discipline pass
+**What:** The fork's other three `texture_storage.cpp` hunks are gated (`#ifdef WEBGPU_ENABLED`,
+`#ifndef WEBGPU_ENABLED`), but this one is **not**: it unconditionally moves
+`TEXTURE_USAGE_STORAGE_BIT` inside the `vrs_supported ? … : 0` ternary, so on *any* backend that
+reports no VRS support the 4×4 default VRS texture is now created without the storage bit. The
+comment names WebGPU as the motivation but the code applies everywhere. The change looks
+independently defensible — requesting storage on the `R8_UINT` fallback format was arguably wrong to
+begin with — and the blast radius is one 4×4 placeholder texture, so no defect is claimed. It is
+recorded because an ungated behavioral change in a driver-gated slice is exactly the class the
+phase-3 brief's gating-discipline rule exists to catch, and because the *reason* it is safe (the
+texture is a placeholder, not a real VRS target) is not written anywhere in the code.
+**Disposition:** deferred — carried faithfully and unmodified. Metal reports VRS support on this
+machine, so the branch is not even taken here; a backend without VRS is where this would first
+matter.

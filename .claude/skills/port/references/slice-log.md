@@ -348,3 +348,181 @@ windowed Mobile-renderer gate.
 - ⚠ **`mainline already did it` is a real category in this slice too**, not just in `detect.py`.
   Check every fork hunk against 4.7.1 before writing it: the `core/os/os.h` include above was already
   there, and the 7-arg barrier form was already at every mainline call site.
+
+### storage-rd — 2026-08-06 — `31a5484`
+
+**Source:** `137a252 992787e fd5f8c8 00f2cd3 374b36a 8711742 16ffdd7 1493bba c244ae9 025ebf3`
+**Verification:** **compiles + links (native).** `scons platform=macos target=editor arch=arm64` —
+0 errors, 0 compiler warnings, 5m03s. (The 2 "warnings" in the log are SCons's pre-existing
+accesskit/ANGLE optional-dependency notices, not compiler output.) `pre-commit run --files` clean on
+all five files. Reached *runs* later, as part of the phase gate.
+
+**Adapted**
+- `light_storage.cpp` (`light_omni_get_shadow_mode`) — the fork's inserted
+  `return RS::LIGHT_OMNI_SHADOW_DUAL_PARABOLOID;` requalified to `RSE::`. ⚠ **This hunk applies
+  textually clean and does not compile** — `git apply --3way` reported success on the file. The
+  `RS::`→`RSE::` rename that 4.7.1's RenderingServerEnums split introduced changed the *function's
+  return type* around the fork's inserted line, not the line itself. `research/upstream-churn.md`
+  predicted exactly this and was right.
+- `mesh_storage.cpp` (`update_mesh_instances`) — the only real 3-way conflict in the slice, and pure
+  rename noise: mainline renamed `RS::BLEND_SHAPE_MODE_NORMALIZED` on the line above the fork's
+  `pad1`→`bone_offset` repurposing. Took mainline's spelling with the fork's assignment.
+- `light_storage.h` — mainline inserted six area-light virtuals between `light_omni_get_shadow_mode()`
+  and `light_get_type()`, which is where the fork adds `is_force_omni_dual_paraboloid()`. Placed the
+  accessor *after* mainline's block rather than inside it, so mainline's virtuals stay one contiguous
+  run and the next rebase-forward sees a smaller diff.
+- `texture_storage.cpp` — nothing. All five hunks applied at unchanged anchors despite mainline's
+  +824/−80, exactly as the churn report predicted.
+
+**Gotchas**
+- ⚠ **`git apply --3way` per-file is the right tool for this port, but "applied cleanly" is not
+  "correct".** It resolves *text*; the `RS::`→`RSE::` rename is a semantic change whose collisions
+  are invisible to it. **After every apply, sweep the added lines for both renames** before building:
+  ```bash
+  git diff HEAD -- <paths> | grep '^+' | grep -E '\bRS::|\bDisplayServer::'
+  ```
+  That one command found the `light_storage.cpp` must-fix and would have found the `mesh_storage.cpp`
+  one had the 3-way not already flagged it.
+- ⚠ **Both new behaviors are gated on RD capability queries that the base driver did not answer.**
+  `use_skeleton_atlas` and `force_omni_dual_paraboloid` read `API_TRAIT_SKELETON_BUFFER_DIRECT_WRITE`
+  / `API_TRAIT_FORCE_OMNI_DUAL_PARABOLOID`, which return 0 on Vulkan/Metal so the native paths are
+  untouched — but reaching that 0 went through `ERR_FAIL_V` and printed. See ledger **RL-016**, fixed
+  in `4dc5bbb`.
+- ⚠ **The skeleton atlas has two latent defects, both carried faithfully** — ledger **RL-011** (bump
+  allocator never reclaims a slot, so create/destroy cycles grow GPU memory without bound) and
+  **RL-012** (growing the atlas reallocates the GPU buffer but only re-uploads *this frame's* dirty
+  range, so static posed skeletons read garbage after some other skeleton triggers a grow). Both are
+  WebGPU-only. Fix in Phase 5 where a browser run can demonstrate before/after.
+
+### forward-mobile — 2026-08-06 — `f503e72`
+
+**Source:** `ada05c7 bdfa1de fd5f8c8 e55806a 511d5fe 4b5116c e9505ca a1be3e2 d0deb8a 025ebf3`
+**Verification:** **compiles + links (native)**, then **runs** at the phase gate. Only one 3-way
+conflict in the whole slice, in `render_forward_mobile.cpp`, and it was rename noise.
+
+**Adapted**
+- `render_forward_mobile.cpp` (`_render_scene`) — the fork's `using_subpass_post_process = false`
+  block sits directly above two lines mainline renamed to `RSE::ViewportMSAA`. Took mainline's
+  spelling.
+- `renderer_compositor_rd.cpp` (`blit_render_targets_to_screen`) — 4.7.1 rewrote blit to cache
+  pipelines per framebuffer format and added four HDR fields, so the fork's hunk cannot apply. The
+  single behavioral change — `draw_list_begin_for_screen(p_screen, Color(0, 0, 0, 1))`, which Dawn
+  needs or the browser canvas composites translucent — was re-inserted by hand. ⚠ The churn report
+  said the target line still called the color-less overload in 4.7.1, and it does: the overload takes
+  a defaulted `const Color &p_clear_color` (`rendering_device.h:1549`), so this is a one-argument
+  edit, not a signature change.
+- `render_forward_mobile.h` / `.cpp` — **area lights excluded from the shadow-pass merge.** Added
+  `SceneState::ShadowPass::mergeable` (default true), cleared for area-light passes in
+  `_render_shadow_pass`, and required by both conditions of the merge loop in `_render_shadow_end`.
+  Rationale and the Phase 5 follow-up are ledger **RL-010**. ⚠ Set the flag *after*
+  `_render_shadow_append` returns, over the range of passes it pushed — that function already takes
+  **18 parameters** and a 19th to carry one bool is not worth it.
+
+**Dropped**
+- `servers/rendering/renderer_viewport.cpp` — the fork's entire delta here is an inert `{ }` block
+  left from a stripped diagnostic, and mainline moved its anchor (`&& vp->view_count > 0`). Zero
+  functional content. Predicted LIKELY-DROP by the churn report; confirmed by reading it.
+- `renderer_compositor_rd.cpp` — the fork also deletes the `// Window is minimized and does not have
+  valid swapchain…` comment. Unrelated to WebGPU and the comment is accurate; mainline's kept.
+
+**Gotchas**
+- ⚠ **`instances.data[draw_call.instance_index]` is a cross-slice invariant, not a shader detail.**
+  The fork's instance batching in this file is only correct because `scene_forward_mobile.glsl` reads
+  `batch_instance_index` everywhere. Any mainline addition that reads `draw_call.instance_index`
+  directly silently breaks batched draws — which is exactly what happened with area lights
+  (ledger **RL-014**, fixed in the shaders slice). **When porting the batching code, grep the shader
+  for `draw_call.instance_index` in the same sitting.**
+- ⚠ **The batch predicate does not compare every field the shader reads.** It checks omni, spot,
+  reflection-probe and decal counts but not `area_light_count`. That is what turns RL-014 from a
+  missed optimization into a mis-render. Assume the same class of gap for any future per-instance
+  array mainline adds.
+- ⚠ **`canvas_uniforms_inc.glsl` landed in this commit, not Phase 1.** It is classified "clean" by
+  `port-surface.sh` but is a matched pair with `renderer_canvas_render_rd.cpp`: the shader moves SET3
+  texture bindings `0..3`→`1..4` to reserve binding 0 for the WebGPU push-constant ring buffer, and
+  the `.cpp` moves the matching `RD::Uniform` indices. Either alone fails `uniform_set_create` and
+  kills all 2D rendering on every RD backend, editor UI included. The Phase 1 deferral was correct
+  and is now discharged.
+
+### shaders — 2026-08-06 — `115dd64`
+
+**Source:** `f329e39 fd5f8c8 d1da774 b2327be 697a9e7 e9505ca`
+**Verification:** **applied only.** ⚠ Godot embeds `.glsl` as source into `*.glsl.gen.h` and compiles
+it with glslang at *runtime*, so the native build that followed proves nothing about any line here.
+`pre-commit run --files` is clean; that is a formatting claim, not a correctness one. First real test
+is Phase 4's browser run.
+
+**Adapted**
+- `sdfgi_direct_light.glsl` — the slice's only 3-way conflict: mainline added
+  `vec3 texture_color = vec3(1.0);` immediately below the sentinel the fork lowers from `1e20` to
+  `1e6`. Both kept.
+- `scene_forward_mobile.glsl` — **retrofitted mainline's new area-light loop to
+  `batch_instance_index`** (ledger **RL-014**). This is the one place the slice deviates from the
+  fork *and* from the phase brief, which said to leave it bypassing; `phase-3-renderer.md` has been
+  corrected in the same change. It is a correctness fix, not an optimization: the batch predicate
+  never compares `area_light_count`, so instances with different area lights can share a batch and
+  would all read instance 0's bitfield. A no-op off WebGPU, where `gl_InstanceIndex` is 0.
+- `blit.glsl` — the fork's hunk leaves a trailing blank line before the closing brace;
+  `clang-format-glsl` removed it. The rest is the fork's verbatim.
+
+**Gotchas**
+- ⚠ **Two churn-report verdicts were wrong, both in the optimistic direction for us.**
+  `scene_forward_clustered.glsl` was UNVERIFIED-suspected-RETHINK and applied clean;
+  `scene_forward_mobile.glsl` was RETHINK on the grounds that a `modf`→`floor` hunk sat inside
+  mainline's rewritten clearcoat block — mainline converted those lines to *half precision* but left
+  the `modf` call and its surroundings intact, so the hunk applied. `research/upstream-churn.md` is
+  corrected in place for both. **Read the mainline diff before budgeting time for a RETHINK verdict.**
+- ⚠ **`port-surface.sh` cannot see a hazard mainline introduces in a file the fork never touched.**
+  It classifies by *fork* delta. 4.7.1 added three `isnan`/`isinf` calls to
+  `environment/volumetric_fog_process.glsl` — both intrinsics are unavailable in WGSL, and are
+  precisely what the fork rewrote elsewhere. Zero occurrences in `4.6.2-stable` and zero in the
+  fork's copy, so nothing flagged it. Ledger **RL-015**. **Standing check after every
+  rebase-forward:**
+  ```bash
+  rg 'modf\(|isnan\(|isinf\(' servers/rendering/renderer_rd/shaders/
+  ```
+  That is how it was found, and it costs a second.
+
+### phase-3 gate (native half) — 2026-08-06 — `4dc5bbb`
+
+**Verification:** **runs (native, Metal, Forward Mobile).**
+`bin/godot.macos.editor.arm64 --path webgpu_tests/test_project --rendering-method mobile
+--quit-after 180` exits 0. Banner: `Metal 4.0 - Forward Mobile - Using Device #0: Apple - Apple M5`.
+This is the first run in the whole port that executes RenderingDevice code — Phase 2's gate was
+headless, which uses the **dummy** driver.
+
+**How "no new errors versus vanilla" was actually established.** Reading the log is not enough; the
+project emits 15 distinct diagnostics of its own. A real baseline was built:
+```bash
+git worktree add <tmp>/vanilla 4.7.1-stable && (cd <tmp>/vanilla && scons platform=macos target=editor arch=arm64 …)
+diff <(grep -E '^(ERROR|WARNING)|^   at:' vanilla.log | sort) <(grep … hogdot.log | sort)
+```
+The two sets are **identical**, the sole difference being `finalize`'s line number
+(`rendering_device.cpp:8900` vanilla vs `:9269` hogdot) — the port's own added lines shifting the
+file. ⚠ **The 14 leaked `Texture` RIDs, the unfreed `ParticlesShaderRD` and the leaked
+`MaterialStorage::Shader` at exit are all pre-existing 4.7.1 behavior with this project, not port
+damage.** Without the baseline they read exactly like a regression, and chasing them would have
+burned a session. The baseline binary is preserved at
+`<scratchpad>/godot-vanilla-4.7.1.arm64` (the worktree was removed so no dangling git state remains;
+the binary is self-contained and needs neither the worktree nor the source).
+
+⚠ **`--rendering-method mobile` is required** — `webgpu_tests/test_project/project.godot` sets
+`renderer/rendering_method="forward_plus"`, so a bare run does **not** exercise forward-mobile and
+would have silently missed this slice entirely. The 11 "only available when using the Forward+
+renderer" warnings are the expected consequence of running a Forward+-authored project on mobile,
+and appear identically in vanilla.
+
+**RL-005 did not fire.** The `_end_frame` staging-unmap loop carried in `c6e453e` was flagged as a
+native-backend hazard and STATUS.md said to "expect it to break". It did not: 180 frames on Metal,
+clean. That is evidence the loop is harmless on this backend, **not** proof the RL-005 analysis was
+wrong — the map/unmap accounting concern it raised still stands and is still worth resolving. Leaving
+RL-005 open.
+
+**Gotchas**
+- ⚠ **A trailing `grep -c` makes a green build report as failed.** `scons … > log 2>&1; echo EXIT=$?;
+  grep -c "error:" log` exits **1** when the count is zero, and that becomes the command's status —
+  the harness reported a successful 5-minute build as "failed with exit code 1". Put the `grep` in a
+  separate call, or append `|| true`.
+- ⚠ **Editing source while a background build runs produces an ambiguous result.** Files edited
+  mid-build may or may not have been scanned yet. The fix is cheap — run a second incremental build
+  and check its `Compiling …` lines actually name the files you changed — but the first build's
+  green cannot be trusted for those files.
