@@ -807,3 +807,53 @@ exception no longer applies.
 **Regression evidence for the whole chain:** preprocessing_tests 191/0/1 · driver_unit_tests 327/0 ·
 shader_corpus 13/0 · wgsl_cache 20 + 130 · the 193-module corpus unchanged at 173 compiled / 11 glsl
 failures (RL-025) / 9 tint failures · web, macOS editor and native `tint_convert_cli` all build clean.
+
+---
+
+## Phase 7 — hardening, first batch (2026-08-06)
+
+Seven fix commits against the Phase-6 queue. No port hunks: from here on hogdot deliberately
+diverges from the fork, and each of these is hogdot-authored. Every one cites its ledger ID.
+
+| commit | ledger | what |
+| --- | --- | --- |
+| `dc917d5` | RL-029 | inter-stage varying ceiling: engine.js limit request + varying repack |
+| `845c61e` | RL-030, RL-033, RL-034 | the SPIR-V word tables in `spirv_preprocess.cpp` |
+| `e886ff7` | RL-031 | clamp-to-edge in the depth texel-fetch rewrite |
+| `2f3d721` | RL-015 | `isnan`/`isinf` in volumetric fog |
+| `d69db15` | RL-001 | the 3e10 infinity threshold in `copy.glsl` |
+| `37e82a2` | RL-011, RL-012 | skeleton atlas free list + grow re-upload |
+| `7830eb6` | RL-029 gate | `varying_stress.gdshader`, 4 user varyings |
+
+### The lesson worth carrying: a limit you do not request is a limit you do not have
+
+RL-029 looked like a pure engine-side problem — "the renderer reserves 15 of 16 locations". Half of
+it was, and half was that `platform/web/js/engine/engine.js` never asked for the locations the
+adapter was offering. Measured in Chrome on apple/metal-3: **adapter `maxInterStageShaderVariables`
+28, default device 16.** The nine limits in `limitsToMax` were raised at some point because something
+broke; every limit *not* in that list is silently sitting at the WebGPU default.
+
+⚠ **`limitsToMax` is a standing audit target.** When a WebGPU limit error appears, check that list
+before touching the engine — the adapter may already offer what you need. `webgpureport.org` plus a
+two-line `requestAdapter`/`requestDevice` comparison in the console answers it in one round trip, and
+the two numbers are routinely different.
+
+### Deriving a table instead of hand-maintaining one
+
+RL-030's fix was specified as "add the 18 missing opcode families". Generating the table from the
+vendored SPIRV-Tools grammar (`thirdparty/spirv-tools/generated/core_tables_body.inc`) instead cost
+about the same and produced 105 opcodes — and the extra 87 included two shapes a hand-list would not
+have reached for: `OpDecorateId`/`OpExecutionModeId` need the **opposite** rule to `OpDecorate`
+(their trailing operands are `<id>`s), and `OpGroupMemberDecorate` alternates id/literal pairs.
+
+⚠ **It also found RL-033**, an off-by-one in the `OpSwitch` predicate that the phase-6 audit had
+explicitly examined and passed. The audit checked it by reading; the grammar disagreed. When a
+machine-readable spec for something is already vendored, check against *it*, and prefer generating
+over transcribing.
+
+### Verification reached this batch
+
+**links** — `scons platform=macos target=editor arch=arm64` clean after every C++ commit. ⚠ Four of
+the seven touch `.glsl` or generated WGSL, which a green build proves **nothing** about: Godot embeds
+shader source and compiles it at runtime. RL-001, RL-015, RL-029 and RL-031 all need *renders*, and
+RL-011/RL-012 need a spawn/despawn and a static-pose skeleton respectively. None of that has run yet.

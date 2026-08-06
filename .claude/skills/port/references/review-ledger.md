@@ -47,8 +47,10 @@ investigation before it can be classified).
 magnitude below `FLT_MAX` (~3.4e38), so ordinary finite HDR values above 3e10 are now clamped to
 `vec4(100.0)` as if they were infinite. This changes glow/luminance behavior on **every** RD
 backend, not just WebGPU, since these shaders are shared.
-**Disposition:** deferred — carried faithfully. Revisit in Phase 5; the honest fix is to gate the
-substitution behind the WebGPU backend, or raise the threshold to just below `FLT_MAX`.
+**Disposition:** **fixed-in `d69db15`** (phase 7) — threshold raised to `3.0e+38`, just under
+FLT_MAX, at both sites. That restores mainline's `isinf` semantics on every backend while keeping the
+substitution WGSL-translatable, so it is preferred over gating it behind WebGPU. Done before the
+Phase-9 HDR work on purpose: this threshold is what decides what counts as an out-of-range luminance.
 
 ### RL-002 — 2026-08-06 — bug
 **Where:** `servers/rendering/renderer_rd/shaders/canvas_sdf.glsl`,
@@ -197,10 +199,14 @@ skeleton that changes bone count: it takes a fresh slot and abandons the old one
 time, a scene that spawns and despawns skeletons (any pooled-enemy or streaming setup — which is
 exactly what CommonGrounds is) grows GPU memory without bound until allocation fails. This only bites
 where `API_TRAIT_SKELETON_BUFFER_DIRECT_WRITE` is set, i.e. WebGPU, where memory is *tightest*.
-**Disposition:** deferred — carried faithfully; it is not a 4.7.1 blocker and the honest fix (a free
-list keyed by slot size, or a compacting rebuild when waste exceeds a threshold) is well past the
-"trivial, obviously correct" bar. Revisit in Phase 5 alongside RL-012, which shares the same
-function.
+**Disposition:** **fixed-in `37e82a2`** (phase 7) — `_skeleton_atlas_release()` hands the slot back
+and `_skeleton_atlas_alloc()` reuses it, from a free list keyed by slot size in floats. Reuse is
+exact-size only, which is the case a pool of identical skeletons produces; a slot whose size never
+recurs parks rather than coalescing, and that residual is accepted. A slot freed at the tail goes
+straight back to the bump allocator, so a spawn/despawn cycle at the high-water mark does not grow it
+at all. ⚠ Every slot is `bones * 12` (3D) or `bones * 8` (2D) floats — both multiples of 4 — which is
+what keeps offsets vec4-aligned as `atlas_offset` requires; a future slot size that is not a multiple
+of 4 breaks that silently.
 
 ### RL-012 — 2026-08-06 — bug
 **Where:** `servers/rendering/renderer_rd/storage_rd/mesh_storage.cpp`
@@ -214,11 +220,10 @@ not dirty on the frame the atlas grows therefore keeps pointing at garbage GPU m
 becomes dirty. Animating skeletons are dirty every frame and hide this; a skeleton posed once and
 left static (a ragdoll at rest, a posed prop) renders with undefined bone transforms the moment some
 *other* skeleton triggers a grow.
-**Disposition:** deferred — carried faithfully. The fix is small and obvious in isolation (upload
-`[0, skeleton_atlas_used)` immediately after creating the new buffer), but it changes runtime
-behavior on a path no test exercises yet, and the port's audit trail depends on ported code matching
-its cited source. **Fix in Phase 5, as a separate commit citing this ID**, once a browser run can
-demonstrate the before/after.
+**Disposition:** **fixed-in `37e82a2`** (phase 7, same commit as RL-011) — `_skeleton_atlas_ensure_capacity`
+now seeds the new buffer from the CPU mirror, which survives the resize, before returning. Uploads
+`min(skeleton_atlas_used, old_capacity)` floats, i.e. the whole old mirror; the slack past the
+high-water mark is uninitialized but nothing reads it.
 
 ### RL-013 — 2026-08-06 — smell
 **Where:** `servers/rendering/renderer_rd/forward_mobile/render_forward_mobile.cpp`
@@ -269,9 +274,10 @@ intrinsics are unavailable in WGSL, which is exactly why the fork rewrote `isnan
 contain **zero** occurrences — so no fork hunk covers it and nothing in the port surface flags it.
 The build stays green either way: Godot embeds `.glsl` as source and glslang compiles it at runtime,
 so this can only surface when volumetric fog is first drawn on WebGPU.
-**Disposition:** deferred — this is inherited mainline code, not a carried hunk, so there is nothing
-to port faithfully; it is a **new gap the rebase-forward created**. Chase it in Phase 5 with the
-other Tint translation failures, applying the same two substitutions the fork already established.
+**Disposition:** **fixed-in `2f3d721`** (phase 7) — `VEC4_IS_NAN` / `VEC4_IS_INF` macros applied at
+all three sites, using the fork's own substitutions but with a `3.0e+38` infinity threshold rather
+than the `3.0e+10` of RL-001. Nothing here depends on the difference: every value these guard is
+clamped to `65504.0` on the next line. Sweep re-run at fix time: still exactly these three hits.
 ⚠ Expect more of this shape at every future rebase-forward: mainline adding a WGSL-hostile intrinsic
 to a file the fork never touched is invisible to `port-surface.sh`, which classifies by *fork* delta.
 A cheap standing check is `rg 'modf\(|isnan\(|isinf\(' servers/rendering/renderer_rd/shaders/` after
@@ -656,13 +662,36 @@ validated for its actual consumer.
 ⚠ **The documented fallback does not work.** Switching to `rendering_method.web="forward_plus"` hits
 `TINT_UNIMPLEMENTED unhandled SPIR-V BuiltIn: HelperInvocation` in Tint's SPIR-V reader — the same
 subsystem RL-023's patch 0007 already touches.
-**Disposition:** open — **Phase 7, highest priority.** Three candidate repairs, cheapest first:
-(1) audit which of the 15 reserved varyings `scene_forward_mobile.glsl` actually consumes once the
-WebGPU defines are applied and lower `base_varying_index` accordingly — the reporter believes several
-are dead on this path; (2) pack engine-internal varyings for the WebGPU backend; (3) implement
-`HelperInvocation` in Tint as patch 0008 to make Forward+ a real fallback. (1) is the fix, (3) is
-insurance. ⚠ Any fix needs a **new gate scene carrying ≥4 user varyings** — otherwise the next
-regression is invisible again.
+**Disposition:** **fixed-in `dc917d5`** (phase 7). Two independent causes, and the second was not in
+the original analysis:
+
+1. **The device never asked for the locations it could have had.** `platform/web/js/engine/engine.js`
+   requests the adapter maximum for nine limits but **not** `maxInterStageShaderVariables`, so the
+   device fell back to the WebGPU default of 16 on an adapter offering far more. Measured in Chrome
+   here (apple/metal-3): **adapter 28, default device 16.** One line in `limitsToMax`.
+2. **The engine reserved more locations than it uses.** `scene_forward_mobile.glsl` left locations 10
+   and 11 empty and spread the rest to 14. Repacked into 0..12 with no behavioural change: `dp_clip`
+   9→7 (sharing with the vertex-lighting pair — `MODE_DUAL_PARABOLOID` only ever appears with
+   `MODE_RENDER_DEPTH`, which excludes them), `batch_instance_index` 10→9, `point_coord_interp` 14→10,
+   `screen_position` 12→11, `prev_screen_position` 13→12.
+
+`base_varying_index` is then `RD::has_feature(SUPPORTS_MULTIVIEW) ? 13 : 11`: the motion-vector pair
+at 11–12 exists only in the `MODE_RENDER_MOTION_VECTORS` variant, which is multiview-only on this
+renderer, and the WebGPU driver reports `multiview_capabilities.is_supported = false`
+unconditionally, so web gets 11.
+
+**Net: 1 user varying slot → 5 on a spec-floor 16-variable device, → 17 on this machine's adapter.**
+That clears every CommonGrounds shader in the table above.
+
+⚠ An aliased location is a **loud glslang error**, not a mis-render, so the location-7 sharing fails
+safe if a future variant breaks the exclusion. ⚠ The budget table now lives at the top of the
+shader's vertex stage and **must** stay in step with `base_varying_index` — they are two files.
+⚠ `forward_clustered` was deliberately **not** repacked: it has the same flat 15 and the same gap, but
+CommonGrounds is Mobile and Forward+ on web is separately blocked by Tint's unimplemented
+`HelperInvocation`. Carried forward as a Phase-7 tail item, not silently dropped.
+
+Gate: `webgpu_tests/test_project/shaders/varying_stress.gdshader` (`7830eb6`), four user varyings, two
+instances, every varying read in `fragment()`.
 
 ### RL-030 — 2026-08-06 — bug (latent)
 **Where:** `drivers/webgpu/spirv_preprocess.cpp:2194` (`_is_literal_operand`), the RL-028 repair
@@ -699,12 +728,15 @@ lowest rewritable ids observed are **52 and 53** (`sdfgi_integrate.glsl`) and **
 The two value spaces already overlap; only the accident that those shaders do not call
 `FrexpStruct`(52)/`Ldexp`(53) prevents corruption. Any shader edit or id renumbering can close that
 gap silently, which is precisely how RL-028 lay dormant until a shader grew large enough.
-**Disposition:** open — **Phase 7, size S, high priority** (silent wrong-code generation, no
-diagnostic). Extend the table to the 18 families above. The durable alternative is to stop hand-
-maintaining it and derive the predicate from the vendored SPIRV-Tools operand tables, which are
-already in the build. ⚠ Verified as correct in the same review: the needs-rewrite **scan** and the
-**rewrite** consult the same `is_literal` lambda, and `OpSwitch`'s alternating literal/label operands
-are handled separately and correctly.
+**Disposition:** **fixed-in `845c61e`** (phase 7) — the table now covers **every** core opcode up to
+SPIR-V 1.6 carrying a non-`<id>` operand (105 of them), generated from
+`thirdparty/spirv-tools/generated/core_tables_body.inc` rather than hand-listed, with the generation
+recipe recorded in the code comment so a SPIRV-Tools bump can be re-derived the same way. Beyond the
+18 families named above this also caught `OpDecorateId`/`OpExecutionModeId` needing the *opposite*
+rule to `OpDecorate` (their trailing operands really are `<id>`s), `OpGroupMemberDecorate`'s
+alternating pairs, the `OpSDot` family, and the group-operation opcodes.
+⚠ **The claim in this entry that `OpSwitch` is "handled separately and correctly" was wrong** — see
+**RL-033**, found while implementing this fix.
 
 ### RL-031 — 2026-08-06 — bug
 **Where:** `drivers/webgpu/rendering_device_driver_webgpu.cpp:207`
@@ -728,12 +760,14 @@ entirely.** Silent — no validation error, no log line.
 
 (The positional/atlas path at `:565` is safe: its offset is applied to the direction vector before the
 dual-paraboloid projection, so the result stays inside `uv_rect`.)
-**Disposition:** open — **Phase 7, size S.** Restore clamp-to-edge in the generated WGSL:
-`clamp(vec2<i32>(...), vec2<i32>(0), vec2<i32>(textureDimensions(tex, level)) - vec2<i32>(1))`.
-⚠ **The cheaper alternative was never considered or recorded:** binding a **non-filtering** sampler
-for these taps is legal on a depth texture in WebGPU, keeps `textureSampleLevel` semantics, and gets
-clamp-to-edge back for free — at the cost of one extra sampler binding and a sampler-reference rewrite.
-Evaluate both in Phase 7 rather than assuming the texel-fetch shape is settled.
+**Disposition:** **fixed-in `e886ff7`** (phase 7) — the generated fetch now clamps the texel
+coordinate to `[0, textureDimensions - 1]`.
+
+The non-filtering-sampler alternative was evaluated as the audit asked, and **rejected**: it costs one
+more sampler binding, and this adapter reports `maxSamplersPerShaderStage` = 16 against a scene shader
+that already declares 18 and only fits because `narrow_visibility()` masks them per stage (RL-026).
+Spending a sampler to save a clamp is the wrong trade on the one resource with no headroom. The
+reasoning is now in the code so it is not re-litigated.
 Noted and judged non-blocking: the pass skips offset-form calls (`argc` mismatch), which would fail
 loudly at pipeline creation rather than silently — and no Godot shader takes an offset sample off a
 depth texture (the 6 files using `textureLodOffset`/`textureOffset` are all colour-buffer effects).
@@ -754,3 +788,53 @@ legitimately, being hogdot-authored adaptation rather than carried fork code.
 **Disposition:** open — **Phase 7, size S.** History is never rewritten here (`conventions.md` § git
 mechanics), so the repair is a forward-only correction note recording the right SHAs for both paths,
 found with `git log --oneline 4.6.2-stable..webgpu/webgpu-4.6.2 -- <path>`.
+
+### RL-033 — 2026-08-06 — bug
+**Where:** `drivers/webgpu/spirv_preprocess.cpp` — the `is_literal` lambda in
+`flatten_binding_arrays()`'s rewrite loop, `switch_alternating` branch
+**Found while:** phase 7, implementing RL-030's table
+**What:** The OpSwitch predicate was **off by one**. `OpSwitch` is
+`<id selector> <id default>` followed by (literal, label) pairs, so its literals sit at words
+3, 5, 7, …; the code tested `p_i >= 2 && ((p_i - 2) % 2 == 0)`, i.e. 2, 4, 6, …. Both halves are
+wrong: word 2 (the default **label id**) was frozen as a literal, and every **case literal** was
+treated as an id and therefore left rewritable — which is precisely the RL-028 defect, still live
+inside RL-028's own fix. The frozen half is harmless (label ids are never in this pass's maps); the
+rewritable half is not.
+⚠ **The phase-6 audit examined this predicate and passed it** ("`OpSwitch`'s alternating
+literal/label operands are handled by a separate, correct predicate", RL-030). That is a reminder
+that an audit finding of *correct* is only as good as the spec it was checked against — this one was
+checked by reading, not against the grammar.
+**Disposition:** **fixed-in `845c61e`** — predicate corrected to `p_i >= 3 && ((p_i - 3) % 2 == 0)`.
+⚠ A 64-bit switch selector would make each case literal **two** words wide and break the alternation
+again; Godot has none and glslang does not emit them for GLSL, and that assumption is now recorded in
+the code.
+
+### RL-034 — 2026-08-06 — bug (latent)
+**Where:** `drivers/webgpu/spirv_preprocess.cpp:88-91` — `OP_COPY_MEMORY`, `OP_COPY_MEMORY_SIZED`,
+`OP_IN_BOUNDS_PTR_ACCESS_CHAIN`
+**Found while:** phase 7, cross-checking opcode numbers against `spirv.hpp11` for RL-030
+**What:** Three opcode constants named the wrong instruction. `OP_COPY_MEMORY` was **38**, which is
+`OpTypePipe`; `OP_COPY_MEMORY_SIZED` was **39**, which is `OpTypeForwardPointer`; the real values are
+63 and 64. `OP_IN_BOUNDS_PTR_ACCESS_CHAIN` was **216** instead of **70**. All three are consumed by
+`infer_readonly_storage`'s write-detection switch, so a storage buffer written *only* through
+`OpCopyMemory`/`OpCopyMemorySized` or reached through an in-bounds pointer access chain would not be
+recorded as written and could be narrowed to `read`. The wrong constants also made the switch match
+`OpTypePipe`/`OpTypeForwardPointer` instead, whose word 1 is a type id — a no-op insertion into
+`written_vars`, so no false positive either.
+Latent rather than live: glslang emits none of these three forms for Vulkan GLSL (aggregate assignment
+becomes `OpStore`/`OpCopyLogical`, and `OpPtrAccessChain` needs `VariablePointers`). It also fails
+**loudly** — Tint rejects a write to a `read` storage buffer — rather than silently.
+**Disposition:** **fixed-in `845c61e`** — corrected to 63, 64 and 70.
+
+### RL-035 — 2026-08-06 — smell
+**Where:** `servers/rendering/renderer_rd/forward_clustered/scene_forward_clustered.glsl` /
+`scene_shader_forward_clustered.cpp:904` (`actions.base_varying_index = 15`)
+**Found while:** phase 7, fixing RL-029 on the mobile renderer
+**What:** Forward+ carries the same flat 15-location reservation and the same gaps that RL-029 fixed
+on Mobile, so a Forward+ user shader on WebGPU has the same one-slot ceiling. It was deliberately
+**not** repacked in `dc917d5`: CommonGrounds targets Mobile, Forward+ on web is separately blocked by
+Tint's unimplemented `HelperInvocation` in the SPIR-V reader (RL-029), and repacking a second scene
+shader doubles the blast radius of a change whose safety argument rests on per-variant
+mutual-exclusion analysis. Recorded so the omission is a decision rather than an oversight.
+**Disposition:** deferred — do it when Forward+ on web becomes reachable, i.e. alongside a Tint
+`HelperInvocation` patch. The mobile repack in `dc917d5` is the worked example to copy.
