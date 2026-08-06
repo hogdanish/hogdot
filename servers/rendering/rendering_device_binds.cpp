@@ -198,7 +198,25 @@ Error RDShaderFile::parse_versions_from_text(const String &p_text, const String 
 				code = code.replace("VERSION_DEFINES", E.value);
 				String error;
 #ifdef MODULE_GLSLANG_ENABLED
-				Vector<uint8_t> spirv = compile_glslang_shader(RD::ShaderStage(i), ShaderIncludeDB::parse_include_files(code), RD::SHADER_LANGUAGE_VULKAN_VERSION_1_1, RD::SHADER_SPIRV_VERSION_1_4, &error);
+				// ⚠ Route through RenderingDevice when one exists, so the SPIR-V
+				// version comes from the active driver's shader container instead of
+				// being hardcoded. This path is what a project's own GLSL goes through
+				// (RDShaderFile), and it used to pin SHADER_SPIRV_VERSION_1_4
+				// unconditionally while the engine's own shaders got the container's
+				// version via RenderingDevice::shader_compile_spirv_from_source().
+				// On WebGPU that split is fatal: the container asks for 1.3 because
+				// Tint's SPIR-V reader validates against SPV_ENV_VULKAN_1_1, so every
+				// user shader compiled here was rejected with "Invalid SPIR-V binary
+				// version 1.4 for target environment SPIR-V 1.3". See RL-038.
+				//
+				// The hardcoded fallback stays for the no-device case (the editor's
+				// importer can reach this before a RenderingDevice exists).
+				Vector<uint8_t> spirv;
+				if (RD::get_singleton() != nullptr) {
+					spirv = RD::get_singleton()->shader_compile_spirv_from_source(RD::ShaderStage(i), code, RD::SHADER_LANGUAGE_GLSL, &error);
+				} else {
+					spirv = compile_glslang_shader(RD::ShaderStage(i), ShaderIncludeDB::parse_include_files(code), RD::SHADER_LANGUAGE_VULKAN_VERSION_1_1, RD::SHADER_SPIRV_VERSION_1_4, &error);
+				}
 				bytecode->set_stage_bytecode(RD::ShaderStage(i), spirv);
 #else
 				error = "Shader compilation is not supported because glslang was not enabled.";

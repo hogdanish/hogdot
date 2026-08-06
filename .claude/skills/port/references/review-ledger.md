@@ -919,3 +919,145 @@ shader doubles the blast radius of a change whose safety argument rests on per-v
 mutual-exclusion analysis. Recorded so the omission is a decision rather than an oversight.
 **Disposition:** deferred — do it when Forward+ on web becomes reachable, i.e. alongside a Tint
 `HelperInvocation` patch. The mobile repack in `dc917d5` is the worked example to copy.
+
+### RL-036 — 2026-08-06 — bug (**mainline 4.7.1**, not a fork hunk)
+**Where:** `servers/rendering/rendering_device.cpp:9563` — the `ClassDB::bind_method` for
+`draw_list_draw`
+**Found while:** phase 7, the CommonGrounds acceptance run (rung 3) — the first time any *real*
+project's GDScript was compiled against this build
+**What:** `RenderingDevice::draw_list_draw()` takes **five** C++ parameters at 4.7.1
+(`p_list, p_use_indices, p_instances = 1, p_procedural_vertices = 0, p_first_instance = 0`), but the
+bind names only four and supplies one `DEFVAL`. ClassDB derives the script-visible required-argument
+count from the **C++ arity minus the DEFVAL count**, not from how many names `D_METHOD` supplies, so
+the method was exposed as five arguments with one default — required count **4**. The fifth appeared
+in the method list literally named `_unnamed_arg4`.
+
+`doc/classes/RenderingDevice.xml` documents four parameters with the last defaulted, i.e. **three
+required**. So the documented signature did not parse:
+
+```
+SCRIPT ERROR: Parse Error: Too few arguments for "draw_list_draw()" call. Expected at least 4 but received 3.
+   at: GDScript::reload (res://game/entities/interaction/outline/stencil/stencil_outline_effect.gd:483)
+```
+
+⚠ **This is upstream's defect, not the port's** — `p_first_instance` was added to the C++ signature in
+4.7 and the binding was not updated. It is unrelated to WebGPU: any Godot 4.7.1 project calling
+`draw_list_draw` as documented hits it on every backend. It reached us because CommonGrounds drives
+`RenderingDevice` directly for its stencil-outline compositor effect.
+
+Blast radius in CommonGrounds: two call sites fail to parse, which fails
+`outline_controller.gd`, which cascades through `player.gd`, `world.gd`, `entity.gd`,
+`projectile.gd`, `rocket.gd`, `sparks.gd`, `water_fx.gd` and `wetness.gd` as
+`Compile Error: Failed to compile depended scripts`.
+
+Confirmed empirically rather than by reading the bind, via
+`ClassDB.class_get_method_list("RenderingDevice", true)`:
+`args exposed: 5 … _unnamed_arg4 … default_args: 1`.
+
+**Disposition:** **fixed-in `<RL036-SHA>`** — the bind now names `first_instance` and passes two
+`DEFVAL(0)`s, giving 5 exposed args / 2 defaults / **3 required**, which matches the class reference
+and the documented call. `doc/classes/RenderingDevice.xml` gains the fifth parameter in the same
+change.
+
+⚠ **This is a deliberate divergence from mainline** and must be re-checked at the next
+rebase-forward: if upstream fixes it differently (e.g. by dropping `p_first_instance` from the
+exposed signature), take upstream's version. hogdot's fix also makes `first_instance` usable from
+script, which the WebGPU driver already has an `API_TRAIT_FIRST_INSTANCE_INDEX` path for.
+
+⚠ **Standing lesson: a `D_METHOD` name list that is shorter than the C++ arity is silently accepted
+and corrupts the required-argument count.** Nothing warns. The cheap check on any binding change is
+`ClassDB.class_get_method_list()` from a headless script — an `_unnamed_argN` in the output is the
+tell.
+
+### RL-037 — 2026-08-06 — **blocker**
+**Where:** `drivers/webgpu/rendering_device_driver_webgpu.cpp`, `render_pipeline_create()` — the
+`WGPUDepthStencilState` construction
+**Found while:** phase 7, CommonGrounds acceptance run (rung 3), after RL-036 unblocked the game's
+scripts
+**What:** Every render pipeline built from a material that declares a `stencil_mode` is **invalid** on
+WebGPU whenever the pass's depth attachment is depth-only:
+
+```
+passOp (StencilOperation::Replace) is defined and not StencilOperation::Keep.
+ - While validating that stencilFront doesn't use stencil when the depth-stencil format
+   (TextureFormat::Depth16Unorm) doesn't have a stencil aspect.
+ - While validating depthStencil state.
+ - While calling [Device].CreateRenderPipeline([RenderPipelineDescriptor "pipe#25:SceneForwardMobileShaderRD:11"]).
+```
+
+The driver copied Godot's stencil op/compare/mask state into `ds.stencilFront`/`ds.stencilBack`
+whenever `p_depth_stencil_state.enable_stencil` was set, without checking whether `ds.format` has a
+stencil aspect. **The shadow atlas has none** — `light_storage.cpp:2749` returns
+`DATA_FORMAT_D16_UNORM` or `DATA_FORMAT_D32_SFLOAT` depending on the 16-bit shadow setting — yet Godot
+builds shadow-pass variants of every material, stencil state included.
+
+⚠ **The failure is not confined to the shadow pass.** An invalid pipeline poisons everything
+downstream: `SetPipeline` with it invalidates the render pass, which invalidates the command encoder,
+which makes `Queue.Submit` fail — so a *single* stencil-using material takes out entire frames:
+
+```
+[Invalid RenderPipeline "pipe#25:…"] is invalid due to a previous error.
+ - While encoding [RenderPassEncoder].SetPipeline(…). - While finishing [CommandEncoder].
+[Invalid CommandBuffer] is invalid due to a previous error. - While calling [Queue].Submit(…)
+```
+
+Observed at a rate of hundreds of messages per second in CommonGrounds, which uses a stencil for its
+outline system (`game/entities/interaction/outline/stencil_writer.gdshader`).
+
+⚠ **This never appeared in any gate scene**, because `webgpu_tests/test_project` has no
+stencil-using material — Godot's `stencil_mode` is a 4.5+ feature the fork's assets predate. It is a
+**coverage hole in the gate**, not just a driver bug: the shader-coverage scene should grow a stencil
+material.
+
+**Disposition:** **fixed-in `<RL037-SHA>`** — the stencil block is now gated on the attachment format
+actually having a stencil aspect (`Stencil8`, `Depth24PlusStencil8`, `Depth32FloatStencil8`);
+otherwise the state is left at the disabled default and a one-shot `WARN_PRINT_ONCE` explains why.
+**Not a behavioural change:** with no stencil aspect there is nothing to test or write, so the ops
+could never have taken effect — the only previous outcome was an invalid pipeline.
+
+⚠ Native backends do not hit this, which is why three phases of native regression runs never saw it:
+Vulkan and Metal tolerate stencil state against a depth-only attachment. WebGPU's validation is
+stricter than the APIs the fork's design was tested against — the recurring theme of this port.
+
+### RL-038 — 2026-08-06 — **blocker**
+**Where:** `servers/rendering/rendering_device_binds.cpp` (`RDShaderFile::parse_versions_from_text`)
+**Found while:** phase 7, CommonGrounds acceptance run, after RL-037 let the outline effect actually
+build its pipelines
+**What:** A project's own GLSL, compiled through `RDShaderFile`, is **always rejected on WebGPU**:
+
+```
+ERROR: Tint SPIR-V→WGSL failed: spirv error: SPIR-V failed validation.
+  Invalid SPIR-V binary version 1.4 for target environment SPIR-V 1.3 (under Vulkan 1.1 semantics).
+  ; Version: 1.4 ; Generator: Khronos Glslang Reference Front End; 11
+   at: _build_sc_pipeline (res://…/stencil_outline_effect.gd:313)
+```
+
+There are **two** GLSL→SPIR-V entry points in the engine and they disagreed:
+
+| path | SPIR-V version |
+| --- | --- |
+| `RenderingDevice::shader_compile_spirv_from_source()` | `driver->get_shader_container_format().get_shader_spirv_version()` — **1.3** on WebGPU |
+| `RDShaderFile::parse_versions_from_text()` (`rendering_device_binds.cpp`) | **hardcoded `SHADER_SPIRV_VERSION_1_4`** |
+
+`RenderingShaderContainerWebGPU::get_shader_spirv_version()` returns 1.3 deliberately — Tint's SPIR-V
+reader validates against `SPV_ENV_VULKAN_1_1` (`thirdparty/tint/src/tint/lang/spirv/reader/parser/parser.cc:91`,
+`constexpr auto kTargetEnv = SPV_ENV_VULKAN_1_1`), and 1.3 is also what makes glslang emit SSBOs as
+`StorageClass::StorageBuffer`. The engine's own shaders therefore translate fine, and **only
+user-authored `RDShaderFile` shaders fail** — which is why three phases of gate scenes never saw it.
+The gate scenes contain no `RDShaderFile`.
+
+⚠ **This is a mainline inconsistency, not a fork hunk** — the hardcoded 1.4 is upstream's, and on
+Vulkan/Metal/D3D12 it is harmless because they accept 1.4. WebGPU is the first backend that cares.
+
+**Disposition:** **fixed-in `<RL038-SHA>`** — the binds path now routes through
+`RD::get_singleton()->shader_compile_spirv_from_source()` when a device exists, so both entry points
+derive the version from the same place. The hardcoded call is kept only for the no-device case (the
+editor importer can reach this before a `RenderingDevice` exists).
+
+⚠ **Standing lesson: one setting, two code paths, no shared source of truth.** Same shape as RL-027's
+two WGSL paths. When adding a backend-dependent parameter, grep for *every* caller of the thing it
+configures — a second, hardcoded caller will not announce itself.
+
+⚠ **Gate coverage hole:** `webgpu_tests/test_project` contains no `RDShaderFile` and no
+`stencil_mode` material (RL-037). Both defects were found only by a real project. The coverage scene
+should grow one of each.

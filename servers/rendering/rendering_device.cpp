@@ -9560,7 +9560,14 @@ void RenderingDevice::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("draw_list_bind_index_array", "draw_list", "index_array"), &RenderingDevice::draw_list_bind_index_array);
 	ClassDB::bind_method(D_METHOD("draw_list_set_push_constant", "draw_list", "buffer", "size_bytes"), &RenderingDevice::_draw_list_set_push_constant);
 
-	ClassDB::bind_method(D_METHOD("draw_list_draw", "draw_list", "use_indices", "instances", "procedural_vertex_count"), &RenderingDevice::draw_list_draw, DEFVAL(0));
+	// NOTE: `first_instance` must be named AND defaulted here. draw_list_draw()
+	// takes five C++ parameters; ClassDB derives the script-visible required-arg
+	// count from the C++ arity minus the number of DEFVALs, not from how many
+	// names D_METHOD supplies. Naming four and defaulting one exposed five args
+	// (the fifth as "_unnamed_arg4") with one default, so GDScript demanded four
+	// while doc/classes/RenderingDevice.xml documented three — every call written
+	// against the documented signature failed to parse.
+	ClassDB::bind_method(D_METHOD("draw_list_draw", "draw_list", "use_indices", "instances", "procedural_vertex_count", "first_instance"), &RenderingDevice::draw_list_draw, DEFVAL(0), DEFVAL(0));
 	ClassDB::bind_method(D_METHOD("draw_list_draw_indirect", "draw_list", "use_indices", "buffer", "offset", "draw_count", "stride"), &RenderingDevice::draw_list_draw_indirect, DEFVAL(0), DEFVAL(1), DEFVAL(0));
 
 	ClassDB::bind_method(D_METHOD("draw_list_enable_scissor", "draw_list", "rect"), &RenderingDevice::draw_list_enable_scissor, DEFVAL(Rect2()));

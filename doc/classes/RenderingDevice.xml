@@ -375,8 +375,10 @@
 			<param index="1" name="use_indices" type="bool" />
 			<param index="2" name="instances" type="int" />
 			<param index="3" name="procedural_vertex_count" type="int" default="0" />
+			<param index="4" name="first_instance" type="int" default="0" />
 			<description>
 				Submits [param draw_list] for rendering on the GPU. This is the raster equivalent to [method compute_list_dispatch].
+				[param first_instance] is the index of the first instance to draw; it is added to the instance index seen by the vertex shader.
 			</description>
 		</method>
 		<method name="draw_list_draw_indirect">

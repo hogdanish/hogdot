@@ -8336,7 +8336,33 @@ RDD::PipelineID RenderingDeviceDriverWebGPU::render_pipeline_create(
 				? map_compare(p_depth_stencil_state.depth_compare_operator)
 				: WGPUCompareFunction_Always;
 
-		if (p_depth_stencil_state.enable_stencil) {
+		// ⚠ A stencil op may only be non-Keep when the attachment format actually
+		// has a stencil aspect. Godot happily builds pipelines that carry the
+		// material's stencil state into passes whose depth attachment is
+		// depth-only — the shadow atlas is D16_UNORM or D32_SFLOAT
+		// (light_storage.cpp:2749), neither of which has one — and WebGPU rejects
+		// the whole pipeline for it:
+		//
+		//   passOp (StencilOperation::Replace) is defined and not
+		//   StencilOperation::Keep. - While validating that stencilFront doesn't
+		//   use stencil when the depth-stencil format (TextureFormat::Depth16Unorm)
+		//   doesn't have a stencil aspect.
+		//
+		// An invalid pipeline then invalidates every command buffer that binds it,
+		// so a single stencil-using material takes down whole frames. Dropping the
+		// stencil state here is not a behavioural change: without a stencil aspect
+		// there is no stencil to test or write, so the ops could never have had an
+		// effect. See RL-037.
+		const bool ds_has_stencil_aspect =
+				ds.format == WGPUTextureFormat_Stencil8 ||
+				ds.format == WGPUTextureFormat_Depth24PlusStencil8 ||
+				ds.format == WGPUTextureFormat_Depth32FloatStencil8;
+
+		if (p_depth_stencil_state.enable_stencil && !ds_has_stencil_aspect) {
+			WARN_PRINT_ONCE("WebGPU: stencil state requested on a depth-only attachment; ignoring it. This is expected for shadow passes, whose atlas has no stencil aspect.");
+		}
+
+		if (p_depth_stencil_state.enable_stencil && ds_has_stencil_aspect) {
 			ds.stencilFront.compare = map_compare(p_depth_stencil_state.front_op.compare);
 			ds.stencilFront.failOp = map_stencil_op(p_depth_stencil_state.front_op.fail);
 			ds.stencilFront.depthFailOp = map_stencil_op(p_depth_stencil_state.front_op.depth_fail);
