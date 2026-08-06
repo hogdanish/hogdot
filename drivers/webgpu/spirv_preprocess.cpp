@@ -2175,8 +2175,95 @@ Vector<uint8_t> fix_nonfinite_literals(const Vector<uint8_t> &p_bytes) {
 // referenced anywhere). OpAccessChain into handle array variables becomes
 // a direct variable reference.
 //
-// Literal values in OpConstant/OpSpecConstant/OpSwitch are excluded from
-// replacement to avoid false positives.
+// ⚠ Because the replacement is by raw word value, every operand word that is a
+// *literal* rather than an <id> has to be excluded, or a literal that happens to
+// equal a mapped id is silently rewritten into that id. `_is_literal_operand`
+// below is that exclusion list. It is not optional bookkeeping: an earlier version
+// excluded only OpConstant/OpSpecConstant/OpSwitch, and Godot's forward-mobile
+// fragment shader has enough ids that `OpMemberDecorate %DirectionalLightData 17
+// Offset 112` had its offset replaced with id 7601, inflating the uniform block
+// from 3712 to 63744 bytes and failing every draw. See ledger RL-028.
+
+// Is word `p_index` of an instruction with opcode `p_op` a literal rather than an
+// <id>? Word 0 is the opcode/word-count and is never passed here.
+//
+// Only the opcodes that actually carry numeric or string literals need an entry;
+// everything else is all-<id> and falls through to `false`, which preserves the
+// original behavior for opcodes not listed. Adding an opcode here can only make
+// the pass more conservative.
+static bool _is_literal_operand(uint16_t p_op, uint32_t p_index) {
+	switch (p_op) {
+		// Debug/annotation instructions. The string payloads are the dangerous ones:
+		// a short name like "m" packs to 0x6D, well inside the id range.
+		case 3: // OpSource: <literal lang> <literal version> [<id file> [<literal source>]]
+			return p_index != 3;
+		case 4: // OpSourceExtension
+		case 10: // OpExtension
+		case 17: // OpCapability
+		case 14: // OpMemoryModel
+			return true;
+		case OP_NAME: // OpName: <id target> <literal name>
+		case 7: // OpString: <id result> <literal string>
+		case 11: // OpExtInstImport: <id result> <literal name>
+			return p_index >= 2;
+		case 6: // OpMemberName: <id type> <literal member> <literal name>
+		case 8: // OpLine: <id file> <literal line> <literal column>
+		case 16: // OpExecutionMode: <id entry> <literal mode> <literals...>
+		case OP_DECORATE: // <id target> <literal decoration> <literals...>
+		case OP_MEMBER_DECORATE: // <id type> <literal member> <literal decoration> <literals...>
+			return p_index >= 2;
+		// OpEntryPoint mixes a literal execution model, an id, a literal name and
+		// then interface ids. None of this pass's maps can appear in it, so treat
+		// the whole instruction as literal rather than parse the embedded string.
+		case OP_ENTRY_POINT:
+			return true;
+
+		// Type declarations with literal operands.
+		case OP_TYPE_INT: // <id result> <literal width> <literal signedness>
+		case OP_TYPE_FLOAT: // <id result> <literal width>
+			return p_index >= 2;
+		case OP_TYPE_VECTOR: // <id result> <id component> <literal count>
+		case 24: // OpTypeMatrix: <id result> <id column> <literal count>
+			return p_index >= 3;
+		case OP_TYPE_IMAGE: // <id result> <id sampled type> <literal dim/depth/arrayed/ms/sampled/format/access>
+			return p_index >= 3;
+		case OP_TYPE_POINTER: // <id result> <literal storage class> <id type>
+		case 39: // OpTypeForwardPointer: <id ptr type> <literal storage class>
+			return p_index == 2;
+
+		// Constants: value words are literals (composites are all <id>s).
+		case OP_CONSTANT:
+		case OP_SPEC_CONSTANT:
+			return p_index >= 3;
+		case 45: // OpConstantSampler: <id result type> <id result> <literal addressing/param/filter>
+			return p_index >= 3;
+
+		// Instructions with trailing literal indices or flags.
+		case OP_FUNCTION: // <id result type> <id result> <literal control> <id fn type>
+			return p_index == 3;
+		case OP_VARIABLE: // <id result type> <id result> <literal storage class> [<id init>]
+			return p_index == 3;
+		case OP_LOAD: // <id result type> <id result> <id ptr> [<literal memory operands>...]
+			return p_index >= 4;
+		case OP_STORE: // <id ptr> <id object> [<literal memory operands>...]
+			return p_index >= 3;
+		case OP_COPY_MEMORY: // <id target> <id source> [<literal memory operands>...]
+			return p_index >= 3;
+		case 79: // OpVectorShuffle: <id result type> <id result> <id v1> <id v2> <literal components>...
+			return p_index >= 5;
+		case 81: // OpCompositeExtract: <id result type> <id result> <id composite> <literal indexes>...
+			return p_index >= 4;
+		case 82: // OpCompositeInsert: <id result type> <id result> <id object> <id composite> <literal indexes>...
+			return p_index >= 5;
+		case 246: // OpLoopMerge: <id merge> <id continue> <literal control>...
+			return p_index >= 3;
+		case 247: // OpSelectionMerge: <id merge> <literal control>
+			return p_index == 2;
+
+		default:
+			return false;
+	}
+}
 
 Vector<uint8_t> flatten_binding_arrays(const Vector<uint8_t> &p_bytes) {
 	const uint8_t *data = p_bytes.ptr();
@@ -2378,29 +2465,22 @@ Vector<uint8_t> flatten_binding_arrays(const Vector<uint8_t> &p_bytes) {
 		}
 
 		// Determine which word positions hold literal values (not IDs)
-		// and should be excluded from replacement.
-		// OpConstant/OpSpecConstant: words 3+ are literal values.
+		// and must be excluded from replacement — see _is_literal_operand.
 		// OpConstantComposite/OpSpecConstantComposite: words 3+ are constituent IDs (DO replace).
 		// OpSwitch: alternating case literals starting at word 3 (word 3=literal, 4=label, 5=literal...).
-		bool has_literals = false;
-		uint32_t literal_start = 0;
-		bool switch_alternating = false;
-
-		if (op == OP_CONSTANT || op == OP_SPEC_CONSTANT) {
-			has_literals = true;
-			literal_start = 3;
-		} else if (op == 251 /* OpSwitch */) {
-			switch_alternating = true;
-		}
+		const bool switch_alternating = (op == 251 /* OpSwitch */);
+		auto is_literal = [&](uint32_t p_i) {
+			if (switch_alternating) {
+				return p_i >= 2 && ((p_i - 2) % 2 == 0);
+			}
+			return _is_literal_operand(op, p_i);
+		};
 
 		// Check if this instruction has any word that needs replacement.
 		bool needs_rewrite = false;
 		for (uint32_t i = 1; i < wc; i++) {
-			if (has_literals && i >= literal_start) {
+			if (is_literal(i)) {
 				continue;
-			}
-			if (switch_alternating && i >= 2 && ((i - 2) % 2 == 0)) {
-				continue; // Case literal positions in OpSwitch.
 			}
 			uint32_t word = read_word(data, len, pos + i);
 			if (array_to_elem.has(word) || ac_to_var.has(word) || ptr_remap.has(word)) {
@@ -2412,15 +2492,7 @@ Vector<uint8_t> flatten_binding_arrays(const Vector<uint8_t> &p_bytes) {
 		if (needs_rewrite) {
 			for (uint32_t i = 0; i < wc; i++) {
 				uint32_t word = read_word(data, len, pos + i);
-				if (i == 0) {
-					push_word(out, word);
-					continue;
-				}
-				if (has_literals && i >= literal_start) {
-					push_word(out, word);
-					continue;
-				}
-				if (switch_alternating && i >= 2 && ((i - 2) % 2 == 0)) {
+				if (i == 0 || is_literal(i)) {
 					push_word(out, word);
 					continue;
 				}
