@@ -11,8 +11,13 @@ hogdot exists to run [GodotWebGPU](https://github.com/dwalter/godotwebgpu)'s Web
 mainline Godot. That is a **recurring** exercise, once per mainline release, which is why nothing about the
 port surface is written down as data — it is derived on demand.
 
-⚠ **Status: nothing is ported yet.** `main` is upstream `4.7.1-stable` plus `hogdot/` and `.claude/`.
-Mainline 4.7.1 contains zero WebGPU references; the entire backend arrives from the fork.
+**Status (2026-08-06, phase-6 audit):** slices 1–7 are landed — **37 of the 39 conflicts**, all 1,447
+additive files, all 13 clean mods and the one collision. Only **slice 8 (meta)** remains: `README.md`,
+`thirdparty/README.md`, `.gitignore`, `GODOT_README.md`. `webgpu_tests/test_project` **renders in
+Chrome on WebGPU with zero GPU validation errors**. The phase-6 fidelity audit re-derived every
+carried hunk (157 across the seven slices) against the fork and found **zero unrecorded adaptations
+or drops**. Mainline 4.7.1 still contains zero WebGPU references of its own; the entire backend
+arrives from the fork.
 
 ## Deriving the surface — never reconstruct it by hand
 
@@ -34,7 +39,7 @@ silently out of the conflict set.
 (`thirdparty/spirv-headers/include/spirv/unified1/spirv.hpp11`, which mainline grew its own copy of) ·
 13 clean · **39 conflicts** · 0 deletions.
 
-⚠ **The collision is resolved in the fork's favour** (`ef55f41`, Phase 2). Phase 1 kept mainline's copy
+⚠ **The collision is resolved in the fork's favor** (`ef55f41`, Phase 2). Phase 1 kept mainline's copy
 and was wrong: the fork's is the newer SPIRV-Headers drop, and the vendored SPIRV-Tools does not
 compile against mainline's. ⚠ **Decide a collision with a set-difference over identifiers, not with
 line counts or tree recency** — `comm -23` of the two files' enumerator names showed 43 additions and
@@ -75,7 +80,7 @@ also the highest-risk pair — mainline moved `rendering_device.cpp` by +1628/�
 | 1 | **RD core** | `rendering_device.cpp/.h`, `rendering_device_driver.h`, `rendering_device_graph.cpp/.h` | Settles the driver API for everything after. Heaviest churn on both sides. |
 | 2 | **storage_rd** | `texture_storage.cpp`, `mesh_storage.cpp/.h`, `light_storage.cpp/.h` | ⚠ `texture_storage.cpp` moved +824/−80 upstream; `light_storage.cpp` +352/−140. |
 | 3 | **forward_mobile + compositor** | `render_forward_mobile.cpp/.h`, `renderer_canvas_render_rd.cpp`, `renderer_compositor_rd.cpp`, `renderer_viewport.cpp`, `effects/tone_mapper.cpp` | Where subpass flattening bites. Largest fork-side change (+221/−18). |
-| 4 | **shaders** | 8 conflicting `.glsl` + the 13 clean ones | `scene_forward_mobile.glsl` is the substantive one (+50/−34). |
+| 4 | **shaders** | 7 conflicting `.glsl` + the 13 clean ones | `scene_forward_mobile.glsl` is the substantive one (+50/−34). |
 | 5 | **platform/web** | `detect.py`, `display_server_web.cpp/.h`, `emscripten_helpers.py`, `export/export_plugin.cpp`, `js/engine/*.js` | ⚠ First slice that needs Emscripten to verify. |
 | 6 | **build** | `SConstruct` (declares `webgpu=yes`), `drivers/SCsub`, `modules/glslang/config.py`, `.github/workflows/web_builds.yml` | Small diffs, high blast radius. |
 

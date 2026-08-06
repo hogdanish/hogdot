@@ -620,3 +620,137 @@ table is entirely dead (**RL-009**, glslang hash skew) so every lookup misses an
 ⚠ **Fixing RL-009 without first regenerating the table would resurrect this bug**, and it would then
 appear only for shaders that hit the cache — the worst possible failure mode. Regenerate the table in
 the same change as any RL-009 repair.
+
+### RL-029 — 2026-08-06 — **blocker**
+**Where:** `servers/rendering/renderer_rd/forward_mobile/scene_shader_forward_mobile.cpp:843`
+(`actions.base_varying_index = 15`) vs `LIMIT_MAX_SHADER_VARYINGS`
+(`drivers/webgpu/rendering_device_driver_webgpu.cpp:9622`)
+**Found while:** phase 6 audit, workstream D (fork issue tracker cross-check)
+**What:** Mobile renderer + web export leaves **exactly one** inter-stage varying slot for user
+shaders. The engine hardcodes `base_varying_index = 15`, reserving 15 slots, against WebGPU's
+spec-floor `maxInterStageShaderVariables` of **16**. Desktop Vulkan reports ≥31, so the reservation is
+invisible natively — this ceiling exists only on WebGPU. Corroborated by GodotWebGPU issue #1
+(moodster321, 2026-05-16), which reports `SHADER ERROR: Too many varyings used in shader (17 used,
+maximum supported is 16)` followed by cascading `[Invalid RenderPipeline]` validation errors.
+
+⚠ **This is a confirmed hard blocker for CommonGrounds, hogdot's sole consumer**, which targets
+exactly this configuration. Measured against the game's own shaders 2026-08-06 (read-only access);
+each varying costs one location, so a `vec3` is 1 slot:
+
+| shader | varyings | slots needed | over budget by |
+| --- | --- | ---: | ---: |
+| `game/maps/common/city/city_windows_glow.gdshader` | `vec3`,`vec3`,`float`,`float` | 4 | **+3** |
+| `game/maps/common/city/city_windows.gdshader` | `vec3`,`vec3`,`float`,`float` | 4 | **+3** |
+| `game/entities/corrosion/corrosion_overlay.gdshader` | `vec3`,`vec3` | 2 | **+1** |
+| `game/entities/prop/rope/rope_ribbon.gdshader` | `float`,`vec3` | 2 | **+1** |
+| `game/entities/vehicle/flying/ufo/tractor_beam.gdshader` | `vec3`,`vec3` | 2 | **+1** |
+
+Nine further spatial shaders declare exactly one varying and sit precisely at the limit with zero
+headroom (`puppet_billboard`, `puppet_boil`, `water`, `water_bubble`, `lineboil_sprite3d`,
+`tank_tread`, `flare`, `spiral_dust`, `impact_slash`).
+
+⚠ **No hogdot gate scene exercises this.** `webgpu_tests/test_project` uses no custom spatial shaders
+with varyings, which is why phases 4–5 went green with the defect fully present. The port is *not*
+validated for its actual consumer.
+
+⚠ **The documented fallback does not work.** Switching to `rendering_method.web="forward_plus"` hits
+`TINT_UNIMPLEMENTED unhandled SPIR-V BuiltIn: HelperInvocation` in Tint's SPIR-V reader — the same
+subsystem RL-023's patch 0007 already touches.
+**Disposition:** open — **Phase 7, highest priority.** Three candidate repairs, cheapest first:
+(1) audit which of the 15 reserved varyings `scene_forward_mobile.glsl` actually consumes once the
+WebGPU defines are applied and lower `base_varying_index` accordingly — the reporter believes several
+are dead on this path; (2) pack engine-internal varyings for the WebGPU backend; (3) implement
+`HelperInvocation` in Tint as patch 0008 to make Forward+ a real fallback. (1) is the fix, (3) is
+insurance. ⚠ Any fix needs a **new gate scene carrying ≥4 user varyings** — otherwise the next
+regression is invisible again.
+
+### RL-030 — 2026-08-06 — bug (latent)
+**Where:** `drivers/webgpu/spirv_preprocess.cpp:2194` (`_is_literal_operand`), the RL-028 repair
+**Found while:** phase 6 audit, workstream B — the mandated ★ scrutiny of RL-028
+**What:** RL-028's fix is sound in mechanism but its opcode table is **materially incomplete**, and
+the fall-through default is the *unsafe* direction: an opcode absent from the table returns `false`
+("this word is an `<id>`") and its literal operands are therefore still eligible for rewriting — the
+exact RL-028 failure mode, just at a different opcode. (The header comment "Adding an opcode here can
+only make the pass more conservative" is true of *additions* but obscures that the default itself is
+permissive.)
+
+Audited mechanically against SPIRV-Tools' grammar-generated operand tables
+(`thirdparty/spirv-tools/generated/core_tables_body.inc`, which encodes the same
+`spirv.core.grammar.json` data — note the brief's cited path
+`thirdparty/spirv-headers/.../spirv.core.grammar.json` **does not exist in this tree**). Restricting
+to opcodes glslang actually emits for Godot, **18 opcode families carry unprotected literals**:
+
+| opcode | literal word | what it is |
+| --- | ---: | --- |
+| `OpExtInst` (12) | 4 | the **GLSL.std.450 instruction number** — every `sqrt`/`pow`/`mix`/… call |
+| `OpImageSample*` / `OpImageFetch` / `OpImageGather` / `OpImageRead` / `OpImageWrite` (87–99) | 4–6 | the image-operands bitmask |
+| `OpSpecConstantOp` (52) | 3 | the wrapped opcode |
+| `OpArrayLength` (68) | 4 | the member index |
+| `OpBranchConditional` (250) | 4,5 | branch weights |
+| `OpDecorateId` (332) | 2 | the decoration |
+
+`OpExtInst` is the dangerous one: a rewritten instruction number silently calls a **different builtin**.
+
+**Empirically not firing today, with zero margin.** Reproduced `flatten_binding_arrays`' pass-1 map
+construction over the engine's real 182-module SPIR-V corpus (dumped from `wgsl_precompile.py`): the
+pass is live in **26** modules, and no uncovered literal currently equals a rewritable id. But the
+lowest rewritable ids observed are **52 and 53** (`sdfgi_integrate.glsl`) and **72/73**
+(`volumetric_fog_process.glsl`) — squarely inside the GLSL.std.450 instruction-number range (1–81).
+The two value spaces already overlap; only the accident that those shaders do not call
+`FrexpStruct`(52)/`Ldexp`(53) prevents corruption. Any shader edit or id renumbering can close that
+gap silently, which is precisely how RL-028 lay dormant until a shader grew large enough.
+**Disposition:** open — **Phase 7, size S, high priority** (silent wrong-code generation, no
+diagnostic). Extend the table to the 18 families above. The durable alternative is to stop hand-
+maintaining it and derive the predicate from the vendored SPIRV-Tools operand tables, which are
+already in the build. ⚠ Verified as correct in the same review: the needs-rewrite **scan** and the
+**rewrite** consult the same `is_literal` lambda, and `OpSwitch`'s alternating literal/label operands
+are handled separately and correctly.
+
+### RL-031 — 2026-08-06 — bug
+**Where:** `drivers/webgpu/rendering_device_driver_webgpu.cpp:207`
+(`_rewrite_depth_texture_samples`), the RL-027 repair
+**Found while:** phase 6 audit, workstream B — the mandated ★ scrutiny of RL-027
+**What:** The rewrite emits
+`textureLoad(tex, vec2<i32>(coord * vec2<f32>(textureDimensions(tex, level))), level)` with **no
+clamp**. The call it replaces sampled through `SAMPLER_LINEAR_CLAMP`, whose **clamp-to-edge** address
+mode was load-bearing; `textureLoad` has no address mode, and WGSL specifies an out-of-range texel
+address as returning the zero value.
+
+The directional blocker search generates out-of-range coordinates by construction
+(`scene_forward_lights_inc.glsl:425`):
+`vec2 suv = pssm_coord.xy + (disk_rotation * directional_penumbra_shadow_kernel[i].xy) * tex_scale;`
+— an unbounded screen-space disk offset added directly in UV space, so a fragment near a PSSM split
+edge pushes taps outside `[0,1]`. Those taps now return `d = 0.0`, the test `if (d > pssm_coord.z)`
+fails, and the sample contributes nothing instead of clamping to the edge texel. Consequences, in
+increasing severity: penumbra width mis-estimated at split edges → **and if every tap leaves bounds,
+`blocker_count == 0`, which takes the `//no blockers found, so no shadow` branch and drops the shadow
+entirely.** Silent — no validation error, no log line.
+
+(The positional/atlas path at `:565` is safe: its offset is applied to the direction vector before the
+dual-paraboloid projection, so the result stays inside `uv_rect`.)
+**Disposition:** open — **Phase 7, size S.** Restore clamp-to-edge in the generated WGSL:
+`clamp(vec2<i32>(...), vec2<i32>(0), vec2<i32>(textureDimensions(tex, level)) - vec2<i32>(1))`.
+⚠ **The cheaper alternative was never considered or recorded:** binding a **non-filtering** sampler
+for these taps is legal on a depth texture in WebGPU, keeps `textureSampleLevel` semantics, and gets
+clamp-to-edge back for free — at the cost of one extra sampler binding and a sampler-reference rewrite.
+Evaluate both in Phase 7 rather than assuming the texel-fetch shape is settled.
+Noted and judged non-blocking: the pass skips offset-form calls (`argc` mismatch), which would fail
+loudly at pipeline creation rather than silently — and no Godot shader takes an offset sample off a
+depth texture (the 6 files using `textureLodOffset`/`textureOffset` are all colour-buffer effects).
+
+### RL-032 — 2026-08-06 — smell
+**Where:** commits `5829f06` and `7d5f060` (`Webgpu-Source:` trailers)
+**Found while:** phase 6 audit, workstream A4 — provenance spot-check
+**What:** Two `port` commits cite fork SHAs that touch **none** of the files the commit changes,
+which defeats the purpose of the trailer — `.claude/rules/port-provenance.md` exists so the next
+rebase-forward can trace any line to its source.
+- `5829f06` (`port(ci): add the WebGPU web template jobs`) changes `.github/workflows/web_builds.yml`
+  but cites `69a9b2f`, which touches `SConstruct`, `drivers/SCsub` and `drivers/webgpu/`.
+- `7d5f060` (`port(clean): apply 11 conflict-free fork modifications`) changes HTML/JS/shader files
+  but cites `f329e39`, which vendored the naga-converter machinery.
+
+16 of the 17 port commits carry both trailers correctly; the 17th (`1c9e8e4`) omits `Webgpu-Source`
+legitimately, being hogdot-authored adaptation rather than carried fork code.
+**Disposition:** open — **Phase 7, size S.** History is never rewritten here (`conventions.md` § git
+mechanics), so the repair is a forward-only correction note recording the right SHAs for both paths,
+found with `git log --oneline 4.6.2-stable..webgpu/webgpu-4.6.2 -- <path>`.
