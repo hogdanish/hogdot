@@ -73,8 +73,10 @@ the option is undeclared; it is only harmless on desktop because `env["vulkan"]`
 first. On the web platform vulkan/d3d12/metal are all False, so this is a hard configure-time crash
 until `SConstruct` declares the option. Using `env.get("webgpu", False)` would have made the file
 independent of slice ordering.
-**Disposition:** deferred — hunk not carried in Phase 1; lands in Phase 2 alongside the SConstruct
-option. Recorded in the clean-mods slice-log entry.
+**Disposition:** **fixed-in `a2d81ab` (phase 7).** `env["webgpu"]` → `env.get("webgpu", False)`,
+with a comment naming the short-circuit that hides the difference on desktop. The hunk itself landed in
+Phase 2 with the SConstruct option, which made the crash unreachable in practice; this removes the
+ordering dependency so the file is correct on its own terms rather than by luck of evaluation order.
 
 ### RL-004 — 2026-08-06 — question
 **Where:** `servers/rendering/renderer_rd/shaders/canvas.glsl` (end of `main()`)
@@ -99,10 +101,24 @@ and the matching `buffer_create` for `MEMORY_ALLOCATION_TYPE_CPU` does **not** p
 `VMA_ALLOCATION_CREATE_MAPPED_BIT` (`:1975–1992`) — so VMA's map counter reaches zero on the very
 first `_end_frame`, every cached `data_ptr` dangles, and every subsequent frame unmaps below zero.
 This is a native-backend regression introduced by a WebGPU-motivated hunk, on the shared path.
-**Disposition:** deferred at port time — carried faithfully in the `rd-core` commit so the diff
-matches its source. Escalate to a fix if the Phase 2 boot gate reproduces it; the likely shape is
-gating the loop behind a driver trait (or routing it through the already-defaulted no-op
-`RenderingDeviceDriver::buffer_flush`) rather than calling `buffer_unmap` on every backend.
+**Disposition:** **fixed-in `f90fccd` (phase 7)** — the loop is now gated on a new
+`API_TRAIT_BUFFER_MAP_IS_CPU_SHADOW`, default `false` in `RenderingDeviceDriver::api_trait_get`, `1`
+on WebGPU. Native backends never enter it; WebGPU's behaviour is unchanged.
+
+⚠ **`buffer_flush` was evaluated as the alternative and rejected.** It looks ideal — already a
+defaulted no-op on every native driver — but WebGPU's `buffer_flush` deliberately does **not** check
+`map_dirty` while its `buffer_unmap` does, because `buffer_persistent_map_advance` sets
+`dirty_offset`/`dirty_end` *without* setting `map_dirty` and the explicit
+`RenderingDevice::buffer_flush(RID)` caller in `_buffer_update`'s persistent-dynamic fast path relies
+on that. Routing `_end_frame` through `buffer_flush` would therefore have flushed **every** staging
+block every frame — the 69 × 256 KB `wgpuQueueWriteBuffer` regression the loop's own comment warns
+about — and adding a `map_dirty` guard to `buffer_flush` would have broken the persistent path. The
+trait keeps the two call sites' semantics separate.
+
+⚠ **Verified on the backend that has the bug's shape, not just the one that doesn't.** A headless run
+proves nothing here: headless is the dummy driver and never calls `api_trait_get` on a real one — the
+same trap as RL-016. Checked with a **windowed** `--rendering-driver metal --rendering-method mobile`
+run of `webgpu_tests/test_project`, which reports `PASS — All shader paths exercised without errors`.
 
 ### RL-006 — 2026-08-06 — smell
 **Where:** `servers/rendering/rendering_device_driver.h` (`buffer_create_with_data`)
@@ -115,8 +131,17 @@ fast path takes the with-data overload and the driver never learns the frame ind
 backend trips it (only WebGPU sets `API_TRAIT_BUFFER_CREATE_MAPPED_AT_CREATION`, and persistent
 buffers are not created with data on the paths hogdot exercises), but the API as declared cannot
 express the combination.
-**Disposition:** deferred — carried faithfully. Add the parameter at the next rebase-forward, or
-have `RenderingDevice` skip the fast path when `BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT` is set.
+**Disposition:** **fixed-in `f90fccd` (phase 7)** — took the second option. The fast-path decision
+is now one helper, `RenderingDevice::_can_create_buffer_with_data()`, which additionally requires that
+`BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT` is clear, so "persistent ring, with initial data" always takes
+`buffer_create()` and does get `frames_drawn`. The driver API is untouched.
+
+⚠ **The five call sites each made the *same* test twice**, once to pick the create path and once
+(negated) to decide whether to run `_buffer_initialize`. Those two tests must agree or the buffer is
+either double-written or never initialized, so the helper's result is now stored in a local and both
+branches read it. Changing only the first test — the obvious minimal edit — would have left
+persistent-dynamic buffers on WebGPU created *without* data and *without* `_buffer_initialize`, i.e.
+silently uninitialized.
 
 ### RL-007 — 2026-08-06 — smell
 **Where:** `servers/rendering/rendering_device.cpp` (`texture_update`, format-promotion preamble)
@@ -137,8 +162,17 @@ swallowed silently — a dump that produced nothing looks identical to one that 
 `(p_spirv[i].shader_stage < 5)` is also a bare magic number against `SHADER_STAGE_*`; it still
 selects the right five names on 4.7.1 (the new raytracing stages sort after `COMPUTE` and fall
 through to the `"spv"` default), so it is correct today but not self-maintaining.
-**Disposition:** deferred — carried faithfully. Debug-only path behind an env var; revisit in Phase 5
-when the fork's CI shader-validation flow is actually run.
+**Disposition:** **fixed-in `f90fccd` (phase 7)**, all three points:
+- **Collisions** — the filename now carries a MurmurHash3 of the SPIR-V itself
+  (`<name>.<hash8>.<stage>.spv`), so identical modules collapse to one file and distinct ones can
+  never overwrite each other. ⚠ A shader *name* was never a key: the same name recurs in different
+  directories, and one name yields many variants, so the old scheme silently emitted a fraction of
+  what the run compiled while looking complete.
+- **Silent failures** — a failed `FileAccess::open` now `WARN_PRINT`s the path and
+  `FileAccess::get_open_error()`. The consumer is CI, where "wrote nothing" and "wrote everything"
+  must not look alike.
+- **Magic number** — `5` is replaced by `constexpr int STAGE_SUFFIX_COUNT = SHADER_STAGE_COMPUTE + 1`,
+  which sizes the suffix array from the enum, plus a lower-bound check on the stage index.
 
 ### RL-009 — 2026-08-06 — bug
 **Where:** `drivers/webgpu/wgsl_precompile.py` (`precompile_wgsl`, `compute_spv_hash`) and the
@@ -161,7 +195,7 @@ buffer it cannot, because WGSL has no `write` access mode in the storage address
 was therefore load-bearing for correctness without anyone knowing. Confirmed by observation: the table
 contains particles entries, yet the particles compute shaders still reached live Tint and failed. See
 **RL-020**, which this entry is the suspected cause of.
-**Disposition:** **fixed-in `<RL009-SHA>` — the whole mechanism was deleted, phase 7.**
+**Disposition:** **fixed-in `28a9960` — the whole mechanism was deleted, phase 7.**
 
 ⚠ **The audit asked for a measurement first, and the measurement is now on record.** A temporary
 `print_line` was added at the lookup site and one `webgpu=yes` template built with it. Result on the
@@ -363,9 +397,12 @@ comment does not mention: desktop now pays a file open plus a full image decode 
 did a GPU readback, and, more importantly, `get_image()` no longer reflects the *texture* — it
 reflects the *asset on disk*. Anything that modified the texture through RenderingServer will read
 back stale content. The GPU path survives only as a fallback for textures with no `path_to_file`.
-**Disposition:** deferred — carried faithfully. It is correct for the platform this fork exists to
-serve, and the desktop editor is not hogdot's product. Revisit if the editor misbehaves around
-runtime-modified textures.
+**Disposition:** **fixed-in `b659667` (phase 7)** — the disk-reload path is now inside
+`#ifdef WEB_ENABLED`. Web keeps the fork's behaviour, which is the only synchronous answer available
+there; every other platform is back to mainline's `RS::texture_2d_get()`, so the desktop editor no
+longer trades a GPU readback for a file open plus a full decode and no longer reads back the asset
+where the texture was asked for. The comment now says outright that this path returns the file rather
+than the texture, which the fork's did not.
 
 ### RL-019 — 2026-08-06 — bug (latent)
 **Where:** `scene/resources/compressed_texture.cpp:249-262` (same hunk as RL-018)
@@ -377,8 +414,17 @@ straight to `load_image_from_file` instead of being rejected with "file is too n
 degrades rather than corrupts — a bad parse yields an invalid or empty image and the code falls
 through to the GPU path — so no user-visible defect is claimed today. It becomes real the moment the
 texture format version is bumped, which is exactly when nobody will be looking here.
-**Disposition:** deferred — the skip count itself was verified correct against 4.7.1's writer before
-carrying (magic + 8 × `get_32()`), which is the part that would have silently corrupted data.
+**Disposition:** **fixed-in `b659667` (phase 7)** — the `version > FORMAT_VERSION` guard is
+restored, and a too-new `.ctex` now `WARN_PRINT`s and falls through to the GPU path instead of being
+fed to `load_image_from_file`.
+
+The `FORMAT_BIT_STREAM` half of this entry turned out to be a **non-issue on inspection**, and is
+recorded as such rather than "fixed": `_load_data()` uses that bit only to *clear* a caller-supplied
+`p_size_limit`, and `get_image()` wants the whole image, so 0 is the correct argument either way. The
+hardcoded `0` was right for the wrong reason; it is now right for a stated one.
+
+The skip count itself was verified correct against 4.7.1's writer before carrying (magic + 8 ×
+`get_32()`), which is the part that would have silently corrupted data.
 
 ### RL-020 — 2026-08-06 — **blocker**
 **Where:** `drivers/webgpu/spirv_preprocess.cpp` (absence) + `drivers/webgpu/wgsl_precompile.py`
@@ -491,7 +537,7 @@ the assembled source is not a valid translation unit because a `#define` the 4.7
 is absent from the registry entry. ⚠ **Silent by construction:** `precompile_wgsl` counts the
 failures and carries on, the build stays green, and the shader simply never enters the table.
 **Disposition:** **moot — `wgsl_precompile.py` and its `SHADER_REGISTRY` were deleted with the rest of
-the precompiled-WGSL mechanism in `<RL009-SHA>` (phase 7). See RL-009.** There is no registry left to
+the precompiled-WGSL mechanism in `28a9960` (phase 7). See RL-009.** There is no registry left to
 drift, and nothing in the build reads shader defines at build time any more. Recorded rather than
 closed silently because the underlying observation still matters at the next rebase-forward: **any
 future build-time shader tooling must re-derive its define sets from the engine's own call sites, not
@@ -650,7 +696,7 @@ the pass more conservative. Verified in Chrome: the per-pass offset scan goes si
 its `@size`, **all GPU validation errors go to zero, and `webgpu_tests/test_project` renders.**
 
 ⚠ **The stale-table trap this entry warned about is gone as of phase 7** — the whole precompiled-WGSL
-mechanism was deleted in `<RL009-SHA>` after it measured 0 hits in 600+ lookups (**RL-009**). There is
+mechanism was deleted in `28a9960` after it measured 0 hits in 600+ lookups (**RL-009**). There is
 no `wgsl_precompiled.gen.h`, no generator and no lookup, so there is nothing left holding WGSL from the
 buggy pass and no way to resurrect it. Kept on the record because the *general* defect is not
 engine-specific: **a generated artifact whose SCons dependency list does not name every input that
