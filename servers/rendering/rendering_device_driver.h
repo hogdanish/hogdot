@@ -564,6 +564,16 @@ public:
 	virtual void shader_free(ShaderID p_shader) = 0;
 	virtual void shader_destroy_modules(ShaderID p_shader) = 0;
 
+	// Whether shader_create_from_container() may be called from a thread other than the one that
+	// initialized the driver. True for every native API, where the only requirement is the mutual
+	// exclusion RenderingDevice already provides.
+	//
+	// ⚠ WebGPU is the exception, and it is not a data race: the GPUDevice is a JavaScript object
+	// living in one realm, and a wasm pthread is a Worker with its own realm and its own object
+	// table. Creating a shader module from a worker aborts inside emdawnwebgpu's getJsObject()
+	// because that realm has no such object, and no amount of locking changes it. See RL-043.
+	virtual bool is_multithreaded_resource_creation_supported() const { return true; }
+
 public:
 	/*********************/
 	/**** UNIFORM SET ****/

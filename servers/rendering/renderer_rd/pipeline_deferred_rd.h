@@ -66,6 +66,16 @@ protected:
 
 	void _start(const CreationParameters &c) {
 		free();
+
+		// ⚠ Create inline when the driver cannot create resources off the render thread — on
+		// WebGPU the GPUDevice is a JS object belonging to the browser main thread's realm, and a
+		// pool task aborts in emdawnwebgpu's getJsObject(). _wait() is a no-op against
+		// INVALID_TASK_ID, so get_rid() returns the finished pipeline either way. See RL-043.
+		if (!RD::get_singleton()->is_multithreaded_resource_creation_supported()) {
+			_create(c);
+			return;
+		}
+
 		task = WorkerThreadPool::get_singleton()->add_template_task(this, &PipelineDeferredRD::_create, c, true, "PipelineCompilation");
 	}
 

@@ -1054,6 +1054,11 @@ public:
 
 	bool has_feature(const Features p_feature) const;
 
+	// Whether shader RIDs may be created from a WorkerThreadPool task rather than the render
+	// thread. See RenderingDeviceDriver::is_multithreaded_resource_creation_supported() for why
+	// WebGPU is the one backend that says no; ShaderRD is the caller that has to care.
+	bool is_multithreaded_resource_creation_supported() const { return driver->is_multithreaded_resource_creation_supported(); }
+
 	Vector<uint8_t> shader_compile_spirv_from_source(ShaderStage p_stage, const String &p_source_code, ShaderLanguage p_language = SHADER_LANGUAGE_GLSL, String *r_error = nullptr, bool p_allow_cache = true);
 	Vector<uint8_t> shader_compile_binary_from_spirv(const Vector<ShaderStageSPIRVData> &p_spirv, const String &p_shader_name = "");
 

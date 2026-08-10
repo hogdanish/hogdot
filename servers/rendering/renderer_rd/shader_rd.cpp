@@ -417,7 +417,14 @@ void ShaderRD::_compile_variant(uint32_t p_variant, CompileData p_data) {
 	ERR_FAIL_COND(shader_data.is_empty());
 
 	{
-		p_data.version->variants.write[variant] = RD::get_singleton()->shader_create_from_bytecode_with_samplers(shader_data, p_data.version->variants[variant], immutable_samplers);
+		// ⚠ Everything above this point is CPU work on bytes — glslang and the shader container —
+		// and is safe on any thread. Turning the bytes into a shader RID is not, on every backend:
+		// on WebGPU it reaches a GPUDevice that only exists in the browser main thread's JS realm.
+		// When the driver says no, leave the RID for _compile_version_end() to create serially and
+		// keep the expensive half parallel. See RL-043.
+		if (RD::get_singleton()->is_multithreaded_resource_creation_supported()) {
+			p_data.version->variants.write[variant] = RD::get_singleton()->shader_create_from_bytecode_with_samplers(shader_data, p_data.version->variants[variant], immutable_samplers);
+		}
 		p_data.version->variant_data.write[variant] = shader_data;
 	}
 }
@@ -743,6 +750,21 @@ void ShaderRD::_compile_version_end(Version *p_version, int p_group) {
 	WorkerThreadPool::GroupID group_task = p_version->group_compilation_tasks[p_group];
 	WorkerThreadPool::get_singleton()->wait_for_group_task_completion(group_task);
 	p_version->group_compilation_tasks.write[p_group] = 0;
+
+	// The serial half of the split _compile_variant() performs when the driver cannot create
+	// shaders off the render thread. This function runs on the thread that called
+	// _compile_ensure_finished(), which is the render thread, so the RIDs are made in the right
+	// place. A variant whose compilation failed has empty bytecode and is skipped, leaving its RID
+	// exactly as the threaded path would have. See RL-043.
+	if (!RD::get_singleton()->is_multithreaded_resource_creation_supported()) {
+		for (uint32_t i = 0; i < group_to_variant_map[p_group].size(); i++) {
+			int variant_id = group_to_variant_map[p_group][i];
+			if (!variants_enabled[variant_id] || p_version->variant_data[variant_id].is_empty()) {
+				continue;
+			}
+			p_version->variants.write[variant_id] = RD::get_singleton()->shader_create_from_bytecode_with_samplers(p_version->variant_data[variant_id], p_version->variants[variant_id], immutable_samplers);
+		}
+	}
 
 	bool all_valid = true;
 

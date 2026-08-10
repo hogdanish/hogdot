@@ -147,6 +147,20 @@ public:
 		print_line("HASH:", p_key_hash, "SOURCE:", source_name);
 #endif
 
+		// ⚠ Compile inline when the driver cannot create resources off the render thread. The
+		// creation function ends in render_pipeline_create()/compute_pipeline_create(), which on
+		// WebGPU reaches a GPUDevice that exists only in the browser main thread's JS realm; from a
+		// pool task it aborts in emdawnwebgpu's getJsObject(). No task is registered, so
+		// wait_for_pipeline() finds nothing to wait on and _add_new_pipelines_to_map() collects the
+		// result from compiled_queue exactly as it would have. See RL-043.
+		//
+		// Holding local_mutex across the call is safe: the creation function reaches this class
+		// again only through add_compiled_pipeline(), which takes compiled_queue_mutex instead.
+		if (!RD::get_singleton()->is_multithreaded_resource_creation_supported()) {
+			(creation_object->*creation_function)(p_key);
+			return;
+		}
+
 		// Queue a background compilation task.
 		WorkerThreadPool::TaskID task_id = WorkerThreadPool::get_singleton()->add_template_task(creation_object, creation_function, p_key, p_high_priority, "PipelineCompilation");
 		compilation_tasks.insert(p_key_hash, task_id);

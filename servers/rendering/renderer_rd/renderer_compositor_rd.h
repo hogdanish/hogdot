@@ -146,7 +146,16 @@ public:
 	_ALWAYS_INLINE_ virtual uint64_t get_frame_number() const override { return frame; }
 	_ALWAYS_INLINE_ virtual double get_frame_delta_time() const override { return delta; }
 	_ALWAYS_INLINE_ virtual double get_total_time() const override { return time; }
-	_ALWAYS_INLINE_ virtual bool can_create_resources_async() const override { return true; }
+	// ⚠ Not a constant on this compositor. Answering true lets RenderingServerDefault run resource
+	// creation directly on whichever thread asked — a resource-loader thread, typically — which is
+	// right for every native API and wrong for WebGPU, whose GPUDevice belongs to one JS realm.
+	// RasterizerGLES3 already answers false for the same reason (a GL context is thread-affine),
+	// and the false path is well travelled: the call is marshaled through RenderingServerDefault's
+	// command queue, which sync() drains on the render thread every frame. See RL-043.
+	_ALWAYS_INLINE_ virtual bool can_create_resources_async() const override {
+		RD *rd = RD::get_singleton();
+		return rd == nullptr || rd->is_multithreaded_resource_creation_supported();
+	}
 
 	virtual bool is_xr_enabled() const override { return RendererCompositor::is_xr_enabled(); }
 

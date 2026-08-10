@@ -427,6 +427,10 @@ public:
 	virtual void shader_free(ShaderID p_shader) override final;
 	/// Release shader modules but keep the shader object alive (for pipeline reuse).
 	virtual void shader_destroy_modules(ShaderID p_shader) override final;
+	/// ⚠ Always false. The GPUDevice is a JS object owned by one realm, and a wasm pthread is a
+	/// Worker with a realm and object table of its own — creating a shader module from one aborts
+	/// in emdawnwebgpu's getJsObject(). A realm constraint, not a data race. See RL-043.
+	virtual bool is_multithreaded_resource_creation_supported() const override final { return false; }
 
 	// -----------------------------------------------------------------------
 	// UNIFORM SET
