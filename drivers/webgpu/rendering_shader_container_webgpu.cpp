@@ -36,10 +36,21 @@
 // SPIR-V Storage
 // =========================================================================
 //
-// Architecture decision (see copilot-instructions.md #6):
-//   GLSL → SPIR-V (glslang) → stored directly as WGPUShaderSourceSPIRV.
-//   Dawn's emdawnwebgpu port natively supports WGPUShaderSourceSPIRV;
-//   no WGSL/Tint translation step is needed.
+// This container stores raw SPIR-V, one blob per stage.
+//
+// ⚠ The comment that used to sit here claimed "Dawn's emdawnwebgpu port natively
+// supports WGPUShaderSourceSPIRV; no WGSL/Tint translation step is needed." That is
+// false and has been since before the port started. emdawnwebgpu does NOT accept
+// WGPUShaderSourceSPIRV — see the note beside the _spv_to_wgsl_cached() call in
+// RenderingDeviceDriverWebGPU::shader_create_from_container() — and the driver
+// translates SPIR-V to WGSL with Tint at runtime, on first use of each pipeline, on
+// the main thread.
+//
+// The practical consequence is the one to keep in mind when reading this file: what
+// is stored here is an *input* to that translation, not something the browser can
+// consume. Storing WGSL instead would move Tint to bake time and is the structural
+// answer to first-use pipeline cost, but it requires Tint in the editor and a
+// registered WebGPU shader baker, neither of which exists yet. See RL-041.
 //
 // Push constant handling:
 //   Godot's push constants are emulated via a uniform buffer at a fixed

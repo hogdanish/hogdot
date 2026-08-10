@@ -54,8 +54,30 @@ String ShaderBakerExportPlugin::get_name() const {
 }
 
 bool ShaderBakerExportPlugin::_is_active(const Vector<String> &p_features) const {
-	// Shader baker should only work when a RendererRD driver is active, as the embedded shaders won't be found otherwise.
-	return RendererSceneRenderRD::get_singleton() != nullptr && RendererRD::MaterialStorage::get_singleton() != nullptr && p_features.has("shader_baker");
+	if (!p_features.has("shader_baker")) {
+		// Silent, and deliberately so — this is the ordinary case. Either the preset did
+		// not ask for baking, or the export platform does not offer it at all.
+		//
+		// ⚠ The Web platform is the second kind: `platform/web/export/export_plugin.cpp`
+		// neither declares a `shader_baker/enabled` option nor pushes this feature, so a
+		// web export never reaches any of the machinery below no matter what the .cfg
+		// says. A `shader_baker/enabled=true` sitting in a Web preset is an inert key.
+		// See RL-041/RL-042; making it live is part of registering a WebGPU baker, not a
+		// diagnostic.
+		return false;
+	}
+
+	// ⚠ Past this point baking was explicitly requested, so a refusal is worth a line.
+	// Shader baker needs a RendererRD driver actually running, because it bakes the
+	// embedded shaders out of the live renderer — and a `--headless` export has none.
+	// That makes baking impossible in exactly the way CI and script-driven exports run,
+	// with no output of any kind in mainline.
+	if (RendererSceneRenderRD::get_singleton() == nullptr || RendererRD::MaterialStorage::get_singleton() == nullptr) {
+		WARN_PRINT("Shader baking was requested but no RenderingDevice renderer is running, so no shaders will be baked. A --headless export can never bake shaders; run the export from an editor with a rendering driver.");
+		return false;
+	}
+
+	return true;
 }
 
 bool ShaderBakerExportPlugin::_initialize_container_format(const Ref<EditorExportPlatform> &p_platform, const Ref<EditorExportPreset> &p_preset) {
@@ -70,7 +92,35 @@ bool ShaderBakerExportPlugin::_initialize_container_format(const Ref<EditorExpor
 		}
 	}
 
+	// ⚠ Do not fail silently here. Reaching this point means the preset asked for shader
+	// baking, the export ran, and nothing was baked — with no line in the log, an export
+	// that succeeds, and a pack that differs only by the bytes the baking never added.
+	// A project can carry `shader_baker/enabled=true` for months and believe it is paying
+	// for a cold-start mitigation it never had; that is exactly what happened to the
+	// WebGPU target, which has no registered platform at all. Naming the driver and the
+	// platforms that *were* registered turns a phantom feature into one log line.
+	WARN_PRINT(vformat("Shader baking was requested but no shader baker is registered for the rendering driver \"%s\", so no shaders will be baked. This editor build registers bakers for: %s.",
+			shader_container_driver,
+			platforms.is_empty() ? String("(none)") : _get_registered_platform_drivers()));
+
 	return false;
+}
+
+String ShaderBakerExportPlugin::_get_registered_platform_drivers() const {
+	// Only the drivers this editor build actually compiled a baker for. There is no way
+	// to ask a platform for its driver name (matches_driver() is a predicate), so probe
+	// it with the names Godot ships.
+	static const char *known_drivers[] = { "vulkan", "d3d12", "metal", "webgpu" };
+	Vector<String> matched;
+	for (const char *driver : known_drivers) {
+		for (Ref<ShaderBakerExportPluginPlatform> platform : platforms) {
+			if (platform->matches_driver(driver)) {
+				matched.push_back(driver);
+				break;
+			}
+		}
+	}
+	return matched.is_empty() ? String("(none)") : String(", ").join(matched);
 }
 
 void ShaderBakerExportPlugin::_cleanup_container_format() {
