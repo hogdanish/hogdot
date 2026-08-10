@@ -21,6 +21,7 @@ const GATE_SCENES := {
 	"arealights": "res://scenes/area_lights_gate.tscn",
 	"clearcoat": "res://scenes/clearcoat_arealight.tscn",
 	"drawableblit": "res://scenes/drawable_blit_gate.tscn",
+	"hdr": "res://scenes/hdr_output_gate.tscn",
 }
 
 var frame_count := 0

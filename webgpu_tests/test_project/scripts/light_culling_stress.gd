@@ -169,7 +169,7 @@ func _setup_camera() -> void:
 	camera.current = true
 	add_child(camera)
 
-	# TAA blends neighbouring frames, which would smear the single frame the report reads.
+	# TAA blends neighboring frames, which would smear the single frame the report reads.
 	get_viewport().use_taa = false
 
 	print("  [OK] Camera: head-on at z=%.1f, TAA off" % CAMERA_Z)

@@ -181,7 +181,7 @@ func _setup_camera() -> void:
 	camera.position = CAMERA_POSITION
 	camera.look_at(CAMERA_LOOK_AT)
 
-	# TAA blends neighbouring frames, which would smear both the captured reference and the
+	# TAA blends neighboring frames, which would smear both the captured reference and the
 	# soft shadow edges this scene is judged on.
 	get_viewport().use_taa = false
 	_apply_debug_draw()
@@ -350,7 +350,7 @@ func _add_control_spot_light() -> void:
 
 ## The second control. A DirectionalLight3D writes into the PSSM directional shadow texture, not
 ## the positional shadow atlas the other four lights share, and the fragment shader samples the two
-## through different code. Present-vs-absent across the two control types localises a missing
+## through different code. Present-vs-absent across the two control types localizes a missing
 ## shadow to one of those paths without any engine instrumentation.
 func _add_control_directional_light() -> void:
 	var light := DirectionalLight3D.new()

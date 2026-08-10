@@ -37,7 +37,7 @@
 ## The format row blits the same red through MIX onto one texture per DrawableFormat; RGBA8_SRGB
 ## converts on write and is expected to read back visibly lighter than plain RGBA8. The multi row
 ## blits four different sources through one `blit_rect_multi` onto four same-format targets --
-## target i receives source i -- so four differently coloured swatches prove all four attachments
+## target i receives source i -- so four differently colored swatches prove all four attachments
 ## were written, and a black swatch means one was not.
 ##
 ## ⚠ `blit_rect_multi`'s extra targets must share the original's size AND DrawableFormat
@@ -192,8 +192,8 @@ func _add_swatch(p_texture: Texture2D, p_label: String, p_row: int, p_column: in
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-## Solid colours, not the noise textures the 3D coverage scene uses: a blend mode is judged by the
-## colour it produces, and noise averages every mode into the same muddy grey.
+## Solid colors, not the noise textures the 3D coverage scene uses: a blend mode is judged by the
+## colour it produces, and noise averages every mode into the same muddy gray.
 func _make_source(p_color: Color) -> ImageTexture:
 	var image := Image.create_empty(SOURCE_SIZE, SOURCE_SIZE, false, Image.FORMAT_RGBA8)
 	image.fill(p_color)
@@ -320,7 +320,7 @@ func _capture_native_reference() -> void:
 	print("%s Wrote the native reference to %s" % [REPORT_PREFIX, NATIVE_CAPTURE_PATH])
 
 
-## The swatch colours themselves are judged from the render: this backend has no synchronous GPU
+## The swatch colors themselves are judged from the render: this backend has no synchronous GPU
 ## readback, so nothing in GDScript can sample a DrawableTexture2D after a blit.
 func _report() -> void:
 	if _blend_swatches != BLEND_MODES.size():
