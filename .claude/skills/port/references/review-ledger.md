@@ -1061,3 +1061,197 @@ configures — a second, hardcoded caller will not announce itself.
 ⚠ **Gate coverage hole:** `webgpu_tests/test_project` contains no `RDShaderFile` and no
 `stencil_mode` material (RL-037). Both defects were found only by a real project. The coverage scene
 should grow one of each.
+
+### RL-039 — 2026-08-06 — **bug**
+**Where:** `drivers/webgpu/rendering_device_driver_webgpu.cpp` (`_check_capabilities`)
+**Found while:** phase 7, working the CommonGrounds web audit's E5
+**What:** Two WebGPU device features were queried by **hardcoded enum number**, and both numbers
+were wrong:
+
+```cpp
+// Feature name enum value 13 per WebGPU spec (not yet in the emdawnwebgpu 4.0.10 header enum).
+float32_filterable_supported = wgpuDeviceHasFeature(device, (WGPUFeatureName)13);
+float32_blendable_supported  = wgpuDeviceHasFeature(device, (WGPUFeatureName)14);
+```
+
+Against the header we actually build with
+(`~/.cache/emscripten/ports/emdawnwebgpu/emdawnwebgpu_pkg/webgpu/include/webgpu/webgpu.h`):
+
+| value | enumerator |
+| ---: | --- |
+| `0x0D` (13) | `WGPUFeatureName_BGRA8UnormStorage` |
+| `0x0E` (14) | `WGPUFeatureName_Float32Filterable` |
+| `0x0F` (15) | `WGPUFeatureName_Float32Blendable` |
+
+So `float32_filterable_supported` was reading **BGRA8UnormStorage**, which
+`platform/web/js/engine/engine.js` never requests and which is therefore never enabled on the
+device — it was **hard-false on every adapter, forever**. `float32_blendable_supported` was reading
+*filterable*, and only looked right by luck because the JS shell requests both.
+
+⚠ **This is a rendering-correctness defect, not a log-noise one**, and the blast radius is wider
+than the warning suggests:
+
+- `sampler_is_format_supported_for_filter()` returned `false` for every 32F format, so Godot
+  silently downgraded linear samplers to NEAREST on R32F/RG32F/RGBA32F.
+- `texture_create()` (`:1801`) silently **substituted RGBA32Float → RGBA16Float**, RG32→RG16 and
+  R32→R16 for every non-storage, non-render-attachment 32F texture, on every adapter. That is a real
+  precision loss on a port whose rendering has never been judged against a native reference, and the
+  only trace is a `WEBGPU_DIAG` line that is compiled out of a normal build.
+
+The `float32-filterable NOT available` warning quoted in the CommonGrounds web audit is this bug, not
+a property of the adapter. The audit reasonably read it as an adapter limitation and filed the
+consequence game-side (its E5); the engine half is here.
+
+⚠ **The immediate cause is the emsdk bump.** The comment was written against emdawnwebgpu 4.0.10 and
+the numbers may well have been right then; the toolchain moved to emscripten 6.0.5 underneath it and
+a hardcoded enum number cannot follow. The other two feature probes in the same function dodged this
+by asking the JS device for the feature *by string* (`EM_ASM_INT` on
+`Module['preinitializedWebGPUDevice'].features.has(...)`), which is version-proof.
+
+**Disposition:** **fixed** — both now use `WGPUFeatureName_Float32Filterable` /
+`WGPUFeatureName_Float32Blendable`. Named enumerators follow the header across emsdk bumps, and a name
+that is genuinely missing fails the build instead of quietly answering about a different feature.
+
+⚠ **Standing lesson, and it generalizes past WebGPU:** never spell a vendored enum as a number. The
+"not yet in the header" workaround is a dated assertion about a third-party header that nothing
+re-checks; when it expires it fails *silently and in the safe-looking direction* — a capability
+reported absent looks like a conservative adapter, not like a bug. If a name really is missing, probe
+by string through the JS object, which at least names what it is asking for.
+
+### RL-040 — 2026-08-06 — **blocker**
+**Where:** `servers/rendering/rendering_device_binds.cpp` (`RDShaderFile::parse_versions_from_text`),
+`editor/import/resource_importer_shader_file.cpp`
+**Found while:** phase 7, working the CommonGrounds web audit's E1. Completes **RL-038**.
+**What:** RL-038's fix routed `parse_versions_from_text` through `RD::get_singleton()` when a device
+exists and left the hardcoded `SHADER_SPIRV_VERSION_1_4` "only for the no-device case the editor
+importer can hit". **That no-device case is the shipping path**, and the with-device branch is wrong
+for it too.
+
+`.glsl` files are compiled to SPIR-V by `ResourceImporterShaderFile` at **import** time and baked
+into `.godot/imported/*.res`, which is what goes into the export pack. So what a project ships
+depended on the machine that ran the import:
+
+| how the import ran | container consulted | SPIR-V baked | loadable on WebGPU |
+| --- | --- | ---: | --- |
+| headless (`--headless --export`) | none | **1.4** (the hardcoded fallback) | no |
+| macOS GUI editor | Metal | **1.6** | no |
+| Linux/Windows GUI editor | Vulkan | 1.4 | no |
+
+The CommonGrounds audit proved the first row at the byte level: `.godot/imported/stencil_copy.glsl-*.res`
+at offset `0x354` read `0302 2307 0004 0100` — magic `0x07230203`, version word `0x00010400`.
+
+⚠ **The root error is conceptual, not arithmetic.** An import artifact is *platform-independent by
+construction* — one import cache serves every export preset a project has — so it must not consult
+the host's rendering device at all. Lowering the fallback constant to 1.3, which is what the audit
+proposed, fixes the headless row and leaves a GUI import baking 1.6. Worse, it leaves the baked
+bytecode depending on *how you ran the editor*, which is not a property anyone would think to check.
+
+**Disposition:** **fixed** — `parse_versions_from_text` now takes an explicit
+`RDShaderFile::SpirvTarget`:
+
+- `SPIRV_TARGET_ACTIVE_DEVICE` (default) — Betsy and the lightmapper hand their SPIR-V straight to
+  the running device, so they keep RL-038's routing through the driver's container.
+- `SPIRV_TARGET_PORTABLE` — the importer, pinned to `SHADER_SPIRV_VERSION_1_3`. SPIR-V 1.3 is
+  Vulkan 1.1 core and is accepted by every backend Godot has, so it is the only version that is
+  correct without knowing the target.
+
+`ResourceImporterShaderFile::get_format_version()` is also overridden to `1` (mainline leaves it at
+the implicit `0`). Without that bump an existing project's cached `.res` survives the engine upgrade
+untouched and keeps its 1.4 bytecode, with no symptom short of hexdumping the file.
+⚠ **CommonGrounds must re-import its `.glsl` files** on the first editor run against this build; the
+version bump makes that automatic, and nothing else in that project needs to change.
+
+**Verified:** re-imported `webgpu_tests/test_project` headless with the rebuilt macOS editor; the same
+offset now reads `0302 2307 0003 0100` — version word `0x00010300`, SPIR-V **1.3** — and
+`shaders/user_compute.glsl.import` records `importer_version=1`.
+
+⚠ **Standing lesson: "the editor can hit this" is not the same as "only the editor hits this."** The
+RL-038 fix was correct about the mechanism and wrong about which caller shipped, and it read as
+complete in this ledger for exactly as long as no gate scene contained an `RDShaderFile`. See
+RL-042 for the coverage that now does.
+
+### RL-041 — 2026-08-06 — **smell** (with a deferred feature behind it)
+**Where:** `editor/export/shader_baker_export_plugin.cpp` (`_initialize_container_format`),
+`editor/editor_node.cpp` (baker platform registration),
+`drivers/webgpu/rendering_shader_container_webgpu.cpp` (header comment)
+**Found while:** phase 7, working the CommonGrounds web audit's E2
+**What:** `shader_baker/enabled=true` is a **total, silent no-op** for the web target.
+`editor_node.cpp` registers exactly three `ShaderBakerExportPluginPlatform` subclasses — Vulkan,
+D3D12, Metal, each behind its driver's build flag. There is no WebGPU one, so
+`_initialize_container_format` finds no `matches_driver("webgpu")`, `return false`s **with no error
+and no warning**, and `_begin_customize_resources` declines the whole job. The export succeeds and
+the pack is unchanged. CommonGrounds measured it: baking "enabled" moved `index.pck` by 64 bytes.
+
+The cost of the silence is the point. That project carried the setting believing it was the
+documented mitigation for a ~15 s cold shader compile, and it had never once run.
+
+⚠ Two claims in the tree pointed the wrong way and are now corrected:
+`rendering_shader_container_webgpu.cpp`'s header said *"Dawn's emdawnwebgpu port natively supports
+WGPUShaderSourceSPIRV; no WGSL/Tint translation step is needed."* That is false and contradicts the
+driver's own note beside the `_spv_to_wgsl_cached()` call in `shader_create_from_container()`.
+
+**Disposition:** **half fixed, half deferred.**
+
+- *Fixed:* the miss is now loud. `_initialize_container_format` emits a `WARN_PRINT` naming the
+  driver it wanted and the drivers this editor build actually registered bakers for. One log line
+  would have saved the phantom mitigation. The stale container comment is rewritten.
+- *Deferred:* registering a real WebGPU baker. See RL-042 — it is the same project, and it is worth
+  more than the diagnostic is.
+
+⚠ **Do not "fix" this by deleting `shader_baker/enabled` from the web preset.** With the warning in
+place the setting is now honest, and it becomes live the moment RL-042 lands.
+
+### RL-042 — 2026-08-06 — **perf** (structural; deferred with a costed direction)
+**Where:** `drivers/webgpu/rendering_device_driver_webgpu.cpp` (`_spv_to_wgsl_cached`),
+`drivers/webgpu/rendering_shader_container_webgpu.cpp`
+**Found while:** phase 7, working the CommonGrounds web audit's E3
+**What:** hogdot has **no mitigation whatsoever** for first-use pipeline cost, and the two things that
+look like one are not. Every pipeline variant pays, on first use, on the main thread, in a
+single-threaded wasm build: glslang GLSL→SPIR-V, 13 SPIR-V preprocessing passes, Tint SPIR-V→WGSL,
+`createShaderModule`, `createRenderPipeline`. The only cache is `_spv_to_wgsl_cache`, a
+`static HashMap<uint64_t, String>` — in-memory, process-lifetime, **no persistence of any kind**, so
+a browser reload starts from zero. The fork's build-time WGSL table was deleted in `28a9960` (RL-009)
+after measuring 141 entries / 600+ lookups / **0 hits**, and nothing replaced it. Measured
+consequence in CommonGrounds: ~10 s of 0–7 fps on first entry to the world map, then smooth.
+
+**Disposition:** deferred — but the direction is decided, and it is **not** the one the audit's plan
+listed first.
+
+⚠ **Reject the IndexedDB WGSL cache.** IndexedDB has no synchronous API. The translation it would
+serve happens inside `shader_create_from_container()`, deep in a synchronous call chain, on a
+`threads=no` build — so reading it needs Asyncify (a large, whole-program cost paid on every call, to
+serve a cache that only helps the *second* page load) or a worker plus SharedArrayBuffer, which means
+threads, which means Phase 8 anyway. It is the most work for the least benefit and it should not be
+attempted before Phase 8 lands.
+
+**The right direction is the shader baker: bake at export, ship WGSL, translate nothing at runtime.**
+It reuses machinery Godot already has — the baker already enumerates every variant of every shader at
+export time, which is the hard part and the part a hand-rolled cache would have to reinvent. Two
+steps, and step 1 is worth landing on its own:
+
+1. **Register a WebGPU baker that stores SPIR-V** (what `RenderingShaderContainerWebGPU` already
+   does). Removes glslang from the runtime path; Tint still runs on first use.
+   ⚠ **Feasibility checked, and it is better than it looks:** `rendering_shader_container_webgpu.h`
+   includes **only** `servers/rendering/rendering_shader_container.h` — no emdawnwebgpu, no Dawn, no
+   Tint. The container is already host-portable. What blocks it is purely build gating: the file
+   lives under `drivers/webgpu/`, which `drivers/SCsub` compiles only when `webgpu=yes`, and
+   `webgpu=yes` is rejected on macOS because `"webgpu" not in supported`. The change is to compile
+   the container (not the driver) into editor builds regardless of platform, exactly as mainline
+   compiles the D3D12 and Metal containers into editors that cannot run those drivers, then add a
+   twelve-line `ShaderBakerExportPluginPlatformWebGPU` beside the other three.
+2. **Then move the translation to bake time** — run the SPIR-V preprocessing passes and Tint in the
+   editor and store **WGSL** in the container. This is the one that kills the chug outright, and it
+   is the expensive half: it needs Tint built natively into every editor (824 vendored sources), and
+   it needs the runtime-only decisions the driver currently makes during translation — the
+   `has_rw_storage_textures` storage split, specialization-constant freezing, the push-constant
+   binding — to be either baked per-variant or kept as a runtime fallback path.
+
+⚠ **Measure step 1 before committing to step 2.** Nobody has separated the glslang cost from the Tint
+cost in a browser; the 10 s is attributed to "pipeline compilation" as a whole. If glslang is most of
+it, step 1 alone is the fix and step 2 never needs building. `Performance.PIPELINE_COMPILATIONS_DRAW`
+plus the driver's `[PERF]` line during a cold world entry is the measurement, and it has not been
+taken.
+
+⚠ Phase 8 (threaded web builds) is complementary, not an alternative: threads move this cost off the
+main thread, baking removes it. Neither subsumes the other, and threads cost a
+`SharedArrayBuffer`/COOP-COEP deployment constraint that baking does not.

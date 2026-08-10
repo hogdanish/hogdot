@@ -73,7 +73,7 @@ support anyway.
 | `ccache` | 4.13.6 | ⚠ **NOT automatic, and needs THREE things, not one** — see "Making ccache actually work" below. Config `~/.config/ccache/ccache.conf`, cache `~/.cache/ccache`, cap 30G. |
 | Vulkan SDK | LunarG, installed 2026-08-06 | Needed for `-lMoltenVK` at link time. Installed with `sh misc/scripts/install_vulkan_sdk_macos.sh` — headless, no sudo, lands in `~/VulkanSDK`. Outside Homebrew, so `brewup` does not cover it. |
 | `pre-commit` | 4.6.1 | The only way to run Godot's `.pre-commit-config.yaml`. |
-| `emcc` | 6.0.5 | Web targets only. `EM_CACHE` → `~/.cache/emscripten` (fish `conf.d/xdg-apps.fish`). |
+| `emcc` | 6.0.x | Web targets only. `EM_CACHE` → `~/.cache/emscripten` (fish `conf.d/xdg-apps.fish`). ⚠ **Do not pin a patch version in prose** — `brew autoupdate` moves it every 12 h. Measured 6.0.5 on 2026-08-06 morning and **6.0.6-git** the same afternoon, and RL-039 is what a stale version assertion costs. `emcc --version` is the answer. |
 | `glslang` | brew 16.5.0 | ⚠ **Hard dependency of `webgpu=yes` only**, installed 2026-08-06. Provides `glslangValidator` on `$PATH`, which `drivers/webgpu/wgsl_precompile.py` shells out to. Without it the build dies at `wgsl_precompiled.gen.h` — see the WGSL precompile section below. |
 
 ⚠ **`webgpu=yes` needs a host toolchain that no other target needs.** Two host-side steps run before a
@@ -208,6 +208,27 @@ export, wants compute shaders. Read access is granted in `.claude/settings.json`
 FILL: the actual handoff — whether CommonGrounds points at `bin/godot.macos.editor.arm64` directly or at
 an installed editor, and where its export templates are expected. Derive from that repo's `build-export`
 skill and record it here the first time a build is handed over.
+
+### Shader baking does not happen, and three separate things stop it (2026-08-06)
+
+⚠ **`shader_baker/enabled=true` in a Web preset is an inert key.** Not "the baker declined" — the
+Web export platform does not *have* the option. `platform/web/export/export_plugin.cpp` never
+declares `shader_baker/enabled` and never pushes the `shader_baker` feature, unlike PC, macOS,
+Android and Apple-embedded, so `ShaderBakerExportPlugin::_is_active()` returns false at its first
+line and nothing downstream runs. Do not read the setting as a cold-start mitigation.
+
+⚠ **A `--headless` export can never bake shaders, on any platform.** Baking pulls the embedded
+shaders out of a live `RendererSceneRenderRD`, and headless has none. Every scripted export — this
+repo's gate exports, CommonGrounds' `run-web.sh` — is therefore outside it by construction. This was
+silent in mainline; hogdot now emits a `WARN_PRINT` naming the reason whenever baking was requested
+and cannot run (RL-041).
+
+⚠ **Even with both fixed, no `ShaderBakerExportPluginPlatform` matches `"webgpu"`** —
+`editor/editor_node.cpp` registers Vulkan, D3D12 and Metal only. Registering one is real work with a
+worthwhile payoff and is written up as **RL-042** in the port skill's review ledger; the useful fact
+for building is that `rendering_shader_container_webgpu.h` includes only
+`servers/rendering/rendering_shader_container.h` — no Dawn, no Tint — so the container is already
+host-portable and only the `webgpu=yes` gating in `drivers/SCsub` keeps it out of a macOS editor.
 
 ## The lint baseline (established 2026-08-06, before the first port commit)
 
