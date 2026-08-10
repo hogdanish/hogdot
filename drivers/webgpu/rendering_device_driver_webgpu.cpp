@@ -3813,6 +3813,14 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 	for (int i = 0; i < stage_shaders.size(); i++) {
 		const RenderingShaderContainer::Shader &s = stage_shaders[i];
 
+		// WGShader's stage arrays hold the classic pipeline stages only; the 4.7
+		// raytracing stages (SHADER_STAGE_RAYGEN and up) would index past them, and
+		// has_feature() reports raytracing unsupported — review-ledger RL-045.
+		if ((uint32_t)s.shader_stage >= WGShader::STAGE_SLOTS) {
+			error_text = vformat("WebGPU: unsupported shader stage %d.", (int)s.shader_stage);
+			break;
+		}
+
 		// The code_compressed_bytes holds raw SPIR-V (no compression — code_decompressed_size == 0).
 		const PackedByteArray &spv_bytes = s.code_compressed_bytes;
 		if (spv_bytes.is_empty()) {
@@ -4677,7 +4685,7 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 			break;
 		}
 
-		if (s.shader_stage < 6) {
+		if (s.shader_stage < WGShader::STAGE_SLOTS) {
 			shader->stage_modules[s.shader_stage] = mod;
 		}
 		// Set the legacy module alias to the first created module.

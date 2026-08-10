@@ -138,12 +138,18 @@ struct WGVertexFormat {
 // =============================================================================
 
 struct WGShader {
+	// Stage-indexed storage covers the classic pipeline stages only (vertex,
+	// fragment, tessellation ×2, compute). The raytracing stages 4.7 appended to
+	// RDD::ShaderStage (SHADER_STAGE_MAX is now 10) would index past these arrays;
+	// shader_create_from_container() rejects them up front — review-ledger RL-045.
+	static constexpr uint32_t STAGE_SLOTS = 6;
+
 	// Per-stage shader modules. Indexed by RDD::ShaderStage enum value.
-	WGPUShaderModule stage_modules[6] = {}; // SHADER_STAGE_MAX = 6 (vertex/frag/tess×2/compute/max)
+	WGPUShaderModule stage_modules[STAGE_SLOTS] = {};
 	WGPUShaderModule module = nullptr; // Legacy alias — points to first non-null module.
 
 	// Per-stage raw SPIR-V bytes. Stored for deferred specialization constant patching.
-	PackedByteArray stage_spirv[6];
+	PackedByteArray stage_spirv[STAGE_SLOTS];
 
 	WGPUPipelineLayout pipeline_layout = nullptr;
 	LocalVector<WGPUBindGroupLayout> bind_group_layouts; // One per descriptor set.
@@ -196,7 +202,7 @@ struct WGShader {
 	// Per-stage set of override constant IDs found in the WGSL output.
 	// Used to filter WGPUConstantEntry per stage — WebGPU requires that
 	// every constant key passed to a stage actually exists in that module.
-	HashSet<uint32_t> stage_override_ids[6];
+	HashSet<uint32_t> stage_override_ids[STAGE_SLOTS];
 };
 
 // =============================================================================
