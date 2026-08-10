@@ -1352,3 +1352,42 @@ same pool, and the failure is a hard hang with no error — not an exception, no
   threading — while the same work at `high_priority = true` measured **2.86x** across 4 workers.
   `ShaderRD` passes `true`, so the engine's own shader compilation gets the full pool. A benchmark
   that picks the wrong flag concludes the opposite of the truth.
+
+### RL-045 — 2026-08-10 — **trap** (defensive fix queued for Phase 10; unreachable today)
+**Where:** `drivers/webgpu/webgpu_objects.h:142,146` and `drivers/webgpu/rendering_device_driver_webgpu.cpp:3828`
+**Found while:** phase 9, survey confirmation of the raytracing verdict (`research/phase9-survey-confirmation.md` § 2)
+**What:** `WGShader` sizes `stage_modules[6]` / `stage_spirv[6]` under a comment claiming
+`SHADER_STAGE_MAX = 6` — stale at 4.7.1, where five raytracing stages pushed `SHADER_STAGE_MAX` to
+**10**. The `stage_modules` write is bounds-guarded (`rendering_device_driver_webgpu.cpp:4680`,
+`if (s.shader_stage < 6)`); the sibling `stage_spirv` write at `:3828` is **unguarded** — an
+out-of-bounds array write (UB) for any stage index ≥ 6.
+
+⚠ **Unreachable today, silent if it ever becomes reachable.** `stage_spirv` is populated only in
+`shader_create_from_container()`, and raytracing shaders never flow there — they reach only the
+`raytracing_pipeline_create` stub, which ignores its shaders (RL-045's sibling facts are in
+`features/feature-raytracing-stubs.md`). If upstream ever unifies raytracing and graphics shader
+creation, the write corrupts memory with no error and no assert.
+
+**Fix shape (trivial, Phase 10):** bound `:3828` exactly like `:4680`, and correct the
+`webgpu_objects.h` comment to say why **6** (graphics/compute stages only) is the intended bound
+rather than `SHADER_STAGE_MAX`.
+
+### RL-046 — 2026-08-10 — **bug (suspected; structurally verified, runtime-unproven)**
+**Where:** `servers/rendering/renderer_rd/forward_mobile/render_forward_mobile.cpp:2821-2835` (the color-pass instance-merge predicate)
+**Found while:** phase 9, drafting `features/feature-per-mesh-light-culling.md`; predicate re-read and confirmed in-session
+**What:** the batching predicate that decides whether adjacent instances merge into one draw call
+compares `omni_light_count`, `spot_light_count`, `reflection_probe_count` (each through
+`shader_count_for`) and `decals_count` — and never compares the counts for **`area_lights`**, the
+per-instance packed field 4.7.1 added to `SceneState::InstanceData`
+(`render_forward_mobile.h:236`). Two adjacent instances with different area-light sets can
+therefore merge, with the area-light checks the other light types get simply absent. No validation
+error would fire; the symptom would be wrong area lighting on the second instance.
+
+⚠ **This is an interaction defect, not a straight fork bug or a straight upstream bug**: the merge
+predicate is fork batching machinery, `area_lights[2]` is mainline-new, and the port carried both
+faithfully without noticing the predicate needed a fifth check. RL-013/RL-014 dispositioned the
+read-index side of batching; this predicate gap post-dates both.
+
+**Fix shape:** add the `area_light_count` comparison alongside the omni/spot checks (3 lines).
+Runtime repro + fix-then-validate ordering is designed in
+`.claude/work/plans/features/feature-per-mesh-light-culling.md`; queued for Phase 10.
