@@ -17,7 +17,7 @@ The WebGPU backend was borrowed directly from **[GodotWebGPU](https://github.com
 ## Building
 
 ```bash
-# Web export templates 
+# Web export templates
 scons platform=web target=template_release webgpu=yes opengl3=no threads=no num_jobs=4
 scons platform=web target=template_release webgpu=yes opengl3=no threads=yes num_jobs=4
 ```
