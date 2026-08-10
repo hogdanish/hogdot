@@ -1115,3 +1115,46 @@ no ghost trail, zero validation errors. Native regression: windowed Mobile cover
   bounded gate quit); previously logged as a threads observation. Still cosmetic, still open.
 - Movie-mode capture (`--write-movie frame.png`) is a clean native baseline path: real Metal
   rendering, PNG frames, no window interaction needed.
+
+## Phase 10, tranche B + C — 2026-08-10 (session 2)
+
+**Landed.** RL-048 scissor fix (`fed7b78011`); shadow-merge instrumentation + RL-010's named
+switch (`4a4fd9d60a`); three gate scenes — area-light shadows, clearcoat × area light, drawable
+blits (`b3d80155da`); HDR display output on web (`39744ca009`) and its gate (`e338af8742`);
+port-commit hook exemption for feature trailers (`cf716687c2`); docs (`fdc14c726f`). First push to
+`origin/main` in the project's history, at Ethan's explicit instruction.
+
+**Tiers reached.** RL-048: **renders**, both directions — Chrome showed zero of four positional
+shadows before and all four after, against a native `--rendering-method mobile` reference. Items 6
+and 7: **renders**, matching native. HDR: **runs** — the canvas reads back as
+`rgba16float / srgb / toneMapping extended` and the gate reports `enabled=true
+max_linear_value=2.000 pass=true`; `?sdr` gives `bgra8unorm / standard` on the same build. ⚠ The
+by-eye brightness check on the XDR panel and all Safari verification are **not** done.
+
+**Gotchas for the next session:**
+- ⚠ **A gate scene that cannot fail is not a gate.** RL-048 survived seven phases because no gate
+  ever lit a shadow-casting positional light, and it was diagnosed in one run only because the new
+  scene carries a spot and a directional control whose success is independently known. Third
+  incident of this class (RL-037, RL-046, RL-048). Give every new gate a control.
+- ⚠ **A native `GODOT_DUMP_SPIRV` dump can never feed `bin/tint_convert_cli`.** Metal's shader
+  container compiles at SPIR-V 1.6; `RenderingShaderContainerWebGPU` reports 1.3 because that is
+  what Tint's reader targets. All 32 dumped modules fail identically. The offline check designed
+  into `feature-clearcoat.md` is structurally impossible; the browser run is stricter anyway.
+- ⚠ **`?debug=atlas` reads black on web whether or not shadows work.** It says something about the
+  debug overlay's own depth sampling, not about the atlas. Do not use it as evidence.
+- **`Shadow Render: N passes in M draw lists (K merged)`** under `--verbose` is the only observer
+  of the fork's shadow-pass merge — `VIEWPORT_RENDER_INFO_TYPE_SHADOW`'s draw-call slot is an
+  instance count (`render_forward_mobile.cpp:1629`), the sibling of the trap tranche A logged for
+  the VISIBLE slot.
+- **`WGPUSurfaceColorManagement` chains into the surface CONFIGURATION, not the descriptor.**
+  `wgpuInstanceCreateSurface` asserts its chain is exactly the canvas selector and aborts
+  otherwise; `wgpuSurfaceConfigure` is what forwards tone mapping. Read emdawnwebgpu's
+  `library_webgpu.js` before trusting a header's chaining comment again.
+- **HDR needs engine-side setup a driver cannot supply:** AGX or LINEAR tonemapper (ACES and
+  FILMIC produce SDR-range output and clamp first), `use_hdr_2d` per viewport, no glow SOFTLIGHT,
+  no colour adjustment. `request_hdr_output` is read only at startup.
+- ⚠ **A template can be content-current and still fail CommonGrounds' staleness check**, which
+  compares mtimes: a binary built minutes before the commit that contains its source reads as
+  stale. Regenerate it rather than touching the file, so the check keeps its meaning.
+- The Bash tool runs **zsh**, which does not word-split unquoted parameters — `set -- $var` in a
+  build loop silently passed empty scons options. Write the invocations out.
