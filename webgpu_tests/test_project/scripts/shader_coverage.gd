@@ -18,6 +18,9 @@ const REPORT_PATH := "user://shader_coverage_report.json"
 const GATE_SCENES := {
 	"discardable": "res://scenes/discardable_msaa_gate.tscn",
 	"lightculling": "res://scenes/light_culling_stress.tscn",
+	"arealights": "res://scenes/area_lights_gate.tscn",
+	"clearcoat": "res://scenes/clearcoat_arealight.tscn",
+	"drawableblit": "res://scenes/drawable_blit_gate.tscn",
 }
 
 var frame_count := 0

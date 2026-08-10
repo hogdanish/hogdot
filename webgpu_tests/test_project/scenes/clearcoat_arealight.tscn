@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3 uid="uid://clearcoat_arealight"]
+
+[ext_resource type="Script" path="res://scripts/clearcoat_arealight.gd" id="1"]
+
+[node name="ClearcoatArealight" type="Node3D"]
+script = ExtResource("1")

@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3 uid="uid://drawable_blit_gate"]
+
+[ext_resource type="Script" path="res://scripts/drawable_blit_coverage.gd" id="1"]
+
+[node name="DrawableBlitGate" type="Node"]
+script = ExtResource("1")
