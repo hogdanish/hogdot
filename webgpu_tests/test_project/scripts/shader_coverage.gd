@@ -52,6 +52,7 @@ func _ready() -> void:
 	_setup_skeleton_mesh()
 	_setup_multimesh()
 	_setup_varying_stress()
+	_setup_user_paths()
 
 	print("[ShaderCoverage] Scene built. Rendering %d frames..." % FRAMES_TO_RENDER)
 
@@ -796,6 +797,21 @@ func _setup_varying_stress() -> void:
 		add_child(mesh_inst)
 
 	print("  [OK] Varying stress: custom spatial shader with 4 user varyings x2")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# USER-AUTHORED PATHS — RDShaderFile, stencil_mode, SCREEN_TEXTURE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## The three paths CommonGrounds turned out to be the first consumer of. Everything
+## above this line is one of the engine's *own* shaders, which is why RL-036, RL-037 and
+## RL-038 all survived phases 4 through 6 with the gate reporting PASS.
+##
+## ⚠ Lives in its own script so neither file outgrows the lint ceiling; see
+## `user_paths_coverage.gd` for what each gate needs to stay meaningful.
+func _setup_user_paths() -> void:
+	var user_paths := preload("res://scripts/user_paths_coverage.gd").new()
+	errors.append_array(user_paths.run(self))
 
 
 func _report_results() -> void:
