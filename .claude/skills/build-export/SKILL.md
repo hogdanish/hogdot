@@ -74,37 +74,21 @@ support anyway.
 | Vulkan SDK | LunarG, installed 2026-08-06 | Needed for `-lMoltenVK` at link time. Installed with `sh misc/scripts/install_vulkan_sdk_macos.sh` — headless, no sudo, lands in `~/VulkanSDK`. Outside Homebrew, so `brewup` does not cover it. |
 | `pre-commit` | 4.6.1 | The only way to run Godot's `.pre-commit-config.yaml`. |
 | `emcc` | 6.0.x | Web targets only. `EM_CACHE` → `~/.cache/emscripten` (fish `conf.d/xdg-apps.fish`). ⚠ **Do not pin a patch version in prose** — `brew autoupdate` moves it every 12 h. Measured 6.0.5 on 2026-08-06 morning and **6.0.6-git** the same afternoon, and RL-039 is what a stale version assertion costs. `emcc --version` is the answer. |
-| `glslang` | brew 16.5.0 | ⚠ **Hard dependency of `webgpu=yes` only**, installed 2026-08-06. Provides `glslangValidator` on `$PATH`, which `drivers/webgpu/wgsl_precompile.py` shells out to. Without it the build dies at `wgsl_precompiled.gen.h` — see the WGSL precompile section below. |
+| `glslang` | brew 16.5.0 | ⚠ **No longer a build dependency of `webgpu=yes`** — see below. Still needed for the offline dev tooling in `webgpu_tests/shader_corpus/` (`compile_fixtures.sh`, `validate_spirv_dump.mjs`) and for `bin/tint_convert_cli` corpus work. |
 
-⚠ **`webgpu=yes` needs a host toolchain that no other target needs.** Two host-side steps run before a
-single driver object compiles, and both fail in ways that look nothing like a port problem:
-1. `drivers/webgpu/tint_cli/build.sh` compiles a **native** `bin/tint_convert_cli` (~570 objects, 13 MB).
-   It is a separate build inside the build and respects none of SCons's flags.
-2. `wgsl_precompile.py` then shells out to `glslangValidator` for 70 shader files and pipes the SPIR-V
-   through `tint_convert_cli` to generate `drivers/webgpu/wgsl_precompiled.gen.h`.
+⚠ **`webgpu=yes` needs one host toolchain step no other target needs:**
+`drivers/webgpu/tint_cli/build.sh` compiles a **native** `bin/tint_convert_cli` (~570 objects, 13 MB).
+It is a separate build inside the build and respects none of SCons's flags.
 
-⚠ **`glslangValidator: Permission denied` means "not installed", not a permissions problem.** `execvp`
-reports `EACCES` rather than `ENOENT` when it walks a `$PATH` containing an unsearchable entry (this
-machine has a stale `/pkg/env/global/bin`), and Python surfaces that as `PermissionError`. Worse,
-`wgsl_precompile.py` catches only `FileNotFoundError`, so the real message never reaches you. Check
-`command -v glslangValidator` before believing the errno.
-
-⚠ **Homebrew's glslang is 16.5.0; Godot vendors 16.1.0** (`thirdparty/README.md:417`,
-`thirdparty/glslang/glslang/build_info.h`). `wgsl_precompile.py` shells out to the **Homebrew** one at
-build time; the engine compiles GLSL→SPIR-V with the **vendored** one at runtime. The precompiled table
-is keyed on a hash of the SPIR-V blob, so the two producing different blobs means the table misses.
-
-⚠⚠ **An earlier version of this file said that skew "costs cache hits, never correctness". That was
-wrong, and the phase-4 boot gate disproved it.** A miss is not a graceful degradation: it falls through
-to live Tint, and live Tint **cannot translate a write-only storage buffer at all** — WGSL has no
-`write` access mode for the storage address space. Skeleton and particles compute shaders fail, and the
-engine traps on `unreachable` before the main loop. See ledger **RL-020** (the blocker) and **RL-009**
-(the dead table, now its suspected cause). Until that is resolved, treat the two glslang versions as a
-**correctness** dependency, not a cache-efficiency one — and do not "just uninstall" the Homebrew copy
-either, since `wgsl_precompile.py` needs `glslangValidator` on `$PATH` by that exact name and the
-vendored build does not provide it. The Vulkan SDK also ships a `glslang`
-(16.4.0, `~/VulkanSDK/1.4.357.0/macOS/bin/glslang`), but only under the new name, not
-`glslangValidator`.
+⚠ **The build-time SPIR-V→WGSL precompile table is gone, and `glslang` is not a build-time dependency
+any more.** `wgsl_precompile.py` and `wgsl_precompiled.gen.h` were **deleted in `28a9960` (phase 7,
+2026-08-06)** — measured 100% dead across every phase-4/5/6/7 run (`table_count=141`, 600+ lookups,
+0 hits; every shader took the live Tint path regardless). `drivers/webgpu/SCsub` no longer shells out to
+`glslangValidator` at build time, so its absence no longer breaks a `webgpu=yes` build. See ledger
+**RL-025** (moot) and **RL-009** (the original dead-table finding) in
+`.claude/skills/port/references/review-ledger.md`. The engine still compiles GLSL→SPIR-V with its own
+**vendored** glslang at runtime, which never depended on the Homebrew copy — that skew (RL-020/RL-009)
+is retired along with the table it affected.
 
 ⚠ **`clang-format` is deliberately NOT installed and must stay that way.** Godot pins
 `mirrors-clang-format` **v21.1.7** in `.pre-commit-config.yaml` and pre-commit fetches that exact version
@@ -133,8 +117,8 @@ scons platform=web target=template_release import_env_vars=HOME,EM_CACHE
 # web export template WITH WebGPU — the Phase 2 command, run 2026-08-06.
 # ⚠ num_jobs=4 + nice are REQUIRED here: the default -j9 exhausts 24 GB on the
 #   Tint/SPIRV-Tools sources. See "Parallelism" above.
-# ⚠ Needs `glslangValidator` on $PATH (brew glslang) or it dies generating
-#   wgsl_precompiled.gen.h, long before any driver object compiles.
+# `glslangValidator` is NOT required to build this target (the precompile step
+#   that needed it was deleted in 28a9960) — only for the offline shader_corpus tooling.
 export EM_CACHE="$HOME/.cache/emscripten" CCACHE_DIR="$HOME/.cache/ccache" \
        CCACHE_CONFIGPATH="$HOME/.config/ccache/ccache.conf"
 nice -n 10 scons platform=web target=template_debug webgpu=yes opengl3=no threads=no \
