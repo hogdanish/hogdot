@@ -90,6 +90,44 @@ wrong.** `site/CORRECTNESS_AND_COMPATIBILITY.md:289` says *rendering* is main-th
 exactly the configuration that now works. Nobody had built the combination; the documents were
 accurate.
 
+## HDR display output (added 2026-08-10, phase 10)
+
+The canvas can carry values above 1.0, and hogdot drives it. Three facts are load-bearing:
+
+- **Colour management is a CONFIGURATION property, not a creation one.** `WGPUSurfaceColorManagement`
+  chains into `WGPUSurfaceConfiguration` and is forwarded to `GPUCanvasConfiguration.toneMapping`.
+  ⚠ Chaining it into the *surface descriptor* aborts the runtime: emdawnwebgpu's
+  `wgpuInstanceCreateSurface` asserts its chain is exactly the canvas selector. HDR therefore flips
+  format and tone mapping together in `swap_chain_resize()` — `RGBA16Float` + `Extended` when
+  granted, `BGRA8Unorm` + the canvas default otherwise. Nothing is recreated.
+- **Detection takes two questions, not one.** `godot_js_display_hdr_supported()` (navigator.gpu +
+  `(dynamic-range: high)` + a context exposing `getConfiguration`) is answerable *before*
+  configuring and decides the format; `godot_js_display_hdr_granted()` adds the live tone-mapping
+  mode and is answerable only *after*. Both require the media query, because a browser that echoes
+  the requested dictionary instead of the granted one would otherwise report HDR on an SDR panel.
+- **The colour path does not change.** Web reports `COLOR_SPACE_REC709_NONLINEAR_SRGB` in both
+  modes; `blit.glsl`'s `linear_to_srgb` encodes without a clamp and extends past 1.0 through its
+  `pow` branch, which is exactly the extended-sRGB an `extended` canvas decodes. Only the range
+  widens.
+
+⚠ **Headroom is a guess and always will be** until a web API reports one. `reference 100 / max 200`
+gives `output_max_value = 2.0`; only that ratio reaches a shader. macOS EDR headroom is dynamic —
+near zero at full SDR brightness — so a bigger assumption puts detail where the compositor clamps it.
+
+⚠ **A driver cannot deliver HDR alone.** The 4.7 docs require an AGX or LINEAR tonemapper (ACES and
+FILMIC produce SDR-range output and clamp first), `Viewport.use_hdr_2d` on every viewport, and no
+glow SOFTLIGHT or colour adjustment. `request_hdr_output` is read only at startup;
+`DisplayServer.window_request_hdr_output()` is the runtime channel. Tell any consumer this.
+
+## Render areas are sub-rects, and the scissor clamp must respect that
+
+⚠ WebGPU has no render-area concept, so the driver emulates Vulkan's with viewport and scissor. A
+pass that targets part of a shared texture — **every positional shadow-atlas pass does** — arrives
+with a scissor in absolute attachment coordinates. Clamp it against the render area's **right and
+bottom edges** (`origin + size`), never its extents. Comparing an absolute coordinate to a width
+scissored every off-origin pass to nothing and silently deleted all positional shadows for the
+project's entire history (RL-048). An empty scissor raises no validation error.
+
 ## Performance — the backend's whole shape is an IPC argument
 
 Every GPU call crosses a WASM→JS→browser-GPU-process IPC boundary at 40–250× native per-call cost, so

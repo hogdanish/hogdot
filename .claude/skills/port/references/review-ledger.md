@@ -1441,3 +1441,96 @@ exposure, then proved the defect live in both directions:
   depth bucket the opaque list runs in reverse creation order — the standing gate
   (`?scene=lightculling`) relies on this to stage the dangerous representative.
 Evidence chain: `features/feature-per-mesh-light-culling.md` § Addendum.
+
+### RL-048 — 2026-08-10 — **blocker**
+**Where:** `drivers/webgpu/rendering_device_driver_webgpu.cpp`, `command_render_set_scissor()`
+(the render-area clamp) and `command_begin_render_pass()` (which never stored the render area's
+origin); state in `webgpu_objects.h`, `WGCommandBuffer::render_state`
+**Found while:** phase 10 tranche B, the first browser run of the new area-light shadow gate
+**What:** **No positional light has ever cast a shadow on the WebGPU backend.** Spot, omni and
+area lights all render their shadow map into a sub-rect of one shared atlas texture, and every
+such pass was scissored down to a zero-area rectangle before it drew anything.
+
+`command_begin_render_pass()` stored only the render area's **size**:
+
+```cpp
+cmd->render_state.render_area_width = p_rect.size.x > 0 ? (uint32_t)p_rect.size.x : fb->width;
+```
+
+`command_render_set_scissor()` then clamped the scissor's **absolute** x against that width:
+
+```cpp
+clamp_w = cmd->render_state.render_area_width;   // an extent...
+if (x >= clamp_w) { w = 0; h = 0; x = 0; y = 0; } // ...compared to an absolute coordinate
+```
+
+A right edge and an extent are the same number only when the origin is zero. A shadow pass for a
+light in any atlas quadrant but the first arrives with, say, `x = 2048, w = 1024` against a
+`render_area_width` of 1024, takes the `x >= clamp_w` branch, and draws with `SetScissorRect(0,
+0, 0, 0)`. The atlas keeps its cleared far value, `textureSampleCompare` reports every fragment
+lit, and the scene renders with no shadow and **no validation error, no warning, no log line** —
+WebGPU considers an empty scissor perfectly legal.
+
+**Why it survived seven phases:** directional lights are unaffected — the PSSM texture is not
+shared, so their pass starts at the origin and the buggy comparison happens to hold. Every gate
+scene up to tranche A either had no shadow-casting light or used only a `DirectionalLight3D`, so
+every browser run in the project's history was consistent with working shadows. The tranche-A
+gates that finally reached native-vs-web comparison (`?scene=lightculling`, `?scene=discardable`)
+both set `shadow_enabled = false` on every light by design.
+
+**Evidence:** `?scene=arealights` on the nothreads gate, before and after the fix, against the
+native `--rendering-method mobile` reference. Before: Chrome renders the directional shadows and
+**not one** of the four positional ones, console clean. After: all four appear and the frame
+matches native. The gate's spot-light and directional-light controls exist precisely to make that
+three-way distinction; they were added during this investigation and are the standing reproducer.
+
+⚠ **`?debug=atlas` is not usable as evidence here, though it was what first pointed at the
+atlas.** The overlay reads uniformly black in Chrome **both before and after** the fix, while
+rendering depth content natively — so it reports something about the debug overlay's own sampling
+of a depth texture on this backend, not about the atlas contents. Not investigated further; the
+beauty render is the measurement. Anyone reaching for that overlay on web should treat a black
+result as no information.
+
+**Disposition:** **fixed in `<this slice>`** — the render area's origin is now stored alongside
+its size, and both clamps became right/bottom edges (`origin + size`) instead of extents. The
+attachment-size clamp that follows is unchanged and still enforces what WebGPU actually
+validates.
+
+⚠ **Standing lesson, third of its kind in this port:** a WebGPU-legal no-op is the most expensive
+failure shape this backend has. RL-037 was loud, RL-046 and this one were silent, and all three
+were invisible to a gate scene that never exercised the path. A gate that cannot fail is not a
+gate — every new gate scene needs a control whose success is independently known.
+
+### Feature queue items 6 and 7 — 2026-08-10 — **verified, no defect**
+**Clearcoat x area light** (`?scene=clearcoat`): the first compilation anywhere in this fork's
+history of `LIGHT_CLEARCOAT_USED` together with an area light, which adds a third static call
+site into `fetch_ltc_filtered_texture_with_form_factor` — the shape behind RL-023's Tint internal
+compiler error. **No recurrence.** Chrome renders a sharp rectangular LTC specular lobe on the
+clearcoat sphere and nothing of the kind on the clearcoat-off control, matching the native Metal
+render; zero shader, Tint or validation errors.
+
+⚠ **The design doc's offline stage cannot work and was not run as written.** It proposed dumping
+the variant with `GODOT_DUMP_SPIRV` from the macOS editor and converting it with
+`bin/tint_convert_cli`. All 32 dumped modules fail identically with `Invalid SPIR-V binary
+version 1.6 for target environment SPIR-V 1.3` — by construction: the Metal shader container
+compiles at SPIR-V 1.6, `RenderingShaderContainerWebGPU` deliberately reports **1.3** because
+Tint's reader targets it, and the two never meet. A native dump can never feed the web Tint path.
+The browser run is the stricter measurement anyway, since it exercises the real
+`spirv_preprocess` → Tint → WGSL chain. Recorded as a dated addendum on the design doc.
+
+**DrawableTexture2D / BlitMaterial** (`?scene=drawableblit`): 13 swatches — five blend modes, four
+`DrawableFormat`s, and one `blit_rect_multi` into four colour attachments — render identically in
+Chrome and natively. No `maxColorAttachments` error and **no `[FLOAT32-BLEND-SKIP]` line**: this
+adapter has `float32-blendable`, so the `RGBAF` swatch blends exactly as `RGBA8` does. The
+delta doc's open question about that feature is answered for this machine only; the graceful-skip
+path stays unexercised.
+
+Two smaller findings, neither ours to fix here:
+- **`RGBA8_SRGB` is visually indistinguishable from `RGBA8`** in the swatch grid, on both
+  backends. The blit converts linear→sRGB on write and the sampler converts back on read, so the
+  round trip is a no-op for a displayed swatch. The design doc predicted "visibly lighter"; that
+  expectation was wrong, not the implementation.
+- **`texture_drawable_blit_rect()` selects the shader variant from the SOURCE count and the
+  pipeline from the TARGET count** (`texture_storage.cpp:1745` vs `:1795`). With mismatched counts
+  a fragment shader declaring N outputs would be paired with a framebuffer of M attachments. This
+  is mainline 4.7.1 code, not a port hunk, and the gate deliberately keeps the counts equal.
