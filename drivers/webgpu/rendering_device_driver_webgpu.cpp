@@ -7099,6 +7099,12 @@ void RenderingDeviceDriverWebGPU::command_begin_render_pass(CommandBufferID p_cm
 	cmd->render_state.current_subpass = 0;
 	cmd->render_state.render_area_width = p_rect.size.x > 0 ? (uint32_t)p_rect.size.x : fb->width;
 	cmd->render_state.render_area_height = p_rect.size.y > 0 ? (uint32_t)p_rect.size.y : fb->height;
+	// The render area's ORIGIN is load-bearing, not just its size: a shadow-atlas pass renders
+	// into one sub-rect of a shared texture and its scissor arrives in absolute attachment
+	// coordinates. Without the origin, command_render_set_scissor() has nothing to compare an
+	// absolute x against but a width, and every off-origin pass is scissored away. See RL-048.
+	cmd->render_state.render_area_x = p_rect.position.x > 0 ? (uint32_t)p_rect.position.x : 0;
+	cmd->render_state.render_area_y = p_rect.position.y > 0 ? (uint32_t)p_rect.position.y : 0;
 
 	ERR_FAIL_COND(rp->subpasses.size() == 0);
 	const WGRenderPass::SubpassInfo &subpass = rp->subpasses[0];
@@ -7533,11 +7539,16 @@ void RenderingDeviceDriverWebGPU::command_render_set_scissor(CommandBufferID p_c
 		uint32_t h = MAX(sr.size.y, 0);
 		// Clamp scissor to the SMALLER of (render area) and (actual framebuffer size).
 		// WebGPU requires scissor to fit within attachment dimensions.
+		//
+		// ⚠ Both limits are RIGHT/BOTTOM EDGES in attachment coordinates, never extents. The
+		// render area is a sub-rect of the attachment, so its edge is origin + size; comparing an
+		// absolute scissor x against the bare width scissored every off-origin pass down to
+		// nothing and silently dropped all positional shadows (RL-048).
 		uint32_t clamp_w = 0;
 		uint32_t clamp_h = 0;
 		if (cmd->render_state.render_area_width > 0) {
-			clamp_w = cmd->render_state.render_area_width;
-			clamp_h = cmd->render_state.render_area_height;
+			clamp_w = cmd->render_state.render_area_x + cmd->render_state.render_area_width;
+			clamp_h = cmd->render_state.render_area_y + cmd->render_state.render_area_height;
 		}
 		if (cmd->render_state.framebuffer) {
 			uint32_t fb_w = cmd->render_state.framebuffer->width;

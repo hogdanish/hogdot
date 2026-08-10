@@ -372,6 +372,11 @@ struct WGCommandBuffer {
 		uint32_t current_subpass = 0;
 		WGPipelineWrapper *current_pipeline = nullptr;
 		WGPUIndexFormat current_index_format = WGPUIndexFormat_Uint32;
+		// Origin and extent of the pass's render area, in attachment coordinates. The origin is
+		// non-zero whenever a pass targets a sub-rect of a shared texture -- every positional
+		// shadow-atlas pass does -- and the scissor clamp needs both halves (RL-048).
+		uint32_t render_area_x = 0;
+		uint32_t render_area_y = 0;
 		uint32_t render_area_width = 0;
 		uint32_t render_area_height = 0;
 
