@@ -1,130 +1,93 @@
 # hogdot
 
-**hogdot is a fork of the Godot Engine that adds a WebGPU rendering backend.**
+**A fork of the [Godot Engine](https://github.com/godotengine/godot) that renders through WebGPU on
+the web.**
 
-It exists for one purpose: to carry [GodotWebGPU](https://github.com/dwalter/godotwebgpu)'s WebGPU
-backend on top of a current mainline Godot release. Everything below this section is Godot's own
-README, unmodified — hogdot is Godot, plus one renderer.
+The WebGPU backend is **[GodotWebGPU](https://github.com/dwalter/godotwebgpu)**, by
+[dwalter](https://github.com/dwalter). That project did the hard work: the driver, the SPIR-V to WGSL
+pipeline, and every workaround the browser needed. hogdot carries it onto a current Godot release and
+keeps it there. Authorship stays in this repository's history, and every ported commit cites the
+GodotWebGPU commit it came from.
 
-## What the fork adds
+## Why it exists
 
-- `drivers/webgpu/` — `RenderingDeviceDriverWebGPU` and `RenderingContextDriverWebGPU`, implemented
-  against `emdawnwebgpu`/Dawn. It fills the gaps between Godot's `RenderingDevice` contract and what
-  WebGPU actually offers: a push-constant ring buffer (WebGPU has no push constants), subpass
-  flattening (no subpasses), and split combined samplers.
-- **SPIR-V → WGSL at runtime.** Godot's shaders compile to SPIR-V as usual; a preprocessing pass
-  rewrites the constructs WGSL cannot express, and vendored [Tint](https://dawn.googlesource.com/dawn)
-  translates the result. `thirdparty/tint/`, `thirdparty/spirv-tools/` and an expanded
-  `thirdparty/spirv-headers/` come along for that.
-- **Web-platform integration** — WebGPU device and adapter setup in `platform/web/`, and the
-  `webgpu=yes` SCons option that turns all of it on.
+hogdot has one consumer: **COMMONGROUNDS**, a multiplayer game that runs in the browser. That game
+wants compute shaders and a modern graphics API, and Godot's web export ships WebGL 2. Every browser
+it targets ships WebGPU today.
+
+This is a long-term fork. Each new Godot release repeats the same rebase-forward exercise.
+
+| | |
+| --- | --- |
+| Base | Godot **4.7.1-stable** |
+| WebGPU source | GodotWebGPU, forked from Godot 4.6.2-stable |
+| Target | **Mobile** renderer, **web** platform |
+| License | MIT, the same as Godot |
+
+## What hogdot adds on top of GodotWebGPU
+
+**Godot 4.7 parity.** GodotWebGPU stopped at 4.6.2. hogdot moves the whole backend to 4.7.1 and makes
+the release's new rendering work function on WebGPU: rectangular area lights (`AreaLight3D`) with
+shadows, per-mesh light selection, the `DrawableTexture2D` and `BlitMaterial` texture-authoring API,
+the rewritten clearcoat and reflection shading, and the discardable-texture rework. The 13 new
+hardware-raytracing driver methods are stubbed, because no browser ships a WebGPU raytracing
+extension.
+
+**HDR display output on the web.** Godot 4.7 added HDR end to end and implemented none of it for web.
+hogdot configures the WebGPU canvas for extended tone mapping, so an HDR panel gets real HDR. SDR
+output is unchanged when the display or the browser cannot do it.
+
+**Threaded web builds.** `threads=yes webgpu=yes` builds and delivers real parallelism, measured at
+**2.86×** across four workers. Rendering stays on the browser main thread, because a `GPUDevice`
+belongs to one JavaScript realm and no browser shares it across workers. Both a threaded and a
+`nothreads` template are shipped.
+
+**Correctness fixes.** A running review ledger tracks 49 findings against the port, from silent
+under-lighting of area-lit meshes to an out-of-bounds write in the shader-stage tables. Real-game use
+found three blockers beyond the reach of any engine test scene: `RDShaderFile`, `stencil_mode` materials
+and direct `RenderingDevice` use were all broken, and all three are fixed. Custom `.glsl` shaders now
+bake to portable SPIR-V at import, which is what makes them work in the browser.
+
+**Less machinery.** The dead precompiled-WGSL path and two other unused mechanisms are deleted, the
+two WGSL code paths are unified, and `glslang` is no longer a build dependency. Device work is pinned
+to the render thread at the four sites that need it.
+
+**A test surface.** `webgpu_tests/` holds a shader corpus that pushes engine SPIR-V through Tint, plus
+gate scenes that exercise one rendering feature each in a browser and compare the result against a
+native render.
 
 ## Building
 
 ```bash
-# Web export template (the reason this fork exists)
-scons platform=web target=template_debug webgpu=yes opengl3=no threads=no num_jobs=4
+# Web export templates — the reason this fork exists
+scons platform=web target=template_release webgpu=yes opengl3=no threads=no num_jobs=4
+scons platform=web target=template_release webgpu=yes opengl3=no threads=yes num_jobs=4
 
 # Native editor — unchanged from mainline, and the cheap regression check
-scons platform=macos target=editor arch=arm64
+scons platform=macos target=editor
 ```
 
-⚠ `webgpu=yes` needs `glslangValidator` on `$PATH` and an Emscripten toolchain. `num_jobs=4` is not
-a suggestion on a 24 GB machine — the Tint and SPIRV-Tools sources will exhaust memory at the default
-job count.
+CAUTION: Pass `num_jobs=4` on web builds. The default job count compiles the Tint and SPIRV-Tools
+sources in parallel and exhausts 24 GB of memory.
 
-## Status and scope
+Web builds need an Emscripten toolchain. SCons gives the compiler no environment of its own, so
+`ccache` and Emscripten's cache need `import_env_vars=HOME,CCACHE_DIR,CCACHE_CONFIGPATH,EM_CACHE`.
 
-The WebGPU backend targets the **Mobile** renderer and the **web** platform. Forward+-only features
-(SSAO, SSIL, SSR, volumetric fog, SDFGI, TAA, FSR2, subsurface scattering) are unavailable there, as
-they are on Mobile generally — that is Godot's own constraint, not a WebGPU one.
+⚠ The two templates differ only by a file-name suffix: `threads=no` adds `.nothreads`. An export
+preset that names the wrong zip fails at run time, not at export time.
 
-This is a long-term fork: every mainline release repeats the rebase-forward exercise, so the port
-surface is derived by `./hogdot/port-surface.sh` rather than written down anywhere that could rot.
+## Limits
+
+- **Mobile renderer only.** Forward+ features — SSAO, SSIL, SSR, volumetric fog, SDFGI, TAA, FSR2,
+  subsurface scattering — are unavailable. That is Godot's own constraint on Mobile, not a WebGPU one.
+- **No performance number exists.** Nothing compares hogdot against native Godot or against the
+  WebGL 2 web export.
+- **Chrome is the tested browser.** Safari and Firefox are largely unmeasured.
 
 ## Upstream and license
 
 hogdot tracks [godotengine/godot](https://github.com/godotengine/godot) and is MIT-licensed, exactly
-as Godot is. The WebGPU backend originates with
-[dwalter/godotwebgpu](https://github.com/dwalter/godotwebgpu); its authorship is preserved in this
-repository's history, and every ported commit cites the upstream commits it carries. Bugs in this
-fork are the fork's own — please do not report them to the Godot project.
+as Godot is. Read [Godot's own README](https://github.com/godotengine/godot#readme) for what the
+engine is and what it does.
 
----
-
-# Godot Engine
-
-<p align="center">
-  <a href="https://godotengine.org">
-    <img src="misc/logo/logo_outlined.svg" width="400" alt="Godot Engine logo">
-  </a>
-</p>
-
-## 2D and 3D cross-platform game engine
-
-**[Godot Engine](https://godotengine.org) is a feature-packed, cross-platform
-game engine to create 2D and 3D games from a unified interface.** It provides a
-comprehensive set of [common tools](https://godotengine.org/features), so that
-users can focus on making games without having to reinvent the wheel. Games can
-be exported with one click to a number of platforms, including the major desktop
-platforms (Linux, macOS, Windows), mobile platforms (Android, iOS), as well as
-Web-based platforms and [consoles](https://godotengine.org/consoles).
-
-## Free, open source and community-driven
-
-Godot is completely free and open source under the very permissive [MIT license](https://godotengine.org/license).
-No strings attached, no royalties, nothing. The users' games are theirs, down
-to the last line of engine code. Godot's development is fully independent and
-community-driven, empowering users to help shape their engine to match their
-expectations. It is supported by the [Godot Foundation](https://godot.foundation/)
-not-for-profit.
-
-Before being open sourced in [February 2014](https://github.com/godotengine/godot/commit/0b806ee0fc9097fa7bda7ac0109191c9c5e0a1ac),
-Godot had been developed by [Juan Linietsky](https://github.com/reduz) and
-[Ariel Manzur](https://github.com/punto-) for several years as an in-house
-engine, used to publish several work-for-hire titles.
-
-![Screenshot of a 3D scene in the Godot Engine editor](https://raw.githubusercontent.com/godotengine/godot-design/master/screenshots/editor_tps_demo_1920x1080.jpg)
-
-## Getting the engine
-
-### Binary downloads
-
-Official binaries for the Godot editor and the export templates can be found
-[on the Godot website](https://godotengine.org/download).
-
-### Compiling from source
-
-[See the official docs](https://docs.godotengine.org/en/latest/engine_details/development/compiling)
-for compilation instructions for every supported platform.
-
-## Community and contributing
-
-Godot is not only an engine but an ever-growing community of users and engine
-developers. The main community channels are listed [on the homepage](https://godotengine.org/community).
-
-The best way to get in touch with the core engine developers is to join the
-[Godot Contributors Chat](https://chat.godotengine.org).
-
-To get started contributing to the project, see the [contributing guide](CONTRIBUTING.md).
-This document also includes guidelines for reporting bugs.
-
-## Documentation and demos
-
-The official documentation is hosted on [Read the Docs](https://docs.godotengine.org).
-It is maintained by the Godot community in its own [GitHub repository](https://github.com/godotengine/godot-docs).
-
-The [class reference](https://docs.godotengine.org/en/latest/classes/)
-is also accessible from the Godot editor.
-
-We also maintain official demos in their own [GitHub repository](https://github.com/godotengine/godot-demo-projects)
-as well as a list of [awesome Godot community resources](https://github.com/godotengine/awesome-godot).
-
-There are also a number of other
-[learning resources](https://docs.godotengine.org/en/latest/community/tutorials.html)
-provided by the community, such as text and video tutorials, demos, etc.
-Consult the [community channels](https://godotengine.org/community)
-for more information.
-
-[![Code Triagers Badge](https://www.codetriage.com/godotengine/godot/badges/users.svg)](https://www.codetriage.com/godotengine/godot)
-[![Translate on Weblate](https://hosted.weblate.org/widgets/godot-engine/-/godot/svg-badge.svg)](https://hosted.weblate.org/engage/godot-engine/?utm_source=widget)
+Bugs in this fork are the fork's own. Do not report them to the Godot project or to GodotWebGPU.
