@@ -40,6 +40,8 @@
 #include "drivers/webgpu/spirv_preprocess.h"
 #include "drivers/webgpu/tint_wrapper.h"
 
+#include "platform/web/godot_js.h"
+
 #include <emscripten/emscripten.h>
 #include <webgpu/webgpu.h>
 
@@ -2660,6 +2662,15 @@ RDD::DataFormat RenderingDeviceDriverWebGPU::_wgpu_to_data_format(WGPUTextureFor
 			return DATA_FORMAT_B8G8R8A8_UNORM;
 		case WGPUTextureFormat_RGBA8Unorm:
 			return DATA_FORMAT_R8G8B8A8_UNORM;
+		case WGPUTextureFormat_RGBA8UnormSrgb:
+			return DATA_FORMAT_R8G8B8A8_SRGB;
+		case WGPUTextureFormat_BGRA8UnormSrgb:
+			return DATA_FORMAT_B8G8R8A8_SRGB;
+		// The HDR swap-chain format. Without it the swap chain's render pass describes its
+		// attachment as DATA_FORMAT_MAX, the RD layer builds a framebuffer with an empty colour
+		// output mask, and every pipeline bound against it is rejected for a mask mismatch.
+		case WGPUTextureFormat_RGBA16Float:
+			return DATA_FORMAT_R16G16B16A16_SFLOAT;
 		default:
 			return DATA_FORMAT_MAX;
 	}
@@ -3230,17 +3241,29 @@ void RenderingDeviceDriverWebGPU::command_buffer_execute_secondary(CommandBuffer
 // SWAP CHAIN
 // =============================================================================
 
+// RGBA16Float is the only swap-chain format here that can carry a colour component above 1.0, so
+// it is what "HDR enabled" means concretely. BGRA8Unorm stays the SDR resting state: 8-bit UNORM
+// cannot express an extended value, which is why chaining `extended` tone mapping unconditionally
+// at surface creation is inert until this flips.
+WGPUTextureFormat RenderingDeviceDriverWebGPU::_swap_chain_pick_format(RenderingContextDriver::SurfaceID p_surface) const {
+	const bool hdr_requested = context_driver->surface_get_hdr_output_enabled(p_surface);
+	if (hdr_requested && godot_js_display_hdr_supported() != 0) {
+		return WGPUTextureFormat_RGBA16Float;
+	}
+	return WGPUTextureFormat_BGRA8Unorm; // Standard format for browser canvas.
+}
+
 RDD::SwapChainID RenderingDeviceDriverWebGPU::swap_chain_create(RenderingContextDriver::SurfaceID p_surface) {
 	WGSwapChain *sc = new WGSwapChain();
 	sc->surface = context_driver->surface_get_handle(p_surface);
 	sc->surface_id = p_surface;
-	sc->format = WGPUTextureFormat_BGRA8Unorm; // Standard format for browser canvas.
+	sc->format = _swap_chain_pick_format(p_surface);
 
 	// Create a render pass descriptor for this swap chain.
 	// Used by swap_chain_get_render_pass() so the RD layer can create compatible pipelines.
 	WGRenderPass *rp = new WGRenderPass();
 	RDD::Attachment att;
-	att.format = DATA_FORMAT_B8G8R8A8_UNORM;
+	att.format = _wgpu_to_data_format(sc->format);
 	att.samples = TEXTURE_SAMPLES_1;
 	att.load_op = ATTACHMENT_LOAD_OP_CLEAR;
 	att.store_op = ATTACHMENT_STORE_OP_STORE;
@@ -3279,6 +3302,19 @@ Error RenderingDeviceDriverWebGPU::swap_chain_resize(CommandQueueID p_cmd_queue,
 		sc->configured = false;
 	}
 
+	// HDR is a swap-chain format flip, not a surface recreate: the colour-management chain is
+	// creation-time only and is always requested (see RenderingContextDriverWebGPU::surface_create),
+	// so "HDR on" means an RGBA16Float swap chain that can carry values above 1.0 and "HDR off"
+	// means the 8-bit UNORM one that structurally cannot. The render pass this swap chain hands the
+	// RD layer has to move with it or every pipeline built against it is format-incompatible.
+	const WGPUTextureFormat wanted_format = _swap_chain_pick_format(sc->surface_id);
+	if (wanted_format != sc->format) {
+		sc->format = wanted_format;
+		if (sc->render_pass != nullptr && !sc->render_pass->attachments.is_empty()) {
+			sc->render_pass->attachments[0].format = _wgpu_to_data_format(wanted_format);
+		}
+	}
+
 	WGPUSurfaceConfiguration config = {};
 	config.device = device;
 	config.format = sc->format;
@@ -3287,6 +3323,29 @@ Error RenderingDeviceDriverWebGPU::swap_chain_resize(CommandQueueID p_cmd_queue,
 	config.presentMode = WGPUPresentMode_Fifo; // Browser always vsyncs via requestAnimationFrame.
 	config.width = width;
 	config.height = height;
+
+	// Extended-range tone mapping is a CONFIGURATION-time property of the canvas, not a
+	// creation-time one: `wgpuInstanceCreateSurface` in emdawnwebgpu accepts exactly one chained
+	// struct -- the canvas selector -- and asserts on anything else, while `wgpuSurfaceConfigure`
+	// is what forwards WGPUSurfaceColorManagement into `GPUCanvasConfiguration.toneMapping`. That
+	// matches the JS API, where `toneMapping` has always lived on configure(). It also means HDR
+	// needs no surface recreation at all: format and tone mapping flip together, here.
+	//
+	// sRGB primaries, not Display P3: Godot renders Rec.709, and a P3 canvas would reinterpret
+	// those primaries as P3 and oversaturate everything on screen. Correct P3 output needs a gamut
+	// conversion in the final blit and buys nothing until Godot authors wide-gamut content.
+	//
+	// ⚠ The chain is left off entirely in SDR so the canvas keeps its default `standard` tone
+	// mapping, which is what every frame before this feature existed was drawn with.
+	WGPUSurfaceColorManagement color_management = {};
+	if (sc->format == WGPUTextureFormat_RGBA16Float) {
+		color_management.chain.sType = WGPUSType_SurfaceColorManagement;
+		color_management.chain.next = nullptr; // emdawnwebgpu asserts this link is the last one.
+		color_management.colorSpace = WGPUPredefinedColorSpace_SRGB;
+		color_management.toneMappingMode = WGPUToneMappingMode_Extended;
+		config.nextInChain = (WGPUChainedStruct *)&color_management;
+	}
+
 	wgpuSurfaceConfigure(sc->surface, &config);
 
 	// Uncaptured error listener + monkey patches are installed in initialize().
@@ -3410,13 +3469,20 @@ RDD::DataFormat RenderingDeviceDriverWebGPU::swap_chain_get_format(SwapChainID p
 }
 
 RDD::ColorSpace RenderingDeviceDriverWebGPU::swap_chain_get_color_space(SwapChainID p_swap_chain) {
-	// WebGPU canvases are always SDR sRGB. `GPUCanvasConfiguration` has no
-	// colour-space selection beyond the (sRGB) default in the shipped spec.
+	// Always nonlinear sRGB, HDR or not. There is no linear canvas colour space on the web --
+	// `PredefinedColorSpace` is `srgb` or `display-p3` and nothing else -- and the engine's LINEAR
+	// branch assumes an OS compositor contract the browser hides. Staying on the nonlinear branch
+	// costs nothing: `linear_to_srgb` in blit.glsl encodes without a clamp and extends past 1.0
+	// through its `pow` branch, which is exactly the extended-sRGB encoding the canvas decodes.
 	return COLOR_SPACE_REC709_NONLINEAR_SRGB;
 }
 
+// Two independent signals, both required. The spec says `getConfiguration()` echoes the dictionary
+// that was requested, while Chrome and WebKit document normalizing it to what was actually
+// granted; on a spec-conformant-but-unnormalising browser the tone-mapping check alone would
+// report HDR on an SDR panel. Pairing it with the media query keeps that from happening.
 bool RenderingDeviceDriverWebGPU::swap_chain_get_hdr_output_supported(SwapChainID p_swap_chain) {
-	return false;
+	return godot_js_display_hdr_supported() != 0;
 }
 
 void RenderingDeviceDriverWebGPU::swap_chain_free(SwapChainID p_swap_chain) {

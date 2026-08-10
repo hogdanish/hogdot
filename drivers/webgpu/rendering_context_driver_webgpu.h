@@ -50,6 +50,15 @@ class RenderingContextDriverWebGPU : public RenderingContextDriver {
 		uint32_t height = 0;
 		DisplayServerEnums::VSyncMode vsync_mode = DisplayServerEnums::VSYNC_ENABLED;
 		bool needs_resize = false;
+
+		// HDR output. `hdr_output_enabled` is what the project asked for; whether the browser
+		// granted it is a separate question the swap chain answers. The luminance numbers are
+		// notional on the web -- no API reports a panel's real headroom -- and only their ratio
+		// ever reaches a shader, as `surface_get_hdr_output_max_value()`.
+		bool hdr_output_enabled = false;
+		float hdr_reference_luminance = 100.0f;
+		float hdr_max_luminance = 200.0f;
+		float hdr_linear_luminance_scale = 100.0f;
 	};
 
 	HashMap<SurfaceID, Surface> surfaces;

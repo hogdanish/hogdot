@@ -175,46 +175,73 @@ DisplayServerEnums::VSyncMode RenderingContextDriverWebGPU::surface_get_vsync_mo
 
 // --- HDR output ---
 //
-// WebGPU exposes no canvas HDR configuration: `GPUCanvasConfiguration` has no
-// luminance or colour-volume fields in the shipped spec, and Chrome's
-// `predictedDynamicRange` is experimental and not something a surface can request.
-// So the surface is permanently SDR: setters are accepted and discarded, getters
-// report fixed SDR values rather than per-surface state. Reference numbers match
-// `RenderingContextDriverVulkan::Surface`'s defaults (200 nits BT.2408 reference,
-// 1000 nits max, 100.0 linear scale) so cross-backend comparisons see the same
-// constants; `surface_get_hdr_output_max_value` returns 1.0, the SDR max linear
-// value and the floor Vulkan's own `max_luminance / reference_luminance` clamps to.
+// The swap chain configures the canvas with `WGPUSurfaceColorManagement { SRGB, Extended }` when
+// HDR is on (see RenderingDeviceDriverWebGPU::swap_chain_resize), so a value above 1.0 encoded by
+// the final blit survives to the compositor instead of being clamped. The engine colour path does not change: web always reports
+// COLOR_SPACE_REC709_NONLINEAR_SRGB, the tonemapper still writes linear into the RGBA16F render
+// target, and `linear_to_srgb` in blit.glsl encodes without a clamp -- which is exactly the
+// extended-sRGB encoding an `extended` canvas decodes. Enabling HDR only widens the range that
+// survives, by way of `surface_get_hdr_output_max_value()` and the swap chain's format.
+//
+// ⚠ The luminance numbers below are notional. No web API reports a display's real HDR headroom:
+// there is no nits query anywhere in the WebGPU or CSS surface, and macOS EDR headroom is dynamic
+// -- at full SDR brightness a panel has almost none, at half brightness it has a lot. Only the
+// ratio max/reference reaches a shader. The defaults are deliberately conservative (2.0 rather
+// than the 4.0 a 400-nit panel assumption would give): over-assuming headroom puts tonemapped
+// detail where the compositor clamps it, while under-assuming only leaves brightness unused.
+// A project that wants better can ship a calibration screen against the stock
+// `window_set_hdr_output_max_luminance()` API, which lands here.
 
 void RenderingContextDriverWebGPU::surface_set_hdr_output_enabled(SurfaceID p_surface, bool p_enabled) {
+	ERR_FAIL_COND(!surfaces.has(p_surface));
+	surfaces[p_surface].hdr_output_enabled = p_enabled;
 }
 
 bool RenderingContextDriverWebGPU::surface_get_hdr_output_enabled(SurfaceID p_surface) const {
-	return false;
+	ERR_FAIL_COND_V(!surfaces.has(p_surface), false);
+	return surfaces[p_surface].hdr_output_enabled;
 }
 
 void RenderingContextDriverWebGPU::surface_set_hdr_output_reference_luminance(SurfaceID p_surface, float p_reference_luminance) {
+	ERR_FAIL_COND(!surfaces.has(p_surface));
+	surfaces[p_surface].hdr_reference_luminance = MAX(p_reference_luminance, 1.0f);
 }
 
 float RenderingContextDriverWebGPU::surface_get_hdr_output_reference_luminance(SurfaceID p_surface) const {
-	return 200.0f;
+	ERR_FAIL_COND_V(!surfaces.has(p_surface), 100.0f);
+	return surfaces[p_surface].hdr_reference_luminance;
 }
 
 void RenderingContextDriverWebGPU::surface_set_hdr_output_max_luminance(SurfaceID p_surface, float p_max_luminance) {
+	ERR_FAIL_COND(!surfaces.has(p_surface));
+	surfaces[p_surface].hdr_max_luminance = MAX(p_max_luminance, 1.0f);
 }
 
 float RenderingContextDriverWebGPU::surface_get_hdr_output_max_luminance(SurfaceID p_surface) const {
-	return 1000.0f;
+	ERR_FAIL_COND_V(!surfaces.has(p_surface), 200.0f);
+	return surfaces[p_surface].hdr_max_luminance;
 }
 
 void RenderingContextDriverWebGPU::surface_set_hdr_output_linear_luminance_scale(SurfaceID p_surface, float p_linear_luminance_scale) {
+	ERR_FAIL_COND(!surfaces.has(p_surface));
+	surfaces[p_surface].hdr_linear_luminance_scale = MAX(p_linear_luminance_scale, 1.0f);
 }
 
 float RenderingContextDriverWebGPU::surface_get_hdr_output_linear_luminance_scale(SurfaceID p_surface) const {
-	return 100.0f;
+	ERR_FAIL_COND_V(!surfaces.has(p_surface), 100.0f);
+	return surfaces[p_surface].hdr_linear_luminance_scale;
 }
 
+// 1.0 whenever HDR is off, which is the SDR maximum linear value and the floor the native
+// backends clamp this ratio to as well -- so an SDR web frame stays bit-identical to one from
+// before any of this existed.
 float RenderingContextDriverWebGPU::surface_get_hdr_output_max_value(SurfaceID p_surface) const {
-	return 1.0f;
+	ERR_FAIL_COND_V(!surfaces.has(p_surface), 1.0f);
+	const Surface &surface = surfaces[p_surface];
+	if (!surface.hdr_output_enabled) {
+		return 1.0f;
+	}
+	return MAX(surface.hdr_max_luminance / surface.hdr_reference_luminance, 1.0f);
 }
 
 uint32_t RenderingContextDriverWebGPU::surface_get_width(SurfaceID p_surface) const {

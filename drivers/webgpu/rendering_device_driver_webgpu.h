@@ -389,6 +389,11 @@ public:
 	// -----------------------------------------------------------------------
 
 	/// Create a swap chain for a browser canvas surface.
+	// Chooses the swap-chain texture format for a surface: RGBA16Float when HDR was both requested
+	// and granted by the browser, BGRA8Unorm otherwise. Called at creation and again on every
+	// resize, so an HDR toggle takes effect without recreating the surface.
+	WGPUTextureFormat _swap_chain_pick_format(RenderingContextDriver::SurfaceID p_surface) const;
+
 	virtual SwapChainID swap_chain_create(RenderingContextDriver::SurfaceID p_surface) override final;
 	/// Resize the swap chain. Configures the WGPUSurface with the new dimensions.
 	virtual Error swap_chain_resize(CommandQueueID p_cmd_queue, SwapChainID p_swap_chain, uint32_t p_desired_framebuffer_count) override final;

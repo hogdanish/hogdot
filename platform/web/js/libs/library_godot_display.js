@@ -477,6 +477,80 @@ const GodotDisplay = {
 		return GodotDisplayScreen.getPixelRatio();
 	},
 
+	/*
+	 * Whether an extended-range (HDR) canvas is worth asking for at all: this browser can express
+	 * the request, and this display claims a high dynamic range.
+	 *
+	 * Kept separate from ..._granted below on purpose. Tone mapping is a property of
+	 * GPUCanvasConfiguration, so `getConfiguration()` cannot report `extended` until after the
+	 * canvas has already been configured that way -- asking it first would deadlock the decision
+	 * against itself. This is the question that has an answer beforehand.
+	 */
+	godot_js_display_hdr_supported__deps: ['$GodotConfig'],
+	godot_js_display_hdr_supported__proxy: 'sync',
+	godot_js_display_hdr_supported__sig: 'i',
+	godot_js_display_hdr_supported: function () {
+		try {
+			if (typeof navigator === 'undefined' || !navigator.gpu) {
+				return 0;
+			}
+			if (!window.matchMedia || !window.matchMedia('(dynamic-range: high)').matches) {
+				return 0;
+			}
+			const canvas = GodotConfig.canvas;
+			if (!canvas || typeof canvas.getContext !== 'function') {
+				return 0;
+			}
+			const ctx = canvas.getContext('webgpu');
+			return (ctx && typeof ctx.getConfiguration === 'function') ? 1 : 0;
+		} catch (e) {
+			return 0;
+		}
+	},
+
+	/*
+	 * Whether the browser has actually granted an extended-range (HDR) canvas.
+	 *
+	 * Two independent signals, both required. Per spec `getConfiguration()` echoes the dictionary
+	 * that was requested, while Chrome and WebKit document normalizing it to what was granted, so
+	 * the tone-mapping mode alone would report HDR on an SDR panel in a spec-conformant browser
+	 * that does not normalize. The media query is what rules that out. Neither signal alone is
+	 * trustworthy; together they are.
+	 *
+	 * Returns 0 on anything unexpected -- no WebGPU, no context, a browser without
+	 * getConfiguration -- so the caller degrades to the SDR path it has always taken.
+	 */
+	godot_js_display_hdr_granted__deps: ['$GodotConfig'],
+	godot_js_display_hdr_granted__proxy: 'sync',
+	godot_js_display_hdr_granted__sig: 'i',
+	godot_js_display_hdr_granted: function () {
+		try {
+			if (typeof navigator === 'undefined' || !navigator.gpu) {
+				return 0;
+			}
+			if (!window.matchMedia || !window.matchMedia('(dynamic-range: high)').matches) {
+				return 0;
+			}
+			const canvas = GodotConfig.canvas;
+			if (!canvas || typeof canvas.getContext !== 'function') {
+				return 0;
+			}
+			// Returns the same context object the engine's surface already configured; it does not
+			// create a second one.
+			const ctx = canvas.getContext('webgpu');
+			if (!ctx || typeof ctx.getConfiguration !== 'function') {
+				return 0;
+			}
+			const config = ctx.getConfiguration();
+			if (!config || !config.toneMapping || config.toneMapping.mode !== 'extended') {
+				return 0;
+			}
+			return 1;
+		} catch (e) {
+			return 0;
+		}
+	},
+
 	godot_js_display_fullscreen_request__proxy: 'sync',
 	godot_js_display_fullscreen_request__sig: 'i',
 	godot_js_display_fullscreen_request: function () {

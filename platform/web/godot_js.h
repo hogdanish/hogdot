@@ -91,6 +91,12 @@ extern void godot_js_tts_stop();
 // Display
 extern int godot_js_display_screen_dpi_get();
 extern double godot_js_display_pixel_ratio_get();
+// 1 when this browser can request an extended-range canvas AND the display reports a high dynamic
+// range. Answerable before the canvas is configured, which is why it is separate from _granted.
+extern int godot_js_display_hdr_supported();
+// 1 when the canvas is CURRENTLY configured with extended tone mapping AND the display reports a
+// high dynamic range; 0 otherwise, including on any error. See library_godot_display.js.
+extern int godot_js_display_hdr_granted();
 extern void godot_js_display_alert(const char *p_text);
 extern int godot_js_display_touchscreen_is_available();
 extern int godot_js_display_is_swap_ok_cancel();

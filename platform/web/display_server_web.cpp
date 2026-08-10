@@ -1500,6 +1500,107 @@ DisplayServerEnums::WindowMode DisplayServerWeb::window_get_mode(DisplayServerEn
 	return window_mode;
 }
 
+// --- HDR output ---
+//
+// The canvas is always created asking for an extended-range surface (see
+// RenderingContextDriverWebGPU::surface_create), so "supported" here is not a static capability
+// but a live question about what this browser and this display actually granted -- and the answer
+// can change when the window moves to another screen, with no event to tell us. Hence a probe on
+// every query rather than a cached flag.
+//
+// Requesting HDR only sets the surface's flag; the swap chain picks up the RGBA16Float format on
+// its next configure, which the forced resize below provokes. Nothing is recreated.
+
+bool DisplayServerWeb::window_is_hdr_output_supported(DisplayServerEnums::WindowID p_window) const {
+	return godot_js_display_hdr_supported() != 0;
+}
+
+void DisplayServerWeb::window_request_hdr_output(const bool p_enable, DisplayServerEnums::WindowID p_window) {
+	hdr_output_requested = p_enable;
+#ifdef RD_ENABLED
+	if (rendering_context != nullptr) {
+		rendering_context->window_set_hdr_output_enabled(p_window, p_enable && window_is_hdr_output_supported(p_window));
+		// Force the swap chain through a reconfigure so the format flip takes effect. Passing the
+		// current size back would be a no-op -- the surface only marks itself dirty on a change.
+		RenderingContextDriver::SurfaceID surface = rendering_context->surface_get_from_window(p_window);
+		if (surface) {
+			rendering_context->surface_set_needs_resize(surface, true);
+		}
+	}
+#endif
+}
+
+bool DisplayServerWeb::window_is_hdr_output_requested(DisplayServerEnums::WindowID p_window) const {
+	return hdr_output_requested;
+}
+
+// Enabled means the canvas is right now configured with extended tone mapping -- not merely that
+// the request was accepted. The two can disagree for one frame after a request, before the swap
+// chain reconfigures, and they disagree permanently if a browser silently declines.
+bool DisplayServerWeb::window_is_hdr_output_enabled(DisplayServerEnums::WindowID p_window) const {
+#ifdef RD_ENABLED
+	if (rendering_context != nullptr) {
+		return rendering_context->window_get_hdr_output_enabled(p_window) && godot_js_display_hdr_granted() != 0;
+	}
+#endif
+	return false;
+}
+
+void DisplayServerWeb::window_set_hdr_output_reference_luminance(const float p_reference_luminance, DisplayServerEnums::WindowID p_window) {
+#ifdef RD_ENABLED
+	if (rendering_context != nullptr) {
+		rendering_context->window_set_hdr_output_reference_luminance(p_window, p_reference_luminance);
+	}
+#endif
+}
+
+float DisplayServerWeb::window_get_hdr_output_reference_luminance(DisplayServerEnums::WindowID p_window) const {
+#ifdef RD_ENABLED
+	if (rendering_context != nullptr) {
+		return rendering_context->window_get_hdr_output_reference_luminance(p_window);
+	}
+#endif
+	return -1.0f;
+}
+
+// No web API reports what the compositor is really doing with the canvas, so the "current" values
+// are the requested ones. Reporting anything else would be an invention.
+float DisplayServerWeb::window_get_hdr_output_current_reference_luminance(DisplayServerEnums::WindowID p_window) const {
+	return window_get_hdr_output_reference_luminance(p_window);
+}
+
+void DisplayServerWeb::window_set_hdr_output_max_luminance(const float p_max_luminance, DisplayServerEnums::WindowID p_window) {
+#ifdef RD_ENABLED
+	if (rendering_context != nullptr) {
+		rendering_context->window_set_hdr_output_max_luminance(p_window, p_max_luminance);
+	}
+#endif
+}
+
+float DisplayServerWeb::window_get_hdr_output_max_luminance(DisplayServerEnums::WindowID p_window) const {
+#ifdef RD_ENABLED
+	if (rendering_context != nullptr) {
+		return rendering_context->window_get_hdr_output_max_luminance(p_window);
+	}
+#endif
+	return -1.0f;
+}
+
+float DisplayServerWeb::window_get_hdr_output_current_max_luminance(DisplayServerEnums::WindowID p_window) const {
+	return window_get_hdr_output_max_luminance(p_window);
+}
+
+// The one HDR number that reaches a shader, and the one Window.get_output_max_linear_value()
+// returns to script. 1.0 whenever HDR is off or was refused.
+float DisplayServerWeb::window_get_output_max_linear_value(DisplayServerEnums::WindowID p_window) const {
+#ifdef RD_ENABLED
+	if (rendering_context != nullptr) {
+		return rendering_context->window_get_output_max_linear_value(p_window);
+	}
+#endif
+	return 1.0f;
+}
+
 bool DisplayServerWeb::window_is_maximize_allowed(DisplayServerEnums::WindowID p_window) const {
 	return false;
 }
