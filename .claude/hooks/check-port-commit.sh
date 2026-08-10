@@ -10,6 +10,9 @@
 #   2. a Webgpu-Source: SHA that does not resolve, or resolves OUTSIDE the fork range
 #      — i.e. fabricated provenance, which is worse than none because it looks right
 #
+# `Webgpu-Port: feature-<name>` is exempt from the SHA requirement: that trailer marks
+# hogdot-original work, which has no fork commit to cite.
+#
 # Deliberately narrow to stay noise-free: it only inspects commits whose message is
 # visible on the command line (`-m`). A `-F file` or editor commit is skipped rather
 # than guessed at. Exit 2 blocks the call and returns stderr to Claude.
@@ -61,6 +64,14 @@ here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 range="${HOGDOT_WEBGPU_FORK_POINT}..${HOGDOT_WEBGPU_REF}"
 git -C "$here" rev-parse --verify --quiet "${HOGDOT_WEBGPU_REF}^{commit}" >/dev/null || exit 0
+
+# hogdot-original feature work (phase 10 onward) has no fork source to cite: the rule
+# gives it `Webgpu-Port: feature-<name>` plus a `Design:` line instead, so the next
+# rebase-forward reads "ours, additive" at a glance. Requiring a SHA there would force
+# a fabricated one, which is the exact failure this hook exists to prevent.
+if printf '%s' "$command" | grep -qE 'Webgpu-Port:[^\\"'"'"']*feature-'; then
+	exit 0
+fi
 
 shas="$(printf '%s' "$command" |
 	grep -oE 'Webgpu-Source:[^\\"'"'"']*' |
