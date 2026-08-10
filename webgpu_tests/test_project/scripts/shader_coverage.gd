@@ -12,6 +12,14 @@ extends Node3D
 const FRAMES_TO_RENDER := 10
 const REPORT_PATH := "user://shader_coverage_report.json"
 
+## Gate scenes reachable without a second export preset: `?scene=<key>` in the
+## URL on web, `-- --scene=<key>` natively. The full coverage scene stays the
+## default when no key is given.
+const GATE_SCENES := {
+	"discardable": "res://scenes/discardable_msaa_gate.tscn",
+	"lightculling": "res://scenes/light_culling_stress.tscn",
+}
+
 var frame_count := 0
 var errors: Array[String] = []
 var shader_count := 0
@@ -29,12 +37,39 @@ func _wants_hold() -> bool:
 		# ⚠ Ask for a number, not a boolean. `JavaScriptBridge.eval` hands a JS `true`
 		# back as a Variant of type FLOAT, so a `typeof(res) == TYPE_BOOL` guard
 		# silently rejects every hold request.
-		var res: Variant = JavaScriptBridge.eval("location.search.indexOf('hold') >= 0 ? 1 : 0", true)
+		var res: Variant = JavaScriptBridge.eval(
+			"location.search.indexOf('hold') >= 0 ? 1 : 0", true
+		)
 		return res != null and bool(res)
 	return false
 
 
+## Which gate scene the run asked for, or "" for the full coverage build.
+## Same dual-channel shape as _wants_hold().
+func _wanted_scene() -> String:
+	for arg in OS.get_cmdline_user_args():
+		if arg.begins_with("--scene="):
+			return arg.trim_prefix("--scene=")
+	if OS.has_feature("web"):
+		var res: Variant = JavaScriptBridge.eval(
+			"new URLSearchParams(location.search).get('scene') || ''", true
+		)
+		if res != null and String(res) != "":
+			return String(res)
+	return ""
+
+
 func _ready() -> void:
+	var wanted := _wanted_scene()
+	if wanted != "":
+		if GATE_SCENES.has(wanted):
+			print("[ShaderCoverage] Deferring to gate scene '%s'." % wanted)
+			get_tree().change_scene_to_file.call_deferred(GATE_SCENES[wanted])
+		else:
+			push_error("[ShaderCoverage] Unknown gate scene '%s'." % wanted)
+			get_tree().quit(1)
+		return
+
 	_hold = _wants_hold()
 	print("[ShaderCoverage] Starting comprehensive shader coverage test...")
 	print("[ShaderCoverage] Building scene with all rendering features...")
@@ -71,6 +106,7 @@ func _process(_delta: float) -> void:
 # ═══════════════════════════════════════════════════════════════════════════════
 # ENVIRONMENT — Sky, Tonemap, SSAO, SSIL, SSR, Glow, Fog, Volumetric Fog
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 func _setup_environment() -> void:
 	var env := Environment.new()
@@ -184,21 +220,26 @@ func _setup_environment() -> void:
 	cam_attr.auto_exposure_max_sensitivity = 800.0
 	world_env.camera_attributes = cam_attr
 
-	print("  [OK] Environment: sky, tonemap, SSAO, SSIL, SSR, glow, fog, volumetric fog, SDFGI, DOF")
+	print(
+		"  [OK] Environment: sky, tonemap, SSAO, SSIL, SSR, glow, fog, volumetric fog, SDFGI, DOF"
+	)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # CAMERA — with TAA and FSR2
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 func _setup_camera() -> void:
 	var camera := Camera3D.new()
 	camera.position = Vector3(0, 3, 8)
-	camera.look_at(Vector3(0, 1, 0))
 	camera.far = 200.0
 	camera.near = 0.1
 	camera.current = true
 	add_child(camera)
+	# ⚠ look_at only works inside the tree; before add_child it errors with
+	# "Node not inside tree" and leaves the camera on its default -Z heading.
+	camera.look_at(Vector3(0, 1, 0))
 
 	# Enable TAA via viewport (exercises taa_resolve.glsl, motion_vectors.glsl)
 	get_viewport().use_taa = true
@@ -212,6 +253,7 @@ func _setup_camera() -> void:
 # ═══════════════════════════════════════════════════════════════════════════════
 # LIGHTS — Directional, Omni, Spot, with shadows and projectors
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 func _setup_lights() -> void:
 	# Directional light with shadows (exercises shadow mapping, clustered lighting)
@@ -251,9 +293,7 @@ func _setup_lights() -> void:
 		var extra_omni := OmniLight3D.new()
 		extra_omni.position = Vector3(sin(i * TAU / 4.0) * 5, 2, cos(i * TAU / 4.0) * 5)
 		extra_omni.light_color = Color(
-			0.5 + 0.5 * sin(i * 1.5),
-			0.5 + 0.5 * sin(i * 1.5 + 2.0),
-			0.5 + 0.5 * sin(i * 1.5 + 4.0)
+			0.5 + 0.5 * sin(i * 1.5), 0.5 + 0.5 * sin(i * 1.5 + 2.0), 0.5 + 0.5 * sin(i * 1.5 + 4.0)
 		)
 		extra_omni.light_energy = 3.0
 		extra_omni.omni_range = 6.0
@@ -266,6 +306,7 @@ func _setup_lights() -> void:
 # ═══════════════════════════════════════════════════════════════════════════════
 # GEOMETRY — Meshes with every material feature combination
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 func _setup_geometry_with_materials() -> void:
 	# Ground plane (basic PBR)
@@ -451,14 +492,19 @@ func _setup_geometry_with_materials() -> void:
 	grow_mat.grow = 0.02
 	grow_mesh.material_override = grow_mat
 
-	print("  [OK] Geometry: 20 material variants (normal, emission, metallic, clearcoat, anisotropy,")
-	print("       SSS, refraction, heightmap, detail, rim, transmission, alpha_scissor, alpha_hash,")
+	print(
+		"  [OK] Geometry: 20 material variants (normal, emission, metallic, clearcoat, anisotropy,"
+	)
+	print(
+		"       SSS, refraction, heightmap, detail, rim, transmission, alpha_scissor, alpha_hash,"
+	)
 	print("       depth_prepass, unshaded, uv2, billboard, proximity_fade, distance_fade, grow)")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PARTICLES — GPU particles with trails, collision, attractors
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 func _setup_particles() -> void:
 	# GPU Particles (exercises particles.glsl, particles_copy.glsl)
@@ -518,12 +564,15 @@ func _setup_particles() -> void:
 	attractor.strength = 2.0
 	add_child(attractor)
 
-	print("  [OK] Particles: GPU particles with trails, turbulence, collision (sphere+box), attractor")
+	print(
+		"  [OK] Particles: GPU particles with trails, turbulence, collision (sphere+box), attractor"
+	)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # GLOBAL ILLUMINATION — VoxelGI
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 func _setup_gi() -> void:
 	# VoxelGI (exercises voxel_gi.glsl, voxel_gi_sdf.glsl)
@@ -538,6 +587,7 @@ func _setup_gi() -> void:
 # ═══════════════════════════════════════════════════════════════════════════════
 # FOG VOLUMES — Localized volumetric fog
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 func _setup_fog() -> void:
 	# Fog volume with custom density (exercises fog volume shader)
@@ -571,6 +621,7 @@ func _setup_fog() -> void:
 # DECALS — Projected texture blending
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 func _setup_decals() -> void:
 	# Decal with albedo + normal + ORM (exercises decal rendering in forward pass)
 	var decal := Decal.new()
@@ -597,6 +648,7 @@ func _setup_decals() -> void:
 # ═══════════════════════════════════════════════════════════════════════════════
 # REFLECTION PROBES — Cubemap reflections
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 func _setup_reflection_probes() -> void:
 	# Real-time reflection probe (exercises cubemap rendering pipeline)
@@ -626,6 +678,7 @@ func _setup_reflection_probes() -> void:
 # ═══════════════════════════════════════════════════════════════════════════════
 # CANVAS 2D — Exercises canvas.glsl shader
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 func _setup_canvas_2d() -> void:
 	# CanvasLayer with various 2D elements
@@ -671,6 +724,7 @@ func _setup_canvas_2d() -> void:
 # SKELETON — Skinned mesh (exercises skeleton.glsl, BONES_USED)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 func _setup_skeleton_mesh() -> void:
 	# Create a simple skeleton with 2 bones
 	var skeleton := Skeleton3D.new()
@@ -710,6 +764,7 @@ func _setup_skeleton_mesh() -> void:
 # MULTIMESH — Instanced rendering (exercises multimesh/instanced draw path)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 func _setup_multimesh() -> void:
 	var mm := MultiMesh.new()
 	mm.transform_format = MultiMesh.TRANSFORM_3D
@@ -727,11 +782,7 @@ func _setup_multimesh() -> void:
 		var z := (i / 8) * 0.5 - 2.0
 		var t := Transform3D(Basis.IDENTITY, Vector3(x + 7, 0.15, z))
 		mm.set_instance_transform(i, t)
-		mm.set_instance_color(i, Color(
-			float(i % 8) / 8.0,
-			float(i / 8) / 8.0,
-			0.5, 1.0
-		))
+		mm.set_instance_color(i, Color(float(i % 8) / 8.0, float(i / 8) / 8.0, 0.5, 1.0))
 		mm.set_instance_custom_data(i, Color(randf(), randf(), randf(), randf()))
 
 	var mm_inst := MultiMeshInstance3D.new()
@@ -744,6 +795,7 @@ func _setup_multimesh() -> void:
 # ═══════════════════════════════════════════════════════════════════════════════
 # UTILITY
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 func _create_mesh_instance(mesh: Mesh, pos: Vector3) -> MeshInstance3D:
 	var inst := MeshInstance3D.new()
@@ -767,6 +819,7 @@ func _generate_noise_texture() -> NoiseTexture2D:
 # ═══════════════════════════════════════════════════════════════════════════════
 # VARYING STRESS — custom spatial shader with 4 user varyings (gates RL-029)
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 ## Puts a custom spatial shader carrying four user varyings on screen.
 ##
@@ -802,6 +855,7 @@ func _setup_varying_stress() -> void:
 # ═══════════════════════════════════════════════════════════════════════════════
 # USER-AUTHORED PATHS — RDShaderFile, stencil_mode, SCREEN_TEXTURE
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 ## The three paths CommonGrounds turned out to be the first consumer of. Everything
 ## above this line is one of the engine's *own* shaders, which is why RL-036, RL-037 and
