@@ -1,0 +1,41 @@
+# Serves the exported gate projects for browser runs.
+#
+# ⚠ The threaded export needs cross-origin isolation or it will not boot: no COOP/COEP
+# means no SharedArrayBuffer, and a `threads=yes` build cannot start its pthread pool
+# without one. Check `crossOriginIsolated === true` in the console before blaming
+# anything else. The nothreads export does not need the headers and is unharmed by them,
+# so both sites set them and there is one thing to remember instead of two.
+#
+# ⚠ Run it from the repository root. Caddy resolves `root` against its own working
+# directory, not against the config file's location, so starting it anywhere else
+# serves 404s with correct headers — which reads exactly like a broken export.
+#
+#   caddy run --config webgpu_tests/Caddyfile      # from the repo root
+#     http://127.0.0.1:8779   nothreads gate  (webgpu_tests/test_project/export)
+#     http://127.0.0.1:8780   threaded  gate  (webgpu_tests/test_project/export-threads)
+#
+# Append ?hold to keep the scene rendering after the report; without it the run quits
+# after 10 frames. Read errors from the bounded run, never the held one.
+
+{
+	auto_https off
+	admin off
+}
+
+(godot_web) {
+	header {
+		Cross-Origin-Opener-Policy "same-origin"
+		Cross-Origin-Embedder-Policy "require-corp"
+	}
+	file_server
+}
+
+http://127.0.0.1:8779 {
+	root * webgpu_tests/test_project/export
+	import godot_web
+}
+
+http://127.0.0.1:8780 {
+	root * webgpu_tests/test_project/export-threads
+	import godot_web
+}

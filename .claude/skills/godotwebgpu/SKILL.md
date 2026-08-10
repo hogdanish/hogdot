@@ -84,8 +84,9 @@ Selection is by project setting — `rendering/renderer/rendering_method.web` (`
 `gl_compatibility`) and `rendering/rendering_device/driver.web` = `webgpu`.
 
 ⚠ **Emscripten**: `--use-port=emdawnwebgpu` requires **≥4.0.10** and replaced `-sUSE_WEBGPU=1`, which was
-removed in 5.0. The fork shipped and benchmarked on **5.0.0**; this machine has **6.0.5**. Build config
-details live in the `build-export` skill, not here.
+removed in 5.0. The fork shipped and benchmarked on **5.0.0**; this machine is on the **6.0.x** line and
+it moves — ask `emcc --version`, never a doc (RL-039 is what a stale version assertion cost). Build
+config details live in the `build-export` skill, not here.
 
 ## Reference material
 

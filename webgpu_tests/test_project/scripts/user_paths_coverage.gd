@@ -155,6 +155,7 @@ func _run_user_compute() -> void:
 		return
 
 	_dispatch_user_compute(rd, shader)
+	rd.free_rid(shader)
 
 
 ## ⚠ Deliberately no readback. `buffer_get_data()` is a synchronous GPU readback and
@@ -212,6 +213,16 @@ func _dispatch_user_compute(p_rd: RenderingDevice, p_shader: RID) -> void:
 	print("  [OK] User compute: imported RDShaderFile dispatched (%dx%d, %d groups sq.)" % [
 		COMPUTE_TEX_SIZE, COMPUTE_TEX_SIZE, groups
 	])
+
+	# ⚠ Free what this gate allocated. Without it shutdown reports leaked Compute,
+	# UniformSet, StorageBuffer, Shader and Texture RIDs, and those warnings then sit in
+	# every future run's log looking like an engine defect rather than this script's.
+	# The uniform set is freed first: it references the textures and the buffer.
+	p_rd.free_rid(uniform_set)
+	p_rd.free_rid(pipeline)
+	p_rd.free_rid(counter_buf)
+	p_rd.free_rid(dst_tex)
+	p_rd.free_rid(src_tex)
 
 
 func _create_compute_texture(p_rd: RenderingDevice, p_with_data: bool) -> RID:

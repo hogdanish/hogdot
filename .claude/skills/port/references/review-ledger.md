@@ -1255,3 +1255,100 @@ taken.
 ⚠ Phase 8 (threaded web builds) is complementary, not an alternative: threads move this cost off the
 main thread, baking removes it. Neither subsumes the other, and threads cost a
 `SharedArrayBuffer`/COOP-COEP deployment constraint that baking does not.
+
+### RL-043 — 2026-08-10 — **blocker** (fixed)
+**Where:** `servers/rendering/renderer_rd/shader_rd.cpp` (`_compile_variant`, `_compile_version_end`),
+`servers/rendering/rendering_device_driver.h`, `servers/rendering/rendering_device.h`,
+`drivers/webgpu/rendering_device_driver_webgpu.h`
+**Found while:** phase 8, the first `threads=yes webgpu=yes` runtime spike
+**What:** a `threads=yes` build aborts during startup shader compilation:
+
+```
+Aborted(Assertion failed)
+  at Object.getJsObject
+  at _emwgpuDeviceCreateShaderModule
+worker: onmessage() captured an uncaught exception
+Pthread 0x01a12a40 sent an error!
+```
+
+`ShaderRD::_compile_version_start` fans every shader variant across
+`WorkerThreadPool::add_template_group_task`, and `_compile_variant` ends with
+`RD::shader_create_from_bytecode_with_samplers()`. On a `threads=no` build the pool runs group tasks
+inline on the calling thread, so that call lands on the browser main thread **by accident**. Enable
+threads and it lands on a worker pthread, and emdawnwebgpu's `getJsObject()` asserts because the
+`GPUDevice` is a JS object belonging to the main thread's realm and a Worker has its own object table.
+
+⚠ **This is a realm constraint, not a data race, and that distinction is the whole finding.**
+`RenderingDevice` is `_THREAD_SAFE_CLASS_` and every native backend accepts shader-module creation
+from any thread, so mainline is right to thread this and no amount of locking helps WebGPU. Godot
+4.7 already has `ERR_RENDER_THREAD_GUARD()` and deliberately does not apply it to shader creation.
+
+⚠ **`research/web-threads-feasibility.md` predicted the opposite** — its §5(a.1) verdict was
+"`threads=yes` … with **zero driver changes**", reasoning that "worker pthreads never touch WebGPU".
+They do, and the research looked only at `drivers/webgpu/` for thread usage (correctly finding none)
+without asking which *engine* code calls the driver from a pool task. **Standing lesson: a
+thread-affinity audit must sweep the callers, not the callee.** The doc is otherwise accurate and its
+`proxy_to_pthread` / `RENDER_SEPARATE_THREAD` analysis stands.
+
+**Disposition:** **fixed**, and without giving up the parallelism that made threads worth having.
+`_compile_variant` splits at the byte boundary: glslang and the shader container stay on the worker
+(they are CPU work on bytes and are also the expensive half), and only the RID creation moves. A new
+`RenderingDeviceDriver::is_multithreaded_shader_creation_supported()` defaults to `true`, so Vulkan,
+D3D12 and Metal keep the fully parallel path unchanged; the WebGPU driver overrides it to `false`,
+and `_compile_version_end` — which already runs on the render thread, after
+`wait_for_group_task_completion` — creates those variants serially from the bytecode the workers
+produced.
+
+⚠ **This is a new hogdot delta over mainline in three shared engine files**, so it widens the rebase
+surface. It is deliberately shaped to minimize that: one defaulted virtual and one branch, no change
+to behaviour on any driver that answers `true`.
+
+⚠ **It was the first of four sites, not the only one.** Each was found by the next run aborting one
+step further along, which is why the sweep below is recorded in full — the complete inventory of
+`WorkerThreadPool` dispatch under `servers/` and what each one reaches:
+
+| site | reaches the device | disposition |
+| --- | --- | --- |
+| `ShaderRD::_compile_variant` | shader modules | **gated** — split at the byte boundary; glslang and the container stay parallel |
+| `PipelineHashMapRD::compile_pipeline` | render pipelines | **gated** — inline |
+| `PipelineDeferredRD::_start` | render *and compute* pipelines | **gated** — inline |
+| `RendererCompositorRD::can_create_resources_async` | textures/meshes from resource-loader threads | **gated** — returns the driver's answer, so calls marshal through RenderingServerDefault's command queue |
+| `RendererSceneCull::_scene_cull_threaded`, `_visibility_cull_threaded` | nothing | no change |
+| `RenderingDevice::_save_pipeline_cache` | `pipeline_cache_serialize()`, a `return Vector<uint8_t>()` stub on WebGPU | no change |
+| `RenderingServerDefault::_thread_loop` | everything | only under `RENDER_SEPARATE_THREAD`, which is out of scope and unworkable on WebGPU anyway |
+
+⚠ **The first three were found empirically and the fourth was not.** The gate scene builds every
+resource from script on the main thread, so it never exercises `can_create_resources_async`. That one
+is reasoned from the `RasterizerGLES3` precedent (a GL context is thread-affine, so it already
+answers false and the marshalling path is well travelled) and is **unproven by any run**.
+CommonGrounds, which loads threaded, is the first thing that will execute it.
+
+**Verified:** `webgpu_tests/test_project` on `threads=yes`, Chrome, real COOP/COEP —
+`PASS — All shader paths exercised without errors`, and `WorkerThreadPool` group tasks measured on
+4 distinct worker ids at **2.86x** over serial (532.4 ms → 186.3 ms).
+
+### RL-044 — 2026-08-10 — **trap** (no fix; a constraint to design around)
+**Where:** the browser, not the tree. Reproduced with `webgpu_tests/test_project/scripts/thread_stress.gd`.
+**Found while:** phase 8, building live thread evidence
+**What:** joining threads from the main browser thread **deadlocks the tab permanently** once the
+Emscripten worker pool is exhausted. Emscripten pre-allocates `emscriptenPoolSize` workers (8, set in
+`platform/web/js/engine/config.js`) and Godot's own `WorkerThreadPool` takes `godotPoolSize` (4);
+spawning past the remainder makes Emscripten create a *fresh* `Worker`, which requires the main-thread
+event loop — and `wait_to_finish()` has already blocked it. Four raw `Thread`s did it here: the page
+printed `Blocking on the main thread is very dangerous`, then never emitted another line. Two raw
+threads are fine and measure **1.88x**.
+
+⚠ This is not hypothetical for the consumer. Any GDScript `Thread` a project spawns competes for the
+same pool, and the failure is a hard hang with no error — not an exception, not a slow frame.
+
+⚠ **Two adjacent facts that cost time here and are easy to misread:**
+- `OS.get_processor_count()` returns **2** on web no matter the hardware.
+  `godot_js_os_hw_concurrency_get()` in `platform/web/js/libs/library_godot_os.js` clamps it, with an
+  upstream `TODO` admitting it is a workaround. It is **not** the pool size, and reading it as one
+  suggests threading is broken when it is not.
+- **Low-priority group tasks are capped to one thread.** `WorkerThreadPool::init` computes
+  `max_low_priority_threads = CLAMP(count * ratio, 1, count - 1)`, so a
+  `add_group_task(..., high_priority = false, ...)` measured **0.95x** — indistinguishable from no
+  threading — while the same work at `high_priority = true` measured **2.86x** across 4 workers.
+  `ShaderRD` passes `true`, so the engine's own shader compilation gets the full pool. A benchmark
+  that picks the wrong flag concludes the opposite of the truth.

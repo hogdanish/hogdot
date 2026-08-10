@@ -825,12 +825,17 @@ func _report_results() -> void:
 			print("  - %s" % err)
 	print("[ShaderCoverage] ═══════════════════════════════════════════\n")
 
+	# ⚠ After the render frames, never before — the thread stress is CPU-bound and would
+	# contaminate exactly the frame timings this scene is used to compare.
+	var thread_report: Dictionary = preload("res://scripts/thread_stress.gd").new().run()
+
 	# Write JSON report
 	var report := {
 		"timestamp": Time.get_datetime_string_from_system(true),
 		"frames_rendered": frame_count,
 		"errors": errors,
 		"pass": errors.is_empty(),
+		"threads": thread_report,
 	}
 	var file := FileAccess.open(REPORT_PATH, FileAccess.WRITE)
 	if file:
