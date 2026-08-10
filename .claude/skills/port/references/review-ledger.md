@@ -1301,7 +1301,7 @@ produced.
 
 ⚠ **This is a new hogdot delta over mainline in three shared engine files**, so it widens the rebase
 surface. It is deliberately shaped to minimize that: one defaulted virtual and one branch, no change
-to behaviour on any driver that answers `true`.
+to behavior on any driver that answers `true`.
 
 ⚠ **It was the first of four sites, not the only one.** Each was found by the next run aborting one
 step further along, which is why the sweep below is recorded in full — the complete inventory of
@@ -1320,7 +1320,7 @@ step further along, which is why the sweep below is recorded in full — the com
 ⚠ **The first three were found empirically and the fourth was not.** The gate scene builds every
 resource from script on the main thread, so it never exercises `can_create_resources_async`. That one
 is reasoned from the `RasterizerGLES3` precedent (a GL context is thread-affine, so it already
-answers false and the marshalling path is well travelled) and is **unproven by any run**.
+answers false and the marshaling path is well travelled) and is **unproven by any run**.
 CommonGrounds, which loads threaded, is the first thing that will execute it.
 
 **Verified:** `webgpu_tests/test_project` on `threads=yes`, Chrome, real COOP/COEP —

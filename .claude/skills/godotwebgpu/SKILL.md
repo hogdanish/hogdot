@@ -64,6 +64,32 @@ fly behind a cache.
   implementations report 16. This is *why* CommonGrounds is a Mobile-renderer consumer.
 - **Timestamp queries are optional** — gated on the `timestamp-query` feature, with dummy fallback.
 
+## Thread model (proven 2026-08-10, phase 8)
+
+**Game threads are real; rendering is pinned to the browser main thread, permanently.** A `GPUDevice`
+is a JS object owned by one realm and a wasm pthread is a Worker with its own realm and object table,
+so a `wgpu*()` call from a worker aborts in emdawnwebgpu's `getJsObject()`. No lock fixes it — it is
+not a data race. No browser ships cross-realm `GPUDevice` sharing, and emdawnwebgpu has no proxying
+layer (Emscripten's own WebGL bindings do; that is why `opengl3=yes` can thread rendering and this
+cannot).
+
+⚠ **The engine puts worker threads on the device by itself** — this was the phase's central surprise,
+and `research/web-threads-feasibility.md` predicted the opposite ("zero driver changes") because it
+audited `drivers/webgpu/` for thread use instead of auditing the engine code that *calls* the driver.
+Four sites needed gating behind
+`RenderingDeviceDriver::is_multithreaded_resource_creation_supported()` (default `true`, WebGPU
+`false`): `ShaderRD::_compile_variant`, `PipelineHashMapRD::compile_pipeline`,
+`PipelineDeferredRD::_start`, and `RendererCompositorRD::can_create_resources_async`. Full inventory
+and reasoning: **RL-043**; the shipping guide is `.claude/work/plans/THREADS.md`.
+
+⚠ `proxy_to_pthread=yes` and `RENDER_SEPARATE_THREAD` are unsupported and not planned.
+
+⚠ **The fork's own docs were right, and the research doc's claim that they overstate the limitation is
+wrong.** `site/CORRECTNESS_AND_COMPATIBILITY.md:289` says *rendering* is main-thread-only and
+`site/FAQ.md:195-199` frames `threads=yes` as audio/physics offload needing COOP/COEP — which is
+exactly the configuration that now works. Nobody had built the combination; the documents were
+accurate.
+
 ## Performance — the backend's whole shape is an IPC argument
 
 Every GPU call crosses a WASM→JS→browser-GPU-process IPC boundary at 40–250× native per-call cost, so
@@ -78,6 +104,10 @@ call that could be removed.
 ```bash
 scons platform=web target=template_release dlink_enabled=yes webgpu=yes opengl3=no threads=no
 ```
+
+⚠ **`threads=yes` works too** and produces a zip *without* the `.nothreads` suffix — the suffix is the
+only thing telling the two apart, and naming the wrong one in a preset fails at runtime, not at
+export. Both templates are supported; see the thread-model section above.
 
 `webgpu=yes` defines `WEBGPU_ENABLED` and adds `--use-port=emdawnwebgpu` to compile *and* link flags.
 Selection is by project setting — `rendering/renderer/rendering_method.web` (`mobile` / `forward_plus` /

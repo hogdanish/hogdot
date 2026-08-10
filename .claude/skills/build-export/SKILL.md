@@ -143,6 +143,15 @@ nice -n 10 scons platform=web target=template_debug webgpu=yes opengl3=no thread
 # the eventual release template (adds dlink_enabled; spend LTO only here, via production=yes)
 scons platform=web target=template_release dlink_enabled=yes webgpu=yes opengl3=no threads=no
 
+# ⚠ threads=yes is supported as of 2026-08-10 and both templates ship. Same command,
+#   threads=yes — cold 7m34s, warm relink ~1m, same num_jobs=4 memory law.
+#   ⚠ The ONLY difference in the artifact name is the suffix: threads=yes writes
+#   godot.web.template_*.wasm32.zip, threads=no adds `.nothreads`. A preset naming the
+#   wrong one is silent at export and fails at runtime. Serving a threaded build needs
+#   COOP/COEP or it cannot start. Everything else: .claude/work/plans/THREADS.md
+nice -n 10 scons platform=web target=template_debug webgpu=yes opengl3=no threads=yes \
+     num_jobs=4 import_env_vars=HOME,CCACHE_DIR,CCACHE_CONFIGPATH,EM_CACHE
+
 # ⚠ configure-only smoke test — seconds, compiles nothing. Godot runs platform
 #   detection and every module config.py before printing help, so this catches an
 #   undeclared option, a config.py KeyError or a broken SConscript for free.
