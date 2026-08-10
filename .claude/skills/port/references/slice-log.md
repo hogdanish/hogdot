@@ -1081,3 +1081,37 @@ Findings beyond formatting:
 | gauntlet — `driver_unit_tests` | 327/0/0 | |
 | gauntlet — `preprocessing_tests` | 191/0/1 | |
 | gauntlet — `shader_corpus` | 13/0 | needs `glslangValidator` + `bin/tint_convert_cli` |
+
+### phase-10 tranche A — 2026-08-10 — `b4622c34d7..0669f6800c`
+
+**What landed.** RL-046 batch-predicate fix (`b4622c34d7`); RL-045 stage-bounds rejection
+(`ef0f495876`); `InstanceData` std430 corpus fixture (`903c628c29`, OFFSETS-NATURAL, 14/14
+fixtures pass); discardable MSAA ghost-trail gate (`717cc4923b`); light-culling stress gate
+(`d80226d8ec`, reshaped in `0669f6800c`); `?scene=` gate selector in `shader_coverage.gd`
+(`f42a0ee6da`). Ledger: RL-045/RL-046 dispositions, RL-047 note, delta-row-40 verdict.
+
+**Tiers reached.** RL-046: **renders** — Chrome, negative control both directions (fix reverted
+→ the MULTIPLE-bucket box dims silently; fix restored → matches the native movie-mode baseline).
+RL-045: compiles (both `webgpu=yes` templates; the macOS editor never builds `drivers/webgpu/`).
+Discardable gate: renders + visual judgment — MSAA 4X live, three captures across the traversal,
+no ghost trail, zero validation errors. Native regression: windowed Mobile coverage gate PASS.
+
+**Gotchas for the next session:**
+- `shader_coverage.gd` called `camera.look_at()` before `add_child()` — the error was one of the
+  phase-3 gate's 15 baseline diagnostics. Fixed in `f42a0ee6da`: **the native baseline is now 14
+  diagnostics.**
+- Every area light sets `uses_softshadow` (`renderer_scene_cull.cpp:1795`). Area-lit vs
+  area-unlit neighbors already split on the soft clause; only bucket differences among lit
+  instances need RL-046's clause.
+- `VIEWPORT_RENDER_INFO_DRAW_CALLS_IN_FRAME` on forward-mobile is `instances->size()`
+  (`render_forward_mobile.cpp:965`). Nothing script-visible observes batching.
+- Within a depth bucket the opaque render list runs in **reverse creation order** (probe-verified).
+  The light-culling gate stages its merge representative on this; re-check after any upstream
+  sort change.
+- `flatten_binding_arrays` discards indices into arrays-of-handles (element-0 collapse) — RL-047,
+  fork-documented as "no multi-lightmap on web". The corpus fixture makes the pass fire; do not
+  read a fixture's sampler array as decoration.
+- The `runtimeKeepalivePop` shutdown abort reproduces on the **nothreads** template too (any
+  bounded gate quit); previously logged as a threads observation. Still cosmetic, still open.
+- Movie-mode capture (`--write-movie frame.png`) is a clean native baseline path: real Metal
+  rendering, PNG frames, no window interaction needed.

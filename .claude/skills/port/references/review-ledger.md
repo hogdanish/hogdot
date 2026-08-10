@@ -1391,3 +1391,53 @@ read-index side of batching; this predicate gap post-dates both.
 **Fix shape:** add the `area_light_count` comparison alongside the omni/spot checks (3 lines).
 Runtime repro + fix-then-validate ordering is designed in
 `.claude/work/plans/features/feature-per-mesh-light-culling.md`; queued for Phase 10.
+
+### RL-045 — disposition (2026-08-10, phase 10) — **fixed in `ef0f495876`**
+`shader_create_from_container()` now rejects any stage ≥ `WGShader::STAGE_SLOTS` (a named
+constant that replaces the three magic `[6]` sizes) before any stage-indexed write. The fix
+covers a third sibling site the entry above did not list: the `stage_override_ids[s.shader_stage]`
+inserts (`rendering_device_driver_webgpu.cpp:4660-4668`) carried the same unguarded index.
+Verified at *compiles* on both `webgpu=yes` template variants — the macOS editor never builds
+this file. `features/feature-raytracing-stubs.md` carries the matching dated addendum.
+
+### RL-047 — 2026-08-10 — **note** (fork-documented limitation, not a new defect)
+**Where:** `drivers/webgpu/spirv_preprocess.cpp:2504-2526` (`flatten_binding_arrays`, passes 3-4)
+**Found while:** phase 10, authoring the `instance_data_layout` corpus fixture
+**What:** the pass maps every `OpAccessChain` on an array-of-handles variable to the base
+variable and never reads the index operand. A dynamically indexed `sampler2D shadow_atlas[4]`
+in the fixture compiled to `_ = pc.atlas_index;` plus an element-0 read. Any nonzero index,
+constant or dynamic, reads element 0 on WebGPU.
+
+**Why a note, not a bug:** Tint rejects arrays of handle types outright, and the fork documents
+the collapse — `site/CORRECTNESS_AND_COMPATIBILITY.md:279`, "binding_array flattened to single
+element (no multi-lightmap on web)". The 4.7.1 exposure is the mobile lightmap path
+(`scene_forward_mobile.glsl:1772-1792` indexes `lightmap_textures[MAX_LIGHTMAP_TEXTURES * 2]`
+by dynamic `ofs`): two or more lightmap atlases, or any shadowmask slot, mis-sample element 0 on
+web with no error. A real fix means per-element bindings plus branch selection — open it as
+feature work only when a consumer ships multi-lightmap content. The per-mesh light-culling
+design doc treated this pass purely as an offset hazard; its §4 now carries a dated addendum.
+
+### Delta-doc row 40 (texture discardable) — 2026-08-10 — **verified, no defect**
+The 4.7 discardable rework's one reachable new site (the root viewport's single-subpass
+`color_multisample`, where `map_store_op` really emits `WGPUStoreOp_Discard`) ran for the first
+time: `discardable_msaa_gate.tscn` on the threaded WebGPU gate, MSAA 4X live, zero validation
+errors, no ghost trail, stable opaque content. The multi-subpass force-Store fix (`653e1e9878`)
+holds after the rework. Evidence and captures: `features/feature-texture-discardable.md`
+§ Completion record.
+
+### RL-046 — disposition (2026-08-10, phase 10) — **fixed in `b4622c34d7`, verified at *renders***
+The bucket comparison landed exactly as the design doc drew it. Implementation narrowed the
+exposure, then proved the defect live in both directions:
+- Every area light sets `uses_softshadow` (`renderer_scene_cull.cpp:1795`), so the predicate's
+  existing `use_soft_shadow` clause already splits area-lit from area-unlit neighbors. The live
+  gap was **SINGLE-vs-MULTIPLE** pairs (1 light vs 2+), narrower than the 0-vs-N framing above.
+- Negative control: with the clause reverted on a throwaway build, the stress gate's
+  SINGLE-bucket box led the merged batch and the MULTIPLE-bucket box dimmed to a faint gradient
+  — zero errors, the predicted silent mis-render. With the fix restored, the same export renders
+  correctly and matches the native movie-mode baseline.
+- Instrumentation: `VIEWPORT_RENDER_INFO_DRAW_CALLS_IN_FRAME` is filled with the visible
+  instance count on forward-mobile (`render_forward_mobile.cpp:965`) and cannot observe
+  batching; a temporary loop-top print (never committed) was the discriminating probe. Within a
+  depth bucket the opaque list runs in reverse creation order — the standing gate
+  (`?scene=lightculling`) relies on this to stage the dangerous representative.
+Evidence chain: `features/feature-per-mesh-light-culling.md` § Addendum.

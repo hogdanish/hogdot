@@ -111,6 +111,16 @@ FILL: the subpass structure proper. What the port established (2026-08-06, slice
   The SET3 binding indices are duplicated between them with nothing to detect a mismatch but a runtime
   `uniform_set_create` failure that kills all 2D rendering, editor UI included. Change both or
   neither, in one commit.
+- **Every area light sets `uses_softshadow`** — unconditional on light type at
+  `renderer_scene_cull.cpp:1795`. An instance pairing any area light therefore carries
+  `use_soft_shadow = true` into pipeline specialization and the batch predicate (phase 10; RL-046's
+  exposure analysis rests on this).
+- ⚠ **`VIEWPORT_RENDER_INFO_DRAW_CALLS_IN_FRAME` is not draw calls on forward-mobile** — the
+  renderer fills it with `instances->size()` (`render_forward_mobile.cpp:965`). Batching is
+  invisible to it; nothing script-visible counts real draws.
+- **Within a depth bucket the opaque render list runs in reverse creation order** (probe-verified
+  2026-08-10 on WebGPU). The batch representative — whose pipeline specialization the whole merged
+  draw uses — is whichever eligible instance that ordering lists first.
 
 ## Driver registration and selection
 
