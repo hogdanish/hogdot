@@ -1606,7 +1606,14 @@ void RenderForwardMobile::_render_shadow_pass(RID p_light, RID p_shadow_atlas, i
 		// WebGPU fork, so the same-framebuffer merge in _render_shadow_end() has
 		// never been exercised against them. Keep them on the unmerged path until
 		// a browser run can prove otherwise; see review-ledger RL-010.
-		if (light_storage->light_get_type(base) == RSE::LIGHT_AREA) {
+		//
+		// RL-010 experiment switch: flip to false to let area-light shadow passes
+		// merge, then re-measure with the "Shadow Render" line _render_shadow_end()
+		// prints under --verbose. Revert to true on ANY visual or validation
+		// regression -- the exclusion exists to be correctness-conservative.
+		constexpr bool AREA_LIGHT_SHADOW_MERGE_EXCLUDED = true;
+
+		if (AREA_LIGHT_SHADOW_MERGE_EXCLUDED && light_storage->light_get_type(base) == RSE::LIGHT_AREA) {
 			for (uint32_t pass_index = shadow_pass_from; pass_index < scene_state.shadow_passes.size(); pass_index++) {
 				scene_state.shadow_passes[pass_index].mergeable = false;
 			}
@@ -1718,6 +1725,15 @@ void RenderForwardMobile::_render_shadow_end() {
 	// single render pass with viewport/scissor changes. This eliminates N-1
 	// render pass encoder begin/end cycles per framebuffer group, which is
 	// critical for WebGPU where each encoder cycle crosses the WASM→JS IPC.
+	//
+	// The merge is invisible to every script-reachable counter: forward-mobile fills
+	// VIEWPORT_RENDER_INFO_TYPE_SHADOW's draw-call slot with the instance count of the
+	// last appended pass (_render_shadow_append() above), not with issued draw lists. So
+	// the encoder cycles this loop saves are reported here instead, and only under
+	// --verbose. This is the measurement RL-010's experiment reads.
+	uint32_t draw_list_count = 0;
+	uint32_t merged_pass_count = 0;
+
 	uint32_t i = 0;
 	while (i < scene_state.shadow_passes.size()) {
 		SceneState::ShadowPass &first_pass = scene_state.shadow_passes[i];
@@ -1733,7 +1749,11 @@ void RenderForwardMobile::_render_shadow_end() {
 			}
 		}
 
+		draw_list_count++;
+
 		if (batch_end - i > 1) {
+			merged_pass_count += batch_end - i;
+
 			// Merged path: one render pass, multiple viewport-scoped draws.
 			RD::FramebufferFormatID fb_format = RD::get_singleton()->framebuffer_get_format(first_pass.framebuffer);
 			RD::DrawListID draw_list = RD::get_singleton()->draw_list_begin(first_pass.framebuffer, RD::DRAW_DEFAULT_ALL, Vector<Color>(), 0.0f, 0, Rect2());
@@ -1757,6 +1777,11 @@ void RenderForwardMobile::_render_shadow_end() {
 		}
 
 		i = batch_end;
+	}
+
+	if (scene_state.shadow_passes.size() > 0 && is_print_verbose_enabled()) {
+		print_verbose(vformat("Shadow Render: %d passes in %d draw lists (%d passes merged)",
+				scene_state.shadow_passes.size(), draw_list_count, merged_pass_count));
 	}
 
 	RD::get_singleton()->draw_command_end_label();
