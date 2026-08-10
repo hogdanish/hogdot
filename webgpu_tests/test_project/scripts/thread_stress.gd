@@ -78,9 +78,14 @@ func run() -> Dictionary:
 	print("[ThreadStress]   started: %d  ids: %d  off-caller: %s" % [
 		raw.started, raw.distinct_ids, raw.ran_off_caller
 	])
-	print("[ThreadStress]   serial %.1f ms / %d-thread %.1f ms  (%.2fx)" % [
-		raw.serial_msec, raw.started, raw.parallel_msec, raw.speedup
-	])
+	if raw.executed:
+		print("[ThreadStress]   serial %.1f ms / %d-thread %.1f ms  (%.2fx)" % [
+			raw.serial_msec, raw.started, raw.parallel_msec, raw.speedup
+		])
+	else:
+		print("[ThreadStress]   NO TIMING — the thread bodies never ran; %.1f ms is not a result." % [
+			raw.parallel_msec
+		])
 	if pool_ran_off_caller or raw.ran_off_caller:
 		print("[ThreadStress] THREADED — work ran on a thread other than the caller.")
 	else:
@@ -137,13 +142,21 @@ func _run_raw_threads() -> Dictionary:
 		if id != caller_id:
 			ran_off_caller = true
 
+	# ⚠ On a threads=no build `start()` reports OK and `wait_to_finish()` returns at once,
+	# but the body never executes — measured 2026-08-10: started 2, zero recorded ids,
+	# 2.1 ms "parallel" against 593.8 ms serial, printed as a 283x speedup. Dividing by
+	# work that never happened is the exact failure this whole script exists to catch, so
+	# an empty id set invalidates the number instead of flattering it.
+	var executed := not ids.is_empty()
+
 	return {
 		"started": threads.size(),
 		"distinct_ids": ids.size(),
+		"executed": executed,
 		"ran_off_caller": ran_off_caller,
 		"serial_msec": serial_usec / 1000.0,
 		"parallel_msec": parallel_usec / 1000.0,
-		"speedup": float(serial_usec) / float(maxi(parallel_usec, 1)),
+		"speedup": (float(serial_usec) / float(maxi(parallel_usec, 1))) if executed else 0.0,
 	}
 
 
