@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3 uid="uid://1x8mqf3tvn7c"]
+
+[ext_resource type="Script" path="res://scripts/discardable_msaa_gate.gd" id="1"]
+
+[node name="DiscardableMsaaGate" type="Node3D"]
+script = ExtResource("1")
