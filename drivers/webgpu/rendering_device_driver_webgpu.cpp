@@ -936,8 +936,17 @@ void RenderingDeviceDriverWebGPU::_check_capabilities() {
 	// float32-filterable: required for linear sampling of R32Float / RG32Float / RGBA32Float.
 	// Forward Mobile's HDR post-processing path samples 32F render targets with linear
 	// samplers, so without this feature those samplers must fall back to NEAREST.
-	// Feature name enum value 13 per WebGPU spec (not yet in the emdawnwebgpu 4.0.10 header enum).
-	float32_filterable_supported = wgpuDeviceHasFeature(device, (WGPUFeatureName)13);
+	//
+	// ⚠ These two used to be hardcoded as `(WGPUFeatureName)13` and `14` with a comment
+	// claiming the emdawnwebgpu 4.0.10 header lacked the enumerators. Both numbers were
+	// wrong against the header we actually build with: Float32Filterable is 0x0E (14) and
+	// Float32Blendable is 0x0F (15), while 13 (0x0D) is BGRA8UnormStorage — a feature the
+	// JS shell never requests. So filterable read a feature that is always absent and
+	// reported NOT available on every adapter, and blendable read *filterable*. Always use
+	// the named enumerators: they follow the header across emsdk bumps, and a name that is
+	// genuinely missing fails the build instead of silently answering about another
+	// feature. See RL-039.
+	float32_filterable_supported = wgpuDeviceHasFeature(device, WGPUFeatureName_Float32Filterable);
 	if (float32_filterable_supported) {
 		print_verbose("WebGPU: float32-filterable feature is available.");
 	} else {
@@ -947,8 +956,7 @@ void RenderingDeviceDriverWebGPU::_check_capabilities() {
 	// float32-blendable: required for blending on R32Float / RG32Float / RGBA32Float
 	// render targets. Without this, blend operations on float32 targets silently fail
 	// (particles, post-processing compositing).
-	// Feature name enum value 14 per WebGPU spec (0x0E, not yet in emdawnwebgpu 4.0.10 header).
-	float32_blendable_supported = wgpuDeviceHasFeature(device, (WGPUFeatureName)14);
+	float32_blendable_supported = wgpuDeviceHasFeature(device, WGPUFeatureName_Float32Blendable);
 	if (float32_blendable_supported) {
 		print_verbose("WebGPU: float32-blendable feature is available.");
 	} else {
