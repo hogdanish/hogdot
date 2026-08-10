@@ -2830,6 +2830,10 @@ void RenderForwardMobile::_render_list_template(RenderingDevice::DrawListID p_dr
 								SceneShaderForwardMobile::shader_count_for(inst->reflection_probe_count)) {
 							break;
 						}
+						if (SceneShaderForwardMobile::shader_count_for(next_inst->area_light_count) !=
+								SceneShaderForwardMobile::shader_count_for(inst->area_light_count)) {
+							break;
+						}
 						if ((next_inst->decals_count > 0) != (inst->decals_count > 0)) {
 							break;
 						}
