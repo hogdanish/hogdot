@@ -99,7 +99,10 @@ Error ResourceImporterShaderFile::import(ResourceUID::ID p_source_id, const Stri
 	Ref<RDShaderFile> shader_file;
 	shader_file.instantiate();
 	String base_path = p_source_file.get_base_dir();
-	err = shader_file->parse_versions_from_text(file_txt, "", _include_function, &base_path);
+	// ⚠ SPIRV_TARGET_PORTABLE, not the active device. What this writes is a .res that
+	// goes into an export pack and may be loaded by a backend this editor is not
+	// running — so it must not inherit the host driver's SPIR-V version. See RL-040.
+	err = shader_file->parse_versions_from_text(file_txt, "", _include_function, &base_path, RDShaderFile::SPIRV_TARGET_PORTABLE);
 
 	if (err != OK) {
 		if (!ShaderFileEditor::singleton->is_visible_in_tree()) {

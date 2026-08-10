@@ -37,7 +37,7 @@
 
 #include "servers/rendering/shader_include_db.h"
 
-Error RDShaderFile::parse_versions_from_text(const String &p_text, const String p_defines, OpenIncludeFunction p_include_func, void *p_include_func_userdata) {
+Error RDShaderFile::parse_versions_from_text(const String &p_text, const String p_defines, OpenIncludeFunction p_include_func, void *p_include_func_userdata, SpirvTarget p_target) {
 	Vector<String> lines = p_text.split("\n");
 
 	bool reading_versions = false;
@@ -198,24 +198,34 @@ Error RDShaderFile::parse_versions_from_text(const String &p_text, const String 
 				code = code.replace("VERSION_DEFINES", E.value);
 				String error;
 #ifdef MODULE_GLSLANG_ENABLED
-				// ⚠ Route through RenderingDevice when one exists, so the SPIR-V
-				// version comes from the active driver's shader container instead of
-				// being hardcoded. This path is what a project's own GLSL goes through
-				// (RDShaderFile), and it used to pin SHADER_SPIRV_VERSION_1_4
-				// unconditionally while the engine's own shaders got the container's
-				// version via RenderingDevice::shader_compile_spirv_from_source().
-				// On WebGPU that split is fatal: the container asks for 1.3 because
-				// Tint's SPIR-V reader validates against SPV_ENV_VULKAN_1_1, so every
-				// user shader compiled here was rejected with "Invalid SPIR-V binary
-				// version 1.4 for target environment SPIR-V 1.3". See RL-038.
+				// Which SPIR-V version this compiles to depends on who consumes the
+				// result, and getting it wrong is silent until a backend rejects the
+				// bytecode.
 				//
-				// The hardcoded fallback stays for the no-device case (the editor's
-				// importer can reach this before a RenderingDevice exists).
+				// SPIRV_TARGET_ACTIVE_DEVICE — Betsy and the lightmapper hand their
+				// SPIR-V straight to the RenderingDevice that is running right now, so
+				// take that driver's shader container version. This path used to pin
+				// SHADER_SPIRV_VERSION_1_4 while the engine's own shaders got the
+				// container's version via shader_compile_spirv_from_source(); on WebGPU
+				// that split is fatal, because the container asks for 1.3 (Tint's SPIR-V
+				// reader validates against SPV_ENV_VULKAN_1_1) and every shader compiled
+				// here was rejected with "Invalid SPIR-V binary version 1.4 for target
+				// environment SPIR-V 1.3". See RL-038.
+				//
+				// ⚠ SPIRV_TARGET_PORTABLE — the .glsl importer writes bytecode to disk
+				// that is then shipped in an export pack, possibly to a backend the host
+				// editor is not running. Consulting RD::get_singleton() there makes the
+				// baked artifact depend on the machine that imported it: a headless
+				// import produced 1.4, a macOS GUI editor would have produced 1.6 (the
+				// Metal container), and neither is loadable on WebGPU. Pin it to 1.3 —
+				// SPIR-V 1.3 is Vulkan 1.1 core and is accepted by every backend Godot
+				// has, so it is the only version that is correct without knowing the
+				// target. See RL-040.
 				Vector<uint8_t> spirv;
-				if (RD::get_singleton() != nullptr) {
+				if (p_target == SPIRV_TARGET_ACTIVE_DEVICE && RD::get_singleton() != nullptr) {
 					spirv = RD::get_singleton()->shader_compile_spirv_from_source(RD::ShaderStage(i), code, RD::SHADER_LANGUAGE_GLSL, &error);
 				} else {
-					spirv = compile_glslang_shader(RD::ShaderStage(i), ShaderIncludeDB::parse_include_files(code), RD::SHADER_LANGUAGE_VULKAN_VERSION_1_1, RD::SHADER_SPIRV_VERSION_1_4, &error);
+					spirv = compile_glslang_shader(RD::ShaderStage(i), ShaderIncludeDB::parse_include_files(code), RD::SHADER_LANGUAGE_VULKAN_VERSION_1_1, RD::SHADER_SPIRV_VERSION_1_3, &error);
 				}
 				bytecode->set_stage_bytecode(RD::ShaderStage(i), spirv);
 #else

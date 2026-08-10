@@ -42,6 +42,13 @@ public:
 	virtual String get_save_extension() const override;
 	virtual String get_resource_type() const override;
 
+	// ⚠ Bumped from mainline's implicit 0 to 1 so every project re-imports its .glsl
+	// files once. Before this, the baked SPIR-V version depended on the machine that
+	// ran the import (headless: 1.4, macOS GUI editor: 1.6), and a stale .res carrying
+	// either is rejected by WebGPU with no way to notice short of hexdumping it.
+	// Without the bump the cached .res survives an engine upgrade untouched. See RL-040.
+	virtual int get_format_version() const override { return 1; }
+
 	virtual int get_preset_count() const override;
 	virtual String get_preset_name(int p_idx) const override;
 

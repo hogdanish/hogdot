@@ -431,7 +431,20 @@ public:
 	}
 
 	typedef String (*OpenIncludeFunction)(const String &, void *userdata);
-	Error parse_versions_from_text(const String &p_text, const String p_defines = String(), OpenIncludeFunction p_include_func = nullptr, void *p_include_func_userdata = nullptr);
+
+	// Who the compiled SPIR-V is for. The distinction is load-bearing on WebGPU and
+	// harmless elsewhere — see the comment on parse_versions_from_text's body.
+	enum SpirvTarget {
+		// The SPIR-V is consumed immediately by the RenderingDevice that exists right
+		// now (Betsy, the lightmapper). Take the active driver's shader container
+		// version so the bytecode matches the backend exactly.
+		SPIRV_TARGET_ACTIVE_DEVICE,
+		// The SPIR-V is written to disk and shipped to an unknown backend (the .glsl
+		// importer). It must not depend on the host editor's device.
+		SPIRV_TARGET_PORTABLE,
+	};
+
+	Error parse_versions_from_text(const String &p_text, const String p_defines = String(), OpenIncludeFunction p_include_func = nullptr, void *p_include_func_userdata = nullptr, SpirvTarget p_target = SPIRV_TARGET_ACTIVE_DEVICE);
 
 protected:
 	Dictionary _get_versions() const {
