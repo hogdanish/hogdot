@@ -117,6 +117,7 @@ public:
 
 	virtual void get_export_options(List<ExportOption> *r_options) const override;
 	virtual bool get_export_option_visibility(const EditorExportPreset *p_preset, const String &p_option) const override;
+	virtual String get_export_option_warning(const EditorExportPreset *p_preset, const StringName &p_name) const override;
 
 	virtual String get_name() const override;
 	virtual String get_os_name() const override;

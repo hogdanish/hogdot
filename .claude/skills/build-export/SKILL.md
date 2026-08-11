@@ -202,26 +202,38 @@ FILL: the actual handoff — whether CommonGrounds points at `bin/godot.macos.ed
 an installed editor, and where its export templates are expected. Derive from that repo's `build-export`
 skill and record it here the first time a build is handed over.
 
-### Shader baking does not happen, and three separate things stop it (2026-08-06)
+### Shader baking for web works as of 2026-08-11 (RL-042 step 1)
 
-⚠ **`shader_baker/enabled=true` in a Web preset is an inert key.** Not "the baker declined" — the
-Web export platform does not *have* the option. `platform/web/export/export_plugin.cpp` never
-declares `shader_baker/enabled` and never pushes the `shader_baker` feature, unlike PC, macOS,
-Android and Apple-embedded, so `ShaderBakerExportPlugin::_is_active()` returns false at its first
-line and nothing downstream runs. Do not read the setting as a cold-start mitigation.
+`shader_baker/enabled=true` in a Web preset now bakes SPIR-V containers into the pck at
+`res://.godot/shader_cache/…/*.webgpu.cache`; the runtime loads them and skips glslang on first
+use of every baked shader. The pieces: the WebGPU shader container compiles into every editor
+build (`drivers/SCsub`), `ShaderBakerExportPluginPlatformWebGPU` is registered unconditionally in
+`editor_node.cpp`, and the web export plugin declares the option, pushes the `shader_baker`
+feature, and warns on renderer mismatch. Details and verification:
+`.claude/work/plans/features/feature-shader-baker.md`.
+
+The command that bakes (a windowed CLI export — the window is the point):
+
+```bash
+cd webgpu_tests/test_project && ../../bin/godot.macos.editor.arm64 --path . \
+    --rendering-method mobile --export-debug "WebGPU" export/index.html
+```
 
 ⚠ **A `--headless` export can never bake shaders, on any platform.** Baking pulls the embedded
-shaders out of a live `RendererSceneRenderRD`, and headless has none. Every scripted export — this
-repo's gate exports, CommonGrounds' `run-web.sh` — is therefore outside it by construction. This was
-silent in mainline; hogdot now emits a `WARN_PRINT` naming the reason whenever baking was requested
-and cannot run (RL-041).
+shaders out of a live `RendererSceneRenderRD`, and headless has none — hogdot warns when baking
+was requested and cannot run (RL-041). Every fully-scripted export (CommonGrounds' `run-web.sh`)
+must drop `--headless` on the export step to bake.
 
-⚠ **Even with both fixed, no `ShaderBakerExportPluginPlatform` matches `"webgpu"`** —
-`editor/editor_node.cpp` registers Vulkan, D3D12 and Metal only. Registering one is real work with a
-worthwhile payoff and is written up as **RL-042** in the port skill's review ledger; the useful fact
-for building is that `rendering_shader_container_webgpu.h` includes only
-`servers/rendering/rendering_shader_container.h` — no Dawn, no Tint — so the container is already
-host-portable and only the `webgpu=yes` gating in `drivers/SCsub` keeps it out of a macOS editor.
+⚠ **The editor must run the target's rendering method** (`--rendering-method mobile` for
+CommonGrounds/web) or the core shaders bake for the wrong renderer and miss at runtime.
+
+⚠ **The bake compiles SPIR-V at the export target's version, not the editor driver's** — plumbed
+through `compile_stages` (a Metal editor otherwise emits 1.6, which runtime Tint rejects). Keep
+that in mind before "simplifying" the extra parameter away.
+
+⚠ **Baking does not remove Tint**: the runtime still runs SPIR-V preprocessing + Tint→WGSL +
+`createShaderModule` + `createRenderPipeline` per first use. Step 2 (bake WGSL) is the open
+follow-up in the feature doc.
 
 ## The lint baseline (established 2026-08-06, before the first port commit)
 

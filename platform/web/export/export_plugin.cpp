@@ -373,6 +373,10 @@ void EditorExportPlatformWeb::get_preset_features(const Ref<EditorExportPreset> 
 		r_features->push_back("web_noextensions");
 	}
 	r_features->push_back("wasm32");
+
+	if (!p_preset->is_dedicated_server() && p_preset->get("shader_baker/enabled")) {
+		r_features->push_back("shader_baker");
+	}
 }
 
 void EditorExportPlatformWeb::get_export_options(List<ExportOption> *r_options) const {
@@ -383,6 +387,7 @@ void EditorExportPlatformWeb::get_export_options(List<ExportOption> *r_options) 
 	r_options->push_back(ExportOption(PropertyInfo(Variant::BOOL, "variant/thread_support"), false, true)); // Thread support (i.e. run with or without COEP/COOP headers).
 	r_options->push_back(ExportOption(PropertyInfo(Variant::BOOL, "vram_texture_compression/for_desktop"), true)); // S3TC
 	r_options->push_back(ExportOption(PropertyInfo(Variant::BOOL, "vram_texture_compression/for_mobile"), false)); // ETC or ETC2, depending on renderer
+	r_options->push_back(ExportOption(PropertyInfo(Variant::BOOL, "shader_baker/enabled"), false));
 
 	r_options->push_back(ExportOption(PropertyInfo(Variant::BOOL, "html/export_icon"), true));
 	r_options->push_back(ExportOption(PropertyInfo(Variant::STRING, "html/custom_html_shell", PROPERTY_HINT_FILE, "*.html"), ""));
@@ -415,6 +420,21 @@ bool EditorExportPlatformWeb::get_export_option_visibility(const EditorExportPre
 	}
 
 	return true;
+}
+
+String EditorExportPlatformWeb::get_export_option_warning(const EditorExportPreset *p_preset, const StringName &p_name) const {
+	if (p_preset && p_name == "shader_baker/enabled" && bool(p_preset->get("shader_baker/enabled"))) {
+		// Resolve the rendering method the way the exported game will: with the
+		// "web" feature tag, so a rendering_method.web override is honored.
+		Vector<String> web_features = { "web" };
+		String export_renderer = ProjectSettings::get_singleton()->get_setting_with_override_and_custom_features("rendering/renderer/rendering_method", web_features);
+		if (OS::get_singleton()->get_current_rendering_method() == "gl_compatibility") {
+			return TTR("\"Shader Baker\" is not supported when using the Compatibility renderer.");
+		} else if (OS::get_singleton()->get_current_rendering_method() != export_renderer) {
+			return vformat(TTR("The editor is currently using a different renderer than what the target platform will use. \"Shader Baker\" won't be able to include core shaders. Switch to the \"%s\" renderer temporarily to fix this."), export_renderer);
+		}
+	}
+	return String();
 }
 
 String EditorExportPlatformWeb::get_name() const {

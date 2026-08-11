@@ -28,8 +28,6 @@
 /* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
 /**************************************************************************/
 
-#ifdef WEBGPU_ENABLED
-
 #include "rendering_shader_container_webgpu.h"
 
 // =========================================================================
@@ -48,9 +46,12 @@
 //
 // The practical consequence is the one to keep in mind when reading this file: what
 // is stored here is an *input* to that translation, not something the browser can
-// consume. Storing WGSL instead would move Tint to bake time and is the structural
-// answer to first-use pipeline cost, but it requires Tint in the editor and a
-// registered WebGPU shader baker, neither of which exists yet. See RL-041.
+// consume. The shader baker now stores these containers at export time (see
+// ShaderBakerExportPluginPlatformWebGPU), which removes glslang from the runtime
+// path; the SPIR-V must stay at version 1.3 because Tint's runtime reader rejects
+// anything newer. Storing WGSL instead would also move Tint to bake time and is the
+// structural answer to first-use pipeline cost, but it requires Tint compiled into
+// the editor. See RL-042 and feature-shader-baker.md.
 //
 // Push constant handling:
 //   Godot's push constants are emulated via a uniform buffer at a fixed
@@ -116,5 +117,3 @@ RenderingShaderContainerWebGPU::RenderingShaderContainerWebGPU() {
 
 RenderingShaderContainerWebGPU::~RenderingShaderContainerWebGPU() {
 }
-
-#endif // WEBGPU_ENABLED

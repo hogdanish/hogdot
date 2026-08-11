@@ -3,8 +3,8 @@
 ; since the parameters that go here are not all obvious.
 ;
 ; Format:
-;   [section]
-;   key=value
+;   [section] ; section goes between []
+;   param=value ; assign values to parameters
 
 config_version=5
 
@@ -22,8 +22,5 @@ window/size/viewport_height=720
 
 [rendering]
 
-renderer/rendering_method="forward_plus"
 renderer/rendering_method.web="mobile"
-anti_aliasing/quality/msaa_2d=0
-anti_aliasing/quality/msaa_3d=0
 environment/defaults/default_clear_color=Color(0.1, 0.1, 0.15, 1)

@@ -1059,7 +1059,12 @@ public:
 	// WebGPU is the one backend that says no; ShaderRD is the caller that has to care.
 	bool is_multithreaded_resource_creation_supported() const { return driver->is_multithreaded_resource_creation_supported(); }
 
-	Vector<uint8_t> shader_compile_spirv_from_source(ShaderStage p_stage, const String &p_source_code, ShaderLanguage p_language = SHADER_LANGUAGE_GLSL, String *r_error = nullptr, bool p_allow_cache = true);
+	// p_target_container_format overrides the GLSL dialect and SPIR-V version the compile
+	// targets; null means the live driver's own container format. The shader baker needs the
+	// override: it bakes for an export target whose accepted SPIR-V version can differ from
+	// the editor driver's (Metal compiles at 1.6; the WebGPU container must stay at 1.3
+	// because Tint's runtime reader rejects anything newer).
+	Vector<uint8_t> shader_compile_spirv_from_source(ShaderStage p_stage, const String &p_source_code, ShaderLanguage p_language = SHADER_LANGUAGE_GLSL, String *r_error = nullptr, bool p_allow_cache = true, const RenderingShaderContainerFormat *p_target_container_format = nullptr);
 	Vector<uint8_t> shader_compile_binary_from_spirv(const Vector<ShaderStageSPIRVData> &p_spirv, const String &p_shader_name = "");
 
 	RID shader_create_from_spirv(const Vector<ShaderStageSPIRVData> &p_spirv, const String &p_shader_name = "");

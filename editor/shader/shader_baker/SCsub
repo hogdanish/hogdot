@@ -11,3 +11,7 @@ if env["d3d12"]:
 
 if env["metal"]:
     env.add_source_files(env.editor_sources, "shader_baker_export_plugin_platform_metal.cpp")
+
+# Always compiled: the WebGPU container it wraps is host-portable and built into
+# every editor (see drivers/SCsub), so any editor can bake for web exports.
+env.add_source_files(env.editor_sources, "shader_baker_export_plugin_platform_webgpu.cpp")

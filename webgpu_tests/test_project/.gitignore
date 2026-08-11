@@ -2,6 +2,7 @@
 .godot/
 export/
 export-threads/
+export-unbaked/
 *.import
 
 # OS files

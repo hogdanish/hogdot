@@ -30,8 +30,10 @@
 
 #pragma once
 
-#ifdef WEBGPU_ENABLED
-
+// ⚠ Deliberately not guarded by WEBGPU_ENABLED: the container only depends on
+// servers/rendering and is compiled into every editor build so the shader baker
+// can bake WebGPU shaders for web exports (see drivers/SCsub). The other
+// container headers (Vulkan, Metal, D3D12) are unguarded for the same reason.
 #include "servers/rendering/rendering_shader_container.h"
 
 class RenderingShaderContainerWebGPU : public RenderingShaderContainer {
@@ -100,5 +102,3 @@ public:
 		return SHADER_SPIRV_VERSION_1_3;
 	}
 };
-
-#endif // WEBGPU_ENABLED

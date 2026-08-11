@@ -1256,6 +1256,16 @@ taken.
 main thread, baking removes it. Neither subsumes the other, and threads cost a
 `SharedArrayBuffer`/COOP-COEP deployment constraint that baking does not.
 
+**Addendum 2026-08-11 (session 3): step 1 is implemented and verified at renders.** Container
+compiled into all editor builds, `ShaderBakerExportPluginPlatformWebGPU` registered, web export
+plugin declares the option/feature/warning. One new blocker found and fixed on the way: the bake
+compiled SPIR-V at the *editor driver's* target version (Metal 1.6, which runtime Tint rejects) —
+`compile_stages`/`shader_compile_spirv_from_source` now take the export target's container format.
+Browser evidence: 39 baked cache files, ~177 cache hits, 24 misses (all runtime-generated
+materials — unbakeable by design), clean render. RL-041's deferred half is closed by the same
+change. Step 2 (bake WGSL) still gated on the measurement; see
+`.claude/work/plans/features/feature-shader-baker.md`.
+
 ### RL-043 — 2026-08-10 — **blocker** (fixed)
 **Where:** `servers/rendering/renderer_rd/shader_rd.cpp` (`_compile_variant`, `_compile_version_end`),
 `servers/rendering/rendering_device_driver.h`, `servers/rendering/rendering_device.h`,

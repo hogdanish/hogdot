@@ -57,13 +57,6 @@ bool ShaderBakerExportPlugin::_is_active(const Vector<String> &p_features) const
 	if (!p_features.has("shader_baker")) {
 		// Silent, and deliberately so — this is the ordinary case. Either the preset did
 		// not ask for baking, or the export platform does not offer it at all.
-		//
-		// ⚠ The Web platform is the second kind: `platform/web/export/export_plugin.cpp`
-		// neither declares a `shader_baker/enabled` option nor pushes this feature, so a
-		// web export never reaches any of the machinery below no matter what the .cfg
-		// says. A `shader_baker/enabled=true` sitting in a Web preset is an inert key.
-		// See RL-041/RL-042; making it live is part of registering a WebGPU baker, not a
-		// diagnostic.
 		return false;
 	}
 
@@ -97,8 +90,8 @@ bool ShaderBakerExportPlugin::_initialize_container_format(const Ref<EditorExpor
 	// that succeeds, and a pack that differs only by the bytes the baking never added.
 	// A project can carry `shader_baker/enabled=true` for months and believe it is paying
 	// for a cold-start mitigation it never had; that is exactly what happened to the
-	// WebGPU target, which has no registered platform at all. Naming the driver and the
-	// platforms that *were* registered turns a phantom feature into one log line.
+	// WebGPU target before RL-042 registered its baker platform. Naming the driver and
+	// the platforms that *were* registered turns a phantom feature into one log line.
 	WARN_PRINT(vformat("Shader baking was requested but no shader baker is registered for the rendering driver \"%s\", so no shaders will be baked. This editor build registers bakers for: %s.",
 			shader_container_driver,
 			platforms.is_empty() ? String("(none)") : _get_registered_platform_drivers()));
@@ -475,7 +468,11 @@ void ShaderBakerExportPlugin::_customize_shader_version(ShaderRD *p_shader, RID 
 void ShaderBakerExportPlugin::_process_work_item(WorkItem p_work_item) {
 	if (!tasks_cancelled) {
 		// Only process the item if the tasks haven't been cancelled by the user yet.
-		Vector<RD::ShaderStageSPIRVData> spirv_data = ShaderRD::compile_stages(p_work_item.stage_sources, p_work_item.dynamic_buffers);
+		// Compile against the *export target's* container format, not the editor driver's.
+		// Without this the SPIR-V inherits the editor driver's target version (Metal: 1.6),
+		// and a WebGPU bake produces modules Tint's runtime reader rejects — every baked
+		// shader would silently miss at load and fall back to runtime compilation.
+		Vector<RD::ShaderStageSPIRVData> spirv_data = ShaderRD::compile_stages(p_work_item.stage_sources, p_work_item.dynamic_buffers, shader_container_format);
 		if (unlikely(spirv_data.is_empty())) {
 			ERR_PRINT("Unable to retrieve SPIR-V data for shader.");
 		} else {
