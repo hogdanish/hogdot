@@ -222,7 +222,7 @@ func _add_swatch(p_layer: CanvasLayer, p_label: String, p_value: float, p_column
 
 
 ## Everything a machine can check about this feature is on one line. Whether the bright swatches
-## are actually brighter is a human judgement on an HDR panel and is not claimed here.
+## are actually brighter is a human judgment on an HDR panel and is not claimed here.
 func _report() -> void:
 	var want_hdr := not _wants_sdr()
 	_read_hdr_state()
