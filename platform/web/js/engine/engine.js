@@ -317,8 +317,13 @@ const Engine = (function () {
 				desc.requiredFeatures = (desc.requiredFeatures || []).concat(['timestamp-query']);
 			}
 			// Request optional texture format tiers used by Godot (r16snorm, rg16snorm, etc.).
+			//
+			// ⚠ 'readonly-and-readwrite-storage-textures' is deliberately absent. It is not
+			// a GPUFeatureName and never was — the capability is the WGSL language feature
+			// `readonly_and_readwrite_storage_textures`, on navigator.gpu.wgslLanguageFeatures,
+			// and nothing has to be requested to use it. Asking for it here matched no
+			// adapter feature on any browser and was silently dropped every time. See WA-01.
 			const optionalFeatures = [
-				'readonly-and-readwrite-storage-textures',
 				'texture-formats-tier1',
 				'texture-formats-tier2',
 				'float32-filterable',
@@ -367,6 +372,20 @@ const Engine = (function () {
 				}
 			}
 			return adapter.requestDevice(desc).then(function (device) {
+				// Stash the adapter's identity on the device. This function returns only
+				// the device, and the adapter is otherwise unreachable from the engine —
+				// which is why RenderingContextDriverWebGPU used to report the literal
+				// "WebGPU Device" for every GPU on every machine. `GPUAdapterInfo` is the
+				// only identity WebGPU exposes, and browsers gate `device` and
+				// `description` behind a developer flag, so vendor and architecture are
+				// usually all there is. See WA-10-c.
+				const adapterInfo = adapter.info || {};
+				device['godotAdapterInfo'] = {
+					'vendor': adapterInfo.vendor || '',
+					'architecture': adapterInfo.architecture || '',
+					'device': adapterInfo.device || '',
+					'description': adapterInfo.description || '',
+				};
 				// Monitor device loss (non-blocking — just log).
 				device.lost.then(function (info) {
 					const reason = info.reason || 'unknown';

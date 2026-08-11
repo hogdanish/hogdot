@@ -38,6 +38,11 @@
 // Device is now created from C++ using the emdawnwebgpu port's Dawn API.
 #include <emscripten/emscripten.h>
 
+// ⚠ Emscripten does not scan EM_ASM bodies for JS library symbols, so a runtime helper
+// used only from one gets dead-stripped and fails at run time, not at link time. The
+// adapter-identity block below calls stringToNewUTF8; declare that dependency explicitly.
+EM_JS_DEPS(godot_webgpu_context_deps, "$stringToNewUTF8");
+
 RenderingContextDriverWebGPU::RenderingContextDriverWebGPU() {
 }
 
@@ -86,10 +91,73 @@ Error RenderingContextDriverWebGPU::initialize() {
 	queue = wgpuDeviceGetQueue(device);
 	ERR_FAIL_COND_V_MSG(queue == nullptr, ERR_CANT_CREATE, "WebGPU: Failed to get device queue.");
 
-	// Populate device info.
+	// Populate device info from the adapter identity engine.js stashed on the device.
+	//
+	// ⚠ Everything RenderingServer.get_video_adapter_name() reports on web comes from
+	// here, and it used to be the literal "WebGPU Device" on every machine. The four
+	// GPUAdapterInfo fields are newline-joined on the JS side rather than fetched one at
+	// a time, so this costs one call across the boundary. `device` and `description` are
+	// gated behind a browser developer flag and are usually empty; the measured ceiling on
+	// an Apple M5 in Chrome 151 is vendor "apple", architecture "metal-3". See WA-10-c.
 	device_info.name = "WebGPU Device";
 	device_info.vendor = Vendor::VENDOR_UNKNOWN;
 	device_info.type = DEVICE_TYPE_INTEGRATED_GPU;
+
+	char *adapter_info_utf8 = (char *)EM_ASM_PTR({
+		var d = Module["preinitializedWebGPUDevice"];
+		var info = (d && d["godotAdapterInfo"]) || null;
+		if (!info) {
+			return 0;
+		}
+		// ⚠ Concatenation, not an array join. EM_ASM is a macro, so the C preprocessor
+		// splits its body on every top-level comma — and square brackets do not protect
+		// one the way parentheses do.
+		var joined = info["vendor"] + '\n' + info["architecture"] + '\n' + info["device"] + '\n' + info["description"];
+		return stringToNewUTF8(joined);
+	});
+	if (adapter_info_utf8 != nullptr) {
+		Vector<String> fields = String::utf8(adapter_info_utf8).split("\n", true);
+		free(adapter_info_utf8);
+		const String vendor_str = fields.size() > 0 ? fields[0].strip_edges() : String();
+		const String arch_str = fields.size() > 1 ? fields[1].strip_edges() : String();
+		const String device_str = fields.size() > 2 ? fields[2].strip_edges() : String();
+		const String description_str = fields.size() > 3 ? fields[3].strip_edges() : String();
+
+		// Prefer the specific names when the browser gives them, and fall back to the
+		// vendor/architecture pair, which it almost always does.
+		Vector<String> parts;
+		if (!device_str.is_empty()) {
+			parts.push_back(device_str);
+		} else if (!description_str.is_empty()) {
+			parts.push_back(description_str);
+		}
+		if (!vendor_str.is_empty()) {
+			parts.push_back(vendor_str);
+		}
+		if (!arch_str.is_empty()) {
+			parts.push_back(arch_str);
+		}
+		if (!parts.is_empty()) {
+			device_info.name = String(" - ").join(parts);
+		}
+
+		if (vendor_str == "apple") {
+			device_info.vendor = Vendor::VENDOR_APPLE;
+		} else if (vendor_str == "nvidia") {
+			device_info.vendor = Vendor::VENDOR_NVIDIA;
+		} else if (vendor_str == "intel") {
+			device_info.vendor = Vendor::VENDOR_INTEL;
+		} else if (vendor_str == "amd") {
+			device_info.vendor = Vendor::VENDOR_AMD;
+		} else if (vendor_str == "arm") {
+			device_info.vendor = Vendor::VENDOR_ARM;
+		} else if (vendor_str == "qualcomm") {
+			device_info.vendor = Vendor::VENDOR_QUALCOMM;
+		} else if (vendor_str == "microsoft") {
+			device_info.vendor = Vendor::VENDOR_MICROSOFT;
+		}
+	}
+	print_verbose(vformat("WebGPU: adapter reported as '%s'.", device_info.name));
 
 	print_verbose("WebGPU: Device imported from JS successfully.");
 	return OK;
