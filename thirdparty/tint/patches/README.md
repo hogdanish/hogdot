@@ -24,6 +24,7 @@ done
 | 0005 | ir_to_program.cc | Spec constants | `@size` emission guard + capability |
 | 0006 | parse_num.cc | Vendoring | Replace `absl::from_chars` with `std::from_chars` |
 | 0007 | reader/lower/texture.cc | Handle params | Drop unreachable functions before texture lowering |
+| 0008 | ice.h, ice.cc | Crash containment | Process-global ICE handler that may longjmp instead of trapping |
 
 ## Logical Groups
 
@@ -53,6 +54,16 @@ hits this through `area_lights_inc.glsl`, whose LTC helpers take `texture2D`/`sa
 parameters and are called from more than one site — added by area lights, which do not
 exist in 4.6.2, which is why GodotWebGPU never saw it. This one is a genuine upstream
 Tint bug and is the best candidate of the seven for an upstream report.
+
+**Group F — Crash containment (0008)**: every `TINT_ASSERT`/`TINT_ICE`/`TINT_UNREACHABLE`
+ends in a `[[noreturn]]` destructor that traps the process. In a wasm build that aborts
+the module and permanently kills the browser main loop, so one untranslatable shader
+(e.g. a switch fallthrough, which the SPIR-V reader asserts on) takes the whole tab
+down. The patch adds `SetInternalCompilerErrorHandler()`, a process-global hook the
+destructor consults first; unlike the per-call callback it may transfer control away
+(longjmp) instead of returning. `drivers/webgpu/tint_wrapper.cpp` installs a handler
+that longjmps back to the `SpirvToWgsl` call site, so an ICE reports as an ordinary
+translation failure and the engine falls back to an invalid-shader material.
 
 ## Upstream Source
 

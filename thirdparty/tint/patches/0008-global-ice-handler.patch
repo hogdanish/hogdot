@@ -1,0 +1,50 @@
+diff --git a/thirdparty/tint/src/tint/utils/ice/ice.cc b/thirdparty/tint/src/tint/utils/ice/ice.cc
+index 6649ca3bc2..ce4d025d40 100644
+--- a/thirdparty/tint/src/tint/utils/ice/ice.cc
++++ b/thirdparty/tint/src/tint/utils/ice/ice.cc
+@@ -36,6 +36,14 @@
+ 
+ namespace tint {
+ 
++namespace {
++InternalCompilerErrorCallbackInfo global_ice_handler = {};
++}  // namespace
++
++void SetInternalCompilerErrorHandler(InternalCompilerErrorCallbackInfo handler) {
++    global_ice_handler = handler;
++}
++
+ InternalCompilerError::InternalCompilerError(const char* file,
+                                              size_t line,
+                                              InternalCompilerErrorCallback callback)
+@@ -55,6 +63,12 @@ InternalCompilerError::~InternalCompilerError() {
+ ********************************************************************
+ )";
+ 
++    // Give the process-global handler the chance to recover: it may transfer control
++    // away (e.g. longjmp back to the embedder's API call site) instead of returning.
++    if (global_ice_handler.callback) {
++        global_ice_handler.callback(err.str(), global_ice_handler.userdata);
++    }
++
+     // When consuming the ICE, log the error message and never return.
+     // Default to stderr unless an ICE callback is provided.
+     if (callback_info_ && callback_info_->callback) {
+diff --git a/thirdparty/tint/src/tint/utils/ice/ice.h b/thirdparty/tint/src/tint/utils/ice/ice.h
+index a6fb44df19..8e2ec11377 100644
+--- a/thirdparty/tint/src/tint/utils/ice/ice.h
++++ b/thirdparty/tint/src/tint/utils/ice/ice.h
+@@ -45,6 +45,13 @@ struct InternalCompilerErrorCallbackInfo {
+ };
+ using InternalCompilerErrorCallback = std::optional<InternalCompilerErrorCallbackInfo>;
+ 
++/// Sets a process-global handler consulted before an ICE terminates the process. Unlike the
++/// per-call callback, the handler is allowed to transfer control away instead of returning
++/// (e.g. via longjmp), in which case the process is not terminated. If the handler returns,
++/// termination proceeds as normal. Pass a default-constructed info to clear the handler.
++/// Not thread-safe: install and fire on one thread only.
++void SetInternalCompilerErrorHandler(InternalCompilerErrorCallbackInfo handler);
++
+ /// InternalCompilerError is a helper for reporting internal compiler errors.
+ /// Construct the InternalCompilerError with the source location of the ICE fault and append any
+ /// error details with the `<<` operator. When the InternalCompilerError is destructed, the

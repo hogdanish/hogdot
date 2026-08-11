@@ -45,6 +45,13 @@ struct InternalCompilerErrorCallbackInfo {
 };
 using InternalCompilerErrorCallback = std::optional<InternalCompilerErrorCallbackInfo>;
 
+/// Sets a process-global handler consulted before an ICE terminates the process. Unlike the
+/// per-call callback, the handler is allowed to transfer control away instead of returning
+/// (e.g. via longjmp), in which case the process is not terminated. If the handler returns,
+/// termination proceeds as normal. Pass a default-constructed info to clear the handler.
+/// Not thread-safe: install and fire on one thread only.
+void SetInternalCompilerErrorHandler(InternalCompilerErrorCallbackInfo handler);
+
 /// InternalCompilerError is a helper for reporting internal compiler errors.
 /// Construct the InternalCompilerError with the source location of the ICE fault and append any
 /// error details with the `<<` operator. When the InternalCompilerError is destructed, the

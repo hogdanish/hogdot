@@ -36,6 +36,14 @@
 
 namespace tint {
 
+namespace {
+InternalCompilerErrorCallbackInfo global_ice_handler = {};
+}  // namespace
+
+void SetInternalCompilerErrorHandler(InternalCompilerErrorCallbackInfo handler) {
+    global_ice_handler = handler;
+}
+
 InternalCompilerError::InternalCompilerError(const char* file,
                                              size_t line,
                                              InternalCompilerErrorCallback callback)
@@ -54,6 +62,12 @@ InternalCompilerError::~InternalCompilerError() {
 *  crbug.com/tint with the source program that triggered the bug.  *
 ********************************************************************
 )";
+
+    // Give the process-global handler the chance to recover: it may transfer control
+    // away (e.g. longjmp back to the embedder's API call site) instead of returning.
+    if (global_ice_handler.callback) {
+        global_ice_handler.callback(err.str(), global_ice_handler.userdata);
+    }
 
     // When consuming the ICE, log the error message and never return.
     // Default to stderr unless an ICE callback is provided.
