@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3 uid="uid://dv3k7q8m1bswe"]
+
+[ext_resource type="Script" path="res://scripts/bad_shader_gate.gd" id="1"]
+
+[node name="BadShaderGate" type="Node3D"]
+script = ExtResource("1")
