@@ -198,9 +198,12 @@ String OS_Web::get_name() const {
 }
 
 void OS_Web::add_frame_delay(bool p_can_draw, bool p_wake_for_events) {
-#ifndef PROXY_TO_PTHREAD_ENABLED
+#ifdef PROXY_TO_PTHREAD_ENABLED
+	// The main loop runs on a pthread, where blocking in delay_usec is safe.
 	OS::add_frame_delay(p_can_draw, p_wake_for_events);
 #endif
+	// Otherwise the loop runs on the browser main thread, where delay_usec
+	// busy-waits; pacing happens by skipping rAF callbacks in web_main.cpp.
 }
 
 void OS_Web::vibrate_handheld(int p_duration_ms, float p_amplitude) {
