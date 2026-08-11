@@ -129,6 +129,95 @@ static bool _is_wgsl_ident_char(char p_c) {
 	return (p_c >= 'a' && p_c <= 'z') || (p_c >= 'A' && p_c <= 'Z') || (p_c >= '0' && p_c <= '9') || p_c == '_';
 }
 
+// Might a sampler ever be paired with the texture `p_name` in `p_wgsl`?
+//
+// A sampled-texture binding only has to be filterable when a sampler is statically paired
+// with it. WebGPU's format table then decides what can be bound: `float` admits only
+// formats whose sample type is float, which excludes every depth format, while
+// `unfilterable-float` admits depth formats too (measured against Dawn in Chrome 151 — the
+// rejection names the permitted set as `UnfilterableFloat|Depth`). Declaring a
+// never-sampled binding `unfilterable-float` is therefore a widening: it accepts strictly
+// more textures than `float` did and removes nothing, because a texel fetch takes no
+// sampler.
+//
+// ⚠ This is a **whitelist, and it has to be.** The obvious implementation — look for
+// `textureSample*` calls naming this variable — is wrong, and Dawn caught it on the first
+// run: `Texture binding (group:0, binding:34) is TextureSampleType::UnfilterableFloat but
+// used statically with a sampler (group:1, binding:32) that's SamplerBindingType::Filtering`
+// against SceneForwardMobileShaderRD. Godot's scene shader hands textures to helper
+// functions, so the sampling call names the *parameter*, not the global, and a
+// blacklist sees nothing. The same trap is why RL-027's rewrite tracks function
+// parameters.
+//
+// So: a binding is treated as unsampled only when **every** use of its name is the first
+// argument of a builtin that takes no sampler. Anything else — a user function call, a
+// later argument position, an alias — answers "sampled" and keeps the strict declaration.
+static bool _wgsl_texture_is_sampled(const char *p_wgsl, const char *p_name) {
+	const size_t nlen = strlen(p_name);
+	if (nlen == 0) {
+		return true; // Name unknown — assume the strictest declaration.
+	}
+	// Builtins that read a texture without a sampler. Deliberately excludes every
+	// textureSample*/textureGather* form, which all take one.
+	static const char *samplerless_calls[] = {
+		"textureLoad", "textureDimensions", "textureNumLevels", "textureNumSamples", "textureNumLayers"
+	};
+
+	bool saw_samplerless_use = false;
+	const char *p = p_wgsl;
+	while ((p = strstr(p, p_name)) != nullptr) {
+		// Whole-identifier matches only.
+		if ((p != p_wgsl && _is_wgsl_ident_char(p[-1])) || _is_wgsl_ident_char(p[nlen])) {
+			p += nlen;
+			continue;
+		}
+		const char *back = p;
+		while (back > p_wgsl && (back[-1] == ' ' || back[-1] == '\n' || back[-1] == '\t')) {
+			back--;
+		}
+		// Preceded by the token before it: either a call's open paren, or `var` at the
+		// declaration itself.
+		const char *tok_end = back;
+		if (back > p_wgsl && back[-1] == '(') {
+			tok_end = back - 1;
+			while (tok_end > p_wgsl && tok_end[-1] == ' ') {
+				tok_end--;
+			}
+			const char *tok_start = tok_end;
+			while (tok_start > p_wgsl && _is_wgsl_ident_char(tok_start[-1])) {
+				tok_start--;
+			}
+			const size_t tok_len = (size_t)(tok_end - tok_start);
+			bool samplerless = false;
+			for (const char *fc : samplerless_calls) {
+				if (tok_len == strlen(fc) && strncmp(tok_start, fc, tok_len) == 0) {
+					samplerless = true;
+					break;
+				}
+			}
+			if (!samplerless) {
+				return true; // Some other call takes it — assume a sampler comes with it.
+			}
+			saw_samplerless_use = true;
+			p += nlen;
+			continue;
+		}
+		// The declaration site: `var NAME : texture_…`.
+		const char *tok_start = tok_end;
+		while (tok_start > p_wgsl && _is_wgsl_ident_char(tok_start[-1])) {
+			tok_start--;
+		}
+		if ((size_t)(tok_end - tok_start) == 3 && strncmp(tok_start, "var", 3) == 0) {
+			p += nlen;
+			continue;
+		}
+		return true; // Any other context.
+	}
+	// A name with no samplerless use at all (unused, or used only in ways not recognized
+	// above) keeps the strict declaration.
+	return !saw_samplerless_use;
+}
+
 // Does the shader reference the module-scope variable declared at `p_decl`
 // ("@group(G) @binding(B) var[<...>] NAME : TYPE;") anywhere beyond that
 // declaration itself?
@@ -453,6 +542,44 @@ static bool _is_depth_format(WGPUTextureFormat p_format) {
 	}
 }
 
+// Does this WGSL storage-texture format accept the `read_write` access mode?
+//
+// ⚠ The readonly_and_readwrite_storage_textures language feature does NOT make every
+// storage format read-writable. WebGPU permits `read_write` on r32float, r32uint and
+// r32sint only; every other storage format is rejected at bind-group-layout creation with
+// "Texture format … does not support storage texture access StorageTextureAccess::ReadWrite",
+// feature or no feature. Measured in Chrome 151 on 2026-08-11 against r32float, r32uint,
+// r32sint, rgba8unorm, rgba16float and rgba32float. `read` (read-only) has no such
+// restriction and works for all of them.
+static bool _wgsl_storage_format_supports_read_write(const String &p_wgsl_format) {
+	return p_wgsl_format == "r32float" || p_wgsl_format == "r32uint" || p_wgsl_format == "r32sint";
+}
+
+// Same rule, keyed on the WGPU format enum rather than the WGSL spelling.
+static bool _storage_format_supports_read_write(WGPUTextureFormat p_format) {
+	switch (p_format) {
+		case WGPUTextureFormat_R32Float:
+		case WGPUTextureFormat_R32Uint:
+		case WGPUTextureFormat_R32Sint:
+			return true;
+		default:
+			return false;
+	}
+}
+
+// Returns true if the format carries a stencil aspect alongside its depth aspect.
+// A view over such a texture must select one aspect before it can be bound as a
+// sampled texture; `WGPUTextureAspect_All` is rejected outright.
+static bool _is_depth_stencil_format(WGPUTextureFormat p_format) {
+	switch (p_format) {
+		case WGPUTextureFormat_Depth24PlusStencil8:
+		case WGPUTextureFormat_Depth32FloatStencil8:
+			return true;
+		default:
+			return false;
+	}
+}
+
 // Returns true for 32-bit float formats that require the float32-filterable
 // feature for linear sampling (R32Float, RG32Float, RGBA32Float).
 static bool _is_float32_format(WGPUTextureFormat p_format) {
@@ -485,6 +612,117 @@ static WGPUTextureSampleType _texture_sample_type_for_format(WGPUTextureFormat p
 		default:
 			return WGPUTextureSampleType_UnfilterableFloat;
 	}
+}
+
+// Short name for a WGPUTextureFormat, for diagnostics only. Formats outside the
+// handful that reach a fallback substitution print as their numeric enumerator.
+static String _format_name(WGPUTextureFormat p_format) {
+	switch (p_format) {
+		case WGPUTextureFormat_Depth16Unorm:
+			return "depth16unorm";
+		case WGPUTextureFormat_Depth24Plus:
+			return "depth24plus";
+		case WGPUTextureFormat_Depth24PlusStencil8:
+			return "depth24plus-stencil8";
+		case WGPUTextureFormat_Depth32Float:
+			return "depth32float";
+		case WGPUTextureFormat_Depth32FloatStencil8:
+			return "depth32float-stencil8";
+		case WGPUTextureFormat_R32Float:
+			return "r32float";
+		case WGPUTextureFormat_RG32Float:
+			return "rg32float";
+		case WGPUTextureFormat_RGBA32Float:
+			return "rgba32float";
+		case WGPUTextureFormat_RGBA8Unorm:
+			return "rgba8unorm";
+		default:
+			return "format#" + itos((int)p_format);
+	}
+}
+
+// Returns a depth-aspect view of a depth or depth/stencil texture, for binding it as a
+// sampled texture. Created on first use and cached on the texture; released in
+// texture_free.
+//
+// ⚠ `default_view` cannot be used for this. It has `aspect = All`, and WebGPU rejects a
+// multi-aspect view in a texture binding outright — "Multiple aspects (Depth|Stencil)
+// selected" — before it ever looks at the sample type. Godot's Mobile depth attachment is
+// D24_UNORM_S8_UINT, so this applies to the exact texture WA-18 is about.
+//
+// ⚠ The descriptor's `format` is deliberately left Undefined. Dawn resolves it to the
+// *aspect's* format, and naming the texture's own format instead is an error: "The view
+// format (Depth24PlusStencil8) is not compatible with TextureAspect::DepthOnly …
+// (Depth24Plus)". Measured in Chrome 151.
+static WGPUTextureView _get_sampled_depth_view(WGTexture *p_tex) {
+	if (p_tex->sampled_depth_view != nullptr) {
+		return p_tex->sampled_depth_view;
+	}
+	WGPUTextureViewDescriptor vd = {};
+	vd.dimension = p_tex->view_dimension;
+	vd.baseMipLevel = p_tex->base_mipmap;
+	vd.mipLevelCount = p_tex->mipmaps;
+	vd.baseArrayLayer = p_tex->base_layer;
+	vd.arrayLayerCount = p_tex->layers;
+	vd.aspect = WGPUTextureAspect_DepthOnly;
+	p_tex->sampled_depth_view = wgpuTextureCreateView(p_tex->gpu_handle(), &vd);
+	return p_tex->sampled_depth_view;
+}
+
+// Can a depth-format texture be bound to a layout entry declaring this sample type?
+// Depth formats advertise `unfilterable-float` and `depth`, and nothing else — Dawn's
+// rejection message names that pair verbatim. Measured in Chrome 151 against
+// depth16unorm, depth24plus, depth24plus-stencil8, depth32float and
+// depth32float-stencil8, multisampled and not.
+static bool _sample_type_accepts_depth(WGPUTextureSampleType p_type) {
+	return p_type == WGPUTextureSampleType_Depth || p_type == WGPUTextureSampleType_UnfilterableFloat;
+}
+
+// The eight places a bind group can substitute a blank fallback texture for the
+// resource Godot asked to bind. Each is a *validation* repair: it keeps Dawn from
+// rejecting the bind group, at the price of the shader reading zeros.
+enum FallbackSubstitutionSite {
+	FB_SITE_TEX_DEPTH, // Separate texture, depth format into a Float slot.
+	FB_SITE_TEX_FLOAT32, // Separate texture, unfilterable 32F without float32-filterable.
+	FB_SITE_TEX_DIM, // Separate texture, view dimension cannot be built.
+	FB_SITE_SWT_MSAA, // Combined sampler+texture, sample-count / depth mismatch.
+	FB_SITE_SWT_DEPTH, // Combined sampler+texture, depth format into a Float slot.
+	FB_SITE_SWT_FLOAT32, // Combined sampler+texture, unfilterable 32F.
+	FB_SITE_SWT_DIM, // Combined sampler+texture, view dimension cannot be built.
+	FB_SITE_RETARGET_DEPTH, // Uniform set retargeted to a shader whose slot is Float.
+};
+
+// ⚠ These substitutions are silent by construction, and that silence has cost real
+// time: WA-18 (the Mobile renderer's depth back-buffer copy reading zeros engine-wide,
+// so every `hint_depth_texture` shader saw an empty scene) sat behind FB_SITE_SWT_DEPTH
+// for the whole port. A shim that hands a data-movement shader an empty texture produces
+// a plausible-looking frame and no error anywhere. Warn once per distinct site, format
+// and binding so the next instance of this bug class is a console read.
+static HashSet<uint64_t> _fallback_substitution_warned;
+
+// Sum of the GPU allocations this driver owns — every buffer, and every texture that owns
+// its WGPUTexture (shared and sliced views alias one and are not counted twice). Backs
+// get_total_memory_used(), which returned a flat 0 before, so RenderingServer's memory
+// figures and the F3 overlay reporting them had nothing to show. WebGPU exposes no
+// allocator query, so this is the only number available. File scope rather than a member
+// because the deferred buffer-map callback is a free function and frees on its own path.
+static uint64_t _tracked_memory_used = 0;
+
+static void _warn_fallback_substitution(FallbackSubstitutionSite p_site, const char *p_why, const String &p_shader_name, WGPUTextureFormat p_format, uint32_t p_set, uint32_t p_binding, uint32_t p_width, uint32_t p_height) {
+	const uint64_t key = ((uint64_t)p_site << 48) | ((uint64_t)p_format << 24) | ((uint64_t)(p_set & 0xFFF) << 12) | (uint64_t)(p_binding & 0xFFF);
+	if (_fallback_substitution_warned.has(key)) {
+		return;
+	}
+	_fallback_substitution_warned.insert(key);
+	// The size is the reader's only cheap way to tell a lost render target from a
+	// placeholder: Godot fills unused depth slots with a 4x4 D16_UNORM constant
+	// (TextureStorage::DEFAULT_RD_TEXTURE_DEPTH), where substituting a blank costs nothing.
+	const bool looks_like_placeholder = (p_width <= 4 && p_height <= 4);
+	WARN_PRINT(vformat("WebGPU: substituted a blank fallback texture for a %dx%d %s texture in shader '%s' at set %d binding %d (%s). This binding now reads zeros. %s",
+			p_width, p_height, _format_name(p_format), p_shader_name, p_set, p_binding, p_why,
+			looks_like_placeholder
+					? "At this size it is almost certainly one of Godot's default placeholder textures, so nothing real was lost."
+					: "If the shader copies, resolves or otherwise moves data, its output is now empty."));
 }
 
 // =============================================================================
@@ -976,16 +1214,27 @@ void RenderingDeviceDriverWebGPU::_check_capabilities() {
 		print_verbose("WebGPU: texture-formats-tier1 feature is available — r8/rg8 storage formats supported natively.");
 	}
 
-	// readonly-and-readwrite-storage-textures: allows read and read_write access
-	// modes on storage textures. Without this, only write-only is valid.
+	// readonly_and_readwrite_storage_textures: allows `read` and `read_write` access
+	// modes on storage textures. Without it, only `write` is valid.
+	//
+	// ⚠ This is a **WGSL language feature**, not a GPUFeatureName, and it is spelled with
+	// underscores. It lives on `navigator.gpu.wgslLanguageFeatures`, never on the adapter's
+	// or device's `features` set. The old probe asked `device.features` for the hyphenated
+	// name, which is not a member of that enum on any browser, so it answered false
+	// everywhere and forever — and the audit that read the adapter's feature list drew the
+	// same wrong conclusion from the same wrong place. Measured in Chrome 151 on 2026-08-11:
+	// wgslLanguageFeatures.has('readonly_and_readwrite_storage_textures') is true, while
+	// adapter.features.has('readonly-and-readwrite-storage-textures') is false. See WA-01.
 	has_rw_storage_textures = (bool)EM_ASM_INT({
-		var d = Module['preinitializedWebGPUDevice'];
-		return (d && d.features && d.features.has('readonly-and-readwrite-storage-textures')) ? 1 : 0;
+		return (navigator['gpu'] && navigator['gpu']['wgslLanguageFeatures'] &&
+					   navigator['gpu']['wgslLanguageFeatures'].has('readonly_and_readwrite_storage_textures'))
+				? 1
+				: 0;
 	});
 	if (has_rw_storage_textures) {
-		print_verbose("WebGPU: readonly-and-readwrite-storage-textures feature is available.");
+		print_verbose("WebGPU: readonly_and_readwrite_storage_textures WGSL language feature is available.");
 	} else {
-		print_verbose("WebGPU: readonly-and-readwrite-storage-textures NOT available — will split read_write storage textures.");
+		WARN_PRINT("WebGPU: readonly_and_readwrite_storage_textures NOT available. read_write storage textures will be split into a write binding plus a never-refreshed shadow copy, which reads zeros for any GPU-produced texture.");
 	}
 
 	// Optional texture-compression families. The JS shell opts in to these when
@@ -1076,6 +1325,8 @@ RDD::BufferID RenderingDeviceDriverWebGPU::buffer_create(uint64_t p_size, BitFie
 		ERR_FAIL_V(BufferID());
 	}
 
+	_tracked_memory_used += buf->size;
+
 	return BufferID(buf);
 }
 
@@ -1110,6 +1361,8 @@ RDD::BufferID RenderingDeviceDriverWebGPU::buffer_create_with_data(uint64_t p_si
 		}
 	}
 	wgpuBufferUnmap(buf->handle);
+
+	_tracked_memory_used += buf->size;
 
 	return BufferID(buf);
 }
@@ -1150,6 +1403,7 @@ void RenderingDeviceDriverWebGPU::buffer_free(BufferID p_buffer) {
 
 	if (buf->handle) {
 		wgpuBufferRelease(buf->handle);
+		_tracked_memory_used -= MIN(_tracked_memory_used, buf->size);
 	}
 	if (buf->shadow_map) {
 		memfree(buf->shadow_map);
@@ -1180,6 +1434,7 @@ static void _buffer_deferred_map_cb(WGPUMapAsyncStatus p_status, WGPUStringView 
 				wgpuBufferUnmap(buf->handle);
 			}
 			wgpuBufferRelease(buf->handle);
+			_tracked_memory_used -= MIN(_tracked_memory_used, buf->size);
 		}
 		if (buf->shadow_map) {
 			memfree(buf->shadow_map);
@@ -1784,12 +2039,13 @@ RDD::TextureID RenderingDeviceDriverWebGPU::texture_create(const TextureFormat &
 	// Upgrade to 32-bit equivalents when storage binding is needed.
 	if (tex->usage & WGPUTextureUsage_StorageBinding) {
 		tex->format = _promote_storage_format(tex->format);
-		// When readonly-and-readwrite-storage-textures is unavailable, read and
-		// read_write storage textures are converted to sampled textures in the
-		// shader. We need CopySrc (for read_write shadow copies) and
-		// TextureBinding (so the texture can be bound as a sampled texture
-		// for read-only storage textures converted to texture_2d).
-		if (!has_rw_storage_textures) {
+		// When read_write cannot be expressed, read and read_write storage textures are
+		// converted to sampled textures in the shader. We need CopySrc (for read_write
+		// shadow copies) and TextureBinding (so the texture can be bound as a sampled
+		// texture for read-only storage textures converted to texture_2d).
+		// ⚠ The language feature alone is not enough to skip this: read_write is confined
+		// to r32float/r32uint/r32sint, so any other storage format is still split.
+		if (!has_rw_storage_textures || !_storage_format_supports_read_write(tex->format)) {
 			tex->usage |= WGPUTextureUsage_CopySrc | WGPUTextureUsage_TextureBinding;
 		}
 	}
@@ -1878,6 +2134,8 @@ RDD::TextureID RenderingDeviceDriverWebGPU::texture_create(const TextureFormat &
 		delete tex;
 		ERR_FAIL_V_MSG(TextureID(), "WebGPU: wgpuTextureCreateView failed for default view.");
 	}
+
+	_tracked_memory_used += texture_get_allocation_size(TextureID(tex));
 
 	return TextureID(tex);
 }
@@ -2084,8 +2342,12 @@ void RenderingDeviceDriverWebGPU::texture_free(TextureID p_texture) {
 	if (tex->default_view) {
 		wgpuTextureViewRelease(tex->default_view);
 	}
+	if (tex->sampled_depth_view) {
+		wgpuTextureViewRelease(tex->sampled_depth_view);
+	}
 	if (tex->handle && !tex->is_from_swap_chain) {
 		wgpuTextureRelease(tex->handle);
+		_tracked_memory_used -= MIN(_tracked_memory_used, texture_get_allocation_size(p_texture));
 	}
 	delete tex;
 }
@@ -3864,6 +4126,11 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 	// or texture_depth_multisampled_* at this binding. Used so BGL entries set
 	// texture.multisampled=true to match sampler2DMS (GLSL) bindings.
 	HashMap<uint32_t, bool> wgsl_is_multisampled_texture;
+	// Texture bindings the WGSL declares, and whether any of them is statically paired
+	// with a sampler. Absent means "not a sampled-texture declaration"; false means the
+	// binding is only ever texel-fetched, which lets the BGL entry widen to
+	// unfilterable-float and accept a depth format (see _wgsl_texture_is_sampled).
+	HashMap<uint32_t, bool> wgsl_texture_sampled;
 
 	// Read-write storage texture splits: maps (set << 16 | write_binding) → shadow_read_binding.
 	// Populated when readonly-and-readwrite-storage-textures is unavailable.
@@ -3915,12 +4182,19 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 
 		_apply_common_wgsl_passes(&wgsl_str, (ShaderStage)s.shader_stage);
 
-		// When readonly-and-readwrite-storage-textures is not available, split
-		// read_write storage textures into separate write + read (shadow) bindings.
-		// Safari rejects read_write storage texture access at BGL validation.
+		// Split read_write storage textures into separate write + read (shadow) bindings
+		// wherever `read_write` cannot be expressed. Safari rejects read_write storage
+		// texture access at BGL validation, and even where the language feature is present
+		// the access mode is confined to r32float/r32uint/r32sint — so this is decided per
+		// declaration, on the format, not once on the capability.
 		// The shadow read binding uses the odd slot (B+1) which is free for IMAGE
 		// types due to preprocessing's binding doubling (even=resource, odd=sampler for combined).
-		if (!has_rw_storage_textures && strstr(wgsl_str, "read_write>")) {
+		//
+		// ⚠ The split is lossy and always has been: the shadow texture is never refreshed
+		// for a GPU-produced texture (uniform_set_create declines the copy explicitly, and
+		// the only refresh sites are CPU upload paths), so the read half returns zeros. It
+		// is a way to keep a pipeline valid, not a way to keep it correct.
+		if (strstr(wgsl_str, "read_write>")) {
 			struct RWSplitInfo {
 				uint32_t grp, bnd;
 				String var_name, dim_type, fmt;
@@ -4021,6 +4295,12 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 						buf[fmt_len] = '\0';
 						info.fmt = String(buf).strip_edges();
 					}
+					// Leave the declaration alone when read_write is legal for it — the
+					// shader then reads the live texture instead of a stale shadow.
+					if (has_rw_storage_textures && _wgsl_storage_format_supports_read_write(info.fmt)) {
+						p = semi;
+						continue;
+					}
 					rw_infos.push_back(info);
 					p = semi;
 				}
@@ -4100,7 +4380,13 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 					uint32_t key = ((uint32_t)info.grp << 16) | info.bnd;
 					wgsl_rw_storage_splits[key] = shadow_bnd;
 				}
-				// Log the transformed WGSL for debugging.
+				// ⚠ WARN, not WEBGPU_DIAG. WEBGPU_DIAG compiles to ((void)0) in every normal
+				// build, so this transform — which silently turns a read_write texture into
+				// one that reads zeros — announced itself only in a diagnostic build nobody
+				// ships. That is how WA-01's jump-flood outline read an empty buffer on every
+				// pass with nothing in the console to say so.
+				WARN_PRINT_ONCE(vformat("WebGPU: shader '%s' has %d read_write storage texture(s) this device cannot express; each was split into a write binding plus a shadow read binding. WARNING: the shadow is never refreshed from a GPU-produced texture, so the read half returns zeros.",
+						shader->name, (int)rw_infos.size()));
 				WEBGPU_DIAG({ console.log('[RW-SPLIT] Split ' + $0 + ' read_write storage texture(s)'); }, (int)rw_infos.size());
 				print_verbose("WebGPU rw_storage split WGSL:\n" + ws);
 
@@ -4471,6 +4757,31 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 						if (tp && strncmp(tp, "texture_depth_", 14) == 0) {
 							uint32_t key = ((uint32_t)grp << 16) | (uint32_t)bnd;
 							wgsl_is_depth_texture[key] = true;
+						}
+						// Record whether any sampler is statically paired with this
+						// texture, so a binding that is only ever texel-fetched can be
+						// declared unfilterable-float and accept a depth format.
+						// Storage textures have no sample type and are skipped.
+						if (colon && colon < semi && strncmp(tp, "texture_storage_", 16) != 0) {
+							// The variable name is the identifier just before the colon.
+							const char *name_end = colon;
+							while (name_end > p && (name_end[-1] == ' ' || name_end[-1] == '\t')) {
+								name_end--;
+							}
+							const char *name_start = name_end;
+							while (name_start > p && _is_wgsl_ident_char(name_start[-1])) {
+								name_start--;
+							}
+							if (name_end > name_start) {
+								const String var_name = String::utf8(name_start, (int)(name_end - name_start));
+								const CharString var_name_cs = var_name.utf8();
+								const bool sampled = _wgsl_texture_is_sampled(wgsl_str, var_name_cs.get_data());
+								uint32_t key = ((uint32_t)grp << 16) | (uint32_t)bnd;
+								// One stage sampling it is enough — never downgrade.
+								if (!wgsl_texture_sampled.has(key) || sampled) {
+									wgsl_texture_sampled[key] = sampled;
+								}
+							}
 						}
 					}
 				}
@@ -4860,10 +5171,13 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 							bool is_ms = wgsl_is_multisampled_texture.has(k) && wgsl_is_multisampled_texture[k];
 							bool is_depth = wgsl_is_depth_texture.has(k) && wgsl_is_depth_texture[k];
 							// Multisampled float textures must use UnfilterableFloat, not Float
-							// (filtering is illegal for MSAA textures in WebGPU).
+							// (filtering is illegal for MSAA textures in WebGPU). A binding no
+							// sampler is paired with widens the same way, and gains the ability
+							// to accept a depth format — see WA-18 and _wgsl_texture_is_sampled.
+							bool never_sampled = wgsl_texture_sampled.has(k) && !wgsl_texture_sampled[k];
 							entry.texture.sampleType = is_depth
 									? WGPUTextureSampleType_Depth
-									: (is_ms ? WGPUTextureSampleType_UnfilterableFloat : WGPUTextureSampleType_Float);
+									: ((is_ms || never_sampled) ? WGPUTextureSampleType_UnfilterableFloat : WGPUTextureSampleType_Float);
 							entry.texture.viewDimension = wgsl_tex_dims.has(k) ? wgsl_tex_dims[k] : WGPUTextureViewDimension_2D;
 							entry.texture.multisampled = is_ms;
 						}
@@ -4894,14 +5208,27 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 							bool is_ms = wgsl_is_multisampled_texture.has(k) && wgsl_is_multisampled_texture[k];
 							bool is_depth = wgsl_is_depth_texture.has(k) && wgsl_is_depth_texture[k];
 							// Multisampled float textures must use UnfilterableFloat
-							// (filtering is illegal for MSAA textures in WebGPU).
+							// (filtering is illegal for MSAA textures in WebGPU). A binding no
+							// sampler is paired with widens the same way, and gains the ability
+							// to accept a depth format — see WA-18 and _wgsl_texture_is_sampled.
+							// Godot pairs a sampler with every combined binding whether or not
+							// the shader uses it for filtering: `resolve_raster.glsl` declares
+							// `sampler2DMS source_depth` and only ever texelFetches it.
+							bool never_sampled = wgsl_texture_sampled.has(k) && !wgsl_texture_sampled[k];
 							tex_entry.texture.sampleType = is_depth
 									? WGPUTextureSampleType_Depth
-									: (is_ms ? WGPUTextureSampleType_UnfilterableFloat : WGPUTextureSampleType_Float);
+									: ((is_ms || never_sampled) ? WGPUTextureSampleType_UnfilterableFloat : WGPUTextureSampleType_Float);
 							tex_entry.texture.viewDimension = wgsl_tex_dims.has(k) ? wgsl_tex_dims[k] : WGPUTextureViewDimension_2D;
 							tex_entry.texture.multisampled = is_ms;
 							// MSAA texture bindings with UnfilterableFloat require a NonFiltering sampler —
 							// override the sampler for this combined binding.
+							//
+							// ⚠ Deliberately NOT done for `never_sampled`. Dawn only rejects a
+							// filtering sampler paired with an unfilterable texture when the two
+							// are used *together* in a sampling call, and by construction they are
+							// not — whereas a NonFiltering layout entry would reject the linear
+							// sampler Godot binds by default, turning a working bind group into a
+							// validation error.
 							if (is_ms && !is_depth) {
 								samp_entry.sampler.type = WGPUSamplerBindingType_NonFiltering;
 							}
@@ -5417,12 +5744,19 @@ RDD::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_create(VectorView<Bou
 						WGPUBindGroupEntry entry = {};
 						entry.binding = uniform.binding * 2;
 
-						// Fix depth/float mismatch: if layout expects Float but
-						// texture has a depth format (common with Godot's depth
-						// fallback textures), substitute a float fallback texture.
-						if (expected_sample == WGPUTextureSampleType_Float &&
+						// A depth texture the layout can actually take: bind its depth
+						// aspect. The default view is multi-aspect and would be rejected.
+						// Otherwise fix the depth/float mismatch: a layout expecting Float
+						// can hold no depth format at all, so substitute a float fallback.
+						WGPUTextureView depth_aspect_view = (_is_depth_format(tex->format) && _sample_type_accepts_depth(expected_sample))
+								? _get_sampled_depth_view(tex)
+								: nullptr;
+						if (depth_aspect_view != nullptr) {
+							entry.textureView = depth_aspect_view;
+						} else if (expected_sample == WGPUTextureSampleType_Float &&
 								_is_depth_format(tex->format) &&
 								fallback_float_texture_view != nullptr) {
+							_warn_fallback_substitution(FB_SITE_TEX_DEPTH, "the shader declares this binding as a filterable float texture, which no depth format can satisfy", shader->name, tex->format, p_set_index, entry.binding, tex->width, tex->height);
 							// Also check if we need cube dimension for the depth fallback.
 							if (expected_dim == WGPUTextureViewDimension_Cube && fallback_cube_texture_view != nullptr) {
 								entry.textureView = fallback_cube_texture_view;
@@ -5438,6 +5772,7 @@ RDD::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_create(VectorView<Bou
 							// on Adreno). Substitute a filterable RGBA8 fallback to avoid
 							// validation errors. The texture data is lost but rendering
 							// continues without GPU errors.
+							_warn_fallback_substitution(FB_SITE_TEX_FLOAT32, "this adapter lacks float32-filterable and the shader wants a filterable float texture", shader->name, tex->format, p_set_index, entry.binding, tex->width, tex->height);
 							if (expected_dim == WGPUTextureViewDimension_Cube && fallback_cube_texture_view != nullptr) {
 								entry.textureView = fallback_cube_texture_view;
 							} else {
@@ -5451,6 +5786,7 @@ RDD::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_create(VectorView<Bou
 							if (expected_dim == WGPUTextureViewDimension_Cube && tex->layers < 6 &&
 									fallback_cube_texture_view != nullptr) {
 								// Can't create a cube view from a texture with < 6 layers.
+								_warn_fallback_substitution(FB_SITE_TEX_DIM, "the shader wants a cube view and the texture has fewer than 6 layers", shader->name, tex->format, p_set_index, entry.binding, tex->width, tex->height);
 								entry.textureView = fallback_cube_texture_view;
 							} else if (tex->view_source != nullptr) {
 								// Use slice base offsets so slice views don't
@@ -5489,12 +5825,14 @@ RDD::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_create(VectorView<Bou
 				// Look up expected texture dimension and sample type from the shader layout.
 				WGPUTextureViewDimension swt_expected_dim = WGPUTextureViewDimension_Undefined;
 				bool swt_expected_ms = false;
+				WGPUTextureSampleType swt_expected_sample = WGPUTextureSampleType_Undefined;
 				if (p_set_index < (uint32_t)shader->bind_group_infos.size()) {
 					uint32_t tex_binding = uniform.binding * 2 + 1;
 					for (const auto &bge : shader->bind_group_infos[p_set_index].entries) {
 						if (bge.layout_entry.binding == tex_binding) {
 							swt_expected_dim = bge.layout_entry.texture.viewDimension;
 							swt_expected_ms = (bool)bge.layout_entry.texture.multisampled;
+							swt_expected_sample = bge.layout_entry.texture.sampleType;
 							break;
 						}
 					}
@@ -5518,13 +5856,29 @@ RDD::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_create(VectorView<Bou
 						// which binds an MSAA depth texture into a float MSAA slot (WebGPU
 						// forbids sampling depth as float, so the MSAA fallback is used).
 						bool tex_is_ms = (tex->sample_count > 1);
-						if (swt_expected_ms && (!tex_is_ms || _is_depth_format(tex->format)) &&
+						// A depth texture the layout can actually take — bind its depth
+						// aspect rather than a blank fallback. This is the WA-18 repair:
+						// `resolve_raster.glsl` (MSAA) and the non-MSAA depth back-buffer
+						// copy both reach here with the real depth attachment, and both used
+						// to get zeros. The layout only accepts it when no sampler is
+						// statically paired with the binding, which is why the shader half of
+						// the fix makes that copy a texel fetch.
+						WGPUTextureView swt_depth_view = (_is_depth_format(tex->format) &&
+																 _sample_type_accepts_depth(swt_expected_sample) &&
+																 swt_expected_ms == tex_is_ms)
+								? _get_sampled_depth_view(tex)
+								: nullptr;
+						if (swt_depth_view != nullptr) {
+							te.textureView = swt_depth_view;
+						} else if (swt_expected_ms && (!tex_is_ms || _is_depth_format(tex->format)) &&
 								fallback_ms_texture_view != nullptr) {
+							_warn_fallback_substitution(FB_SITE_SWT_MSAA, tex_is_ms ? "the shader declares a multisampled float texture, which no depth format can satisfy" : "the shader declares a multisampled texture and the bound texture has one sample", shader->name, tex->format, p_set_index, te.binding, tex->width, tex->height);
 							te.textureView = fallback_ms_texture_view;
 						} else if (_is_depth_format(tex->format) && fallback_float_texture_view != nullptr) {
 							// Fix depth/float mismatch: combined sampler+texture bindings
 							// are always Float. If a depth fallback texture is provided,
 							// substitute a float fallback.
+							_warn_fallback_substitution(FB_SITE_SWT_DEPTH, "the shader samples this binding through a filtering sampler, which no depth format can satisfy", shader->name, tex->format, p_set_index, te.binding, tex->width, tex->height);
 							if (swt_expected_dim == WGPUTextureViewDimension_Cube && fallback_cube_texture_view != nullptr) {
 								te.textureView = fallback_cube_texture_view;
 							} else {
@@ -5534,6 +5888,7 @@ RDD::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_create(VectorView<Bou
 								_is_float32_format(tex->format) &&
 								fallback_float_texture_view != nullptr) {
 							// R32Float/RG32Float/RGBA32Float unfilterable without feature.
+							_warn_fallback_substitution(FB_SITE_SWT_FLOAT32, "this adapter lacks float32-filterable and the shader samples through a filtering sampler", shader->name, tex->format, p_set_index, te.binding, tex->width, tex->height);
 							if (swt_expected_dim == WGPUTextureViewDimension_Cube && fallback_cube_texture_view != nullptr) {
 								te.textureView = fallback_cube_texture_view;
 							} else {
@@ -5544,6 +5899,7 @@ RDD::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_create(VectorView<Bou
 							// Fix dimension mismatch (e.g., Cube↔2D with fallback textures).
 							if (swt_expected_dim == WGPUTextureViewDimension_Cube && tex->layers < 6 &&
 									fallback_cube_texture_view != nullptr) {
+								_warn_fallback_substitution(FB_SITE_SWT_DIM, "the shader wants a cube view and the texture has fewer than 6 layers", shader->name, tex->format, p_set_index, te.binding, tex->width, tex->height);
 								te.textureView = fallback_cube_texture_view;
 							} else if (tex->view_source != nullptr) {
 								// Use slice base offsets so slice views don't
@@ -5695,6 +6051,17 @@ RDD::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_create(VectorView<Bou
 		}
 		if (!orig_tex) {
 			continue;
+		}
+		// ⚠ The shadow is only ever refreshed from a CPU upload (texture_update →
+		// command_copy_buffer_to_texture). A texture the GPU writes — a render target or a
+		// storage-bound texture that never receives a CopyDst upload — has no path to the
+		// shadow at all, so the shader's read half returns zeros for the life of the set.
+		// That is WA-01 cause A: CommonGrounds' jump-flood outline seeds from a
+		// render-attachment texture and read an empty buffer on every pass.
+		if ((orig_tex->usage & (WGPUTextureUsage_RenderAttachment | WGPUTextureUsage_StorageBinding)) &&
+				!(orig_tex->usage & WGPUTextureUsage_CopyDst)) {
+			WARN_PRINT_ONCE(vformat("WebGPU: shader '%s' set %d binding %d reads a split read_write storage texture (%s, usage 0x%x) that the GPU produces and the CPU never uploads. Nothing can refresh its shadow copy, so this binding reads zeros every frame.",
+					shader->name, (int)p_set_index, (int)write_bnd, _format_name(orig_tex->format), (unsigned)orig_tex->usage));
 		}
 		// Create a shadow texture with the same format and size.
 		WGPUTextureDescriptor shadow_desc = {};
@@ -5893,6 +6260,9 @@ WGPUBindGroup RenderingDeviceDriverWebGPU::_get_compatible_bind_group(WGUniformS
 				if (source_tex_sample == WGPUTextureSampleType_Depth &&
 						target_tex_sample == WGPUTextureSampleType_Float &&
 						fallback_float_texture_view != nullptr) {
+					WGTexture *src_tex = p_us->bound_textures.has(entry.binding) ? p_us->bound_textures[entry.binding] : nullptr;
+					WGPUTextureFormat src_fmt = src_tex ? src_tex->format : WGPUTextureFormat_Undefined;
+					_warn_fallback_substitution(FB_SITE_RETARGET_DEPTH, "a uniform set built for a depth binding was rebound to a shader that declares it as a filterable float texture", p_target_shader->name, src_fmt, p_set_idx, entry.binding, src_tex ? src_tex->width : 0, src_tex ? src_tex->height : 0);
 					entry.textureView = fallback_float_texture_view;
 				}
 
@@ -9299,7 +9669,12 @@ uint64_t RenderingDeviceDriverWebGPU::get_resource_native_handle(DriverResource 
 }
 
 uint64_t RenderingDeviceDriverWebGPU::get_total_memory_used() {
-	return 0; // TODO: Track internally.
+	// ⚠ An accounting figure, not a driver query. WebGPU exposes nothing equivalent to
+	// VMA's statistics, so this sums what the driver allocated: buffer sizes as requested,
+	// texture sizes as Godot's own format-aware estimate. It excludes whatever the browser
+	// and the GPU driver add on top — alignment, tiling, descriptor tables — and excludes
+	// the swap chain, which the driver does not own. See WA-10-d.
+	return _tracked_memory_used;
 }
 
 uint64_t RenderingDeviceDriverWebGPU::get_lazily_memory_used() {

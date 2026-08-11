@@ -444,7 +444,11 @@ void RendererSceneRenderRD::_render_buffers_copy_depth_texture(const RenderDataR
 
 				resolve_effects->resolve_depth_raster(rb->get_depth_msaa(v), depth_back_fb, texture_multisamples[rb->get_msaa_3d()]);
 			} else {
-				copy_effects->copy_to_fb_rect(depth_texture, depth_back_fb, Rect2i(0, 0, size.x, size.y));
+				// A texel-for-texel depth copy, not a filtered blit — copy_to_fb_rect
+				// samples through a filtering sampler, which no depth format can be
+				// bound to on a backend that enforces WebGPU's sample-type rules. See
+				// Resolve::copy_depth_raster and WA-18.
+				resolve_effects->copy_depth_raster(depth_texture, depth_back_fb);
 			}
 		}
 	}

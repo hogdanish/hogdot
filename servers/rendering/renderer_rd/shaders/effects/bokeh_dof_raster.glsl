@@ -64,7 +64,14 @@ layout(set = 2, binding = 0) uniform sampler2D original_weight;
 #ifdef MODE_GEN_BLUR_SIZE
 
 float get_depth_at_pos(vec2 uv) {
-	float depth = textureLod(source_depth, uv, 0.0).x * 2.0 - 1.0;
+	// Texel fetch, not a filtered sample. Interpolating depth across a silhouette edge
+	// yields a distance no surface is at, so nearest is the better answer for a
+	// circle-of-confusion lookup anyway — and on a backend that enforces WebGPU's
+	// sample-type rules it is the only expressible one: a depth format cannot be paired
+	// with a filtering sampler, and the driver was handing this binding a blank texture
+	// instead, so DOF computed its blur from an empty depth buffer. See WA-18.
+	ivec2 texel = ivec2(uv * vec2(textureSize(source_depth, 0)));
+	float depth = texelFetch(source_depth, texel, 0).x * 2.0 - 1.0;
 	if (params.orthogonal) {
 		depth = -(depth * (params.z_far - params.z_near) - (params.z_far + params.z_near)) / 2.0;
 	} else {

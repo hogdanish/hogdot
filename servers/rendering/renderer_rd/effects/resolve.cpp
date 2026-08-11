@@ -41,10 +41,13 @@ Resolve::Resolve(bool p_prefer_raster_effects) {
 	if (prefer_raster_effects) {
 		Vector<String> resolve_modes;
 		resolve_modes.push_back("");
+		resolve_modes.push_back("\n#define MODE_COPY_DEPTH\n");
 
 		resolve_raster.shader.initialize(resolve_modes);
 		resolve_raster.shader_version = resolve_raster.shader.version_create();
-		resolve_raster.pipeline.setup(resolve_raster.shader.version_get_shader(resolve_raster.shader_version, 0), RD::RENDER_PRIMITIVE_TRIANGLES, RD::PipelineRasterizationState(), RD::PipelineMultisampleState(), RD::PipelineDepthStencilState(), RD::PipelineColorBlendState::create_disabled(), 0);
+		for (int i = 0; i < RESOLVE_RASTER_MODE_MAX; i++) {
+			resolve_raster.pipeline[i].setup(resolve_raster.shader.version_get_shader(resolve_raster.shader_version, i), RD::RENDER_PRIMITIVE_TRIANGLES, RD::PipelineRasterizationState(), RD::PipelineMultisampleState(), RD::PipelineDepthStencilState(), RD::PipelineColorBlendState::create_disabled(), 0);
+		}
 	} else {
 		Vector<String> resolve_modes;
 		resolve_modes.push_back("\n#define MODE_RESOLVE_GI\n");
@@ -159,11 +162,44 @@ void Resolve::resolve_depth_raster(RID p_source_rd_texture, RID p_dest_framebuff
 
 	RD::Uniform u_source_rd_texture(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ default_sampler, p_source_rd_texture }));
 
-	RID shader = resolve_raster.shader.version_get_shader(resolve_raster.shader_version, 0);
+	RID shader = resolve_raster.shader.version_get_shader(resolve_raster.shader_version, RESOLVE_RASTER_MODE_DEPTH_MSAA);
 	ERR_FAIL_COND(shader.is_null());
 
 	RD::DrawListID draw_list = RD::get_singleton()->draw_list_begin(p_dest_framebuffer);
-	RD::get_singleton()->draw_list_bind_render_pipeline(draw_list, resolve_raster.pipeline.get_render_pipeline(RD::INVALID_ID, RD::get_singleton()->framebuffer_get_format(p_dest_framebuffer)));
+	RD::get_singleton()->draw_list_bind_render_pipeline(draw_list, resolve_raster.pipeline[RESOLVE_RASTER_MODE_DEPTH_MSAA].get_render_pipeline(RD::INVALID_ID, RD::get_singleton()->framebuffer_get_format(p_dest_framebuffer)));
+	RD::get_singleton()->draw_list_bind_uniform_set(draw_list, uniform_set_cache->get_cache(shader, 0, u_source_rd_texture), 0);
+
+	RD::get_singleton()->draw_list_set_push_constant(draw_list, &resolve_raster.push_constant, sizeof(ResolvePushConstant));
+
+	RD::get_singleton()->draw_list_draw(draw_list, false, 1u, 3u);
+	RD::get_singleton()->draw_list_end();
+}
+
+// Copies a single-sample depth attachment into an R32F colour target, texel for texel.
+//
+// This is the non-MSAA sibling of resolve_depth_raster, and it exists so the copy does
+// not have to go through CopyEffects::copy_to_fb_rect. That path samples its source
+// through a filtering sampler, which is fine for a colour blit and impossible for a depth
+// format on a backend that enforces WebGPU's sample-type rules: hogdot's WebGPU driver has
+// no bind-group layout that pairs a depth texture with a filtering sampler, so it
+// substituted a blank texture and every hint_depth_texture reader in every project saw an
+// empty scene at the far plane. See WA-18.
+void Resolve::copy_depth_raster(RID p_source_rd_texture, RID p_dest_framebuffer) {
+	RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
+	UniformSetCacheRD *uniform_set_cache = UniformSetCacheRD::get_singleton();
+
+	memset(&resolve_raster.push_constant, 0, sizeof(ResolvePushConstant));
+	resolve_raster.push_constant.samples = 1;
+
+	RID default_sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+
+	RD::Uniform u_source_rd_texture(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ default_sampler, p_source_rd_texture }));
+
+	RID shader = resolve_raster.shader.version_get_shader(resolve_raster.shader_version, RESOLVE_RASTER_MODE_COPY_DEPTH);
+	ERR_FAIL_COND(shader.is_null());
+
+	RD::DrawListID draw_list = RD::get_singleton()->draw_list_begin(p_dest_framebuffer);
+	RD::get_singleton()->draw_list_bind_render_pipeline(draw_list, resolve_raster.pipeline[RESOLVE_RASTER_MODE_COPY_DEPTH].get_render_pipeline(RD::INVALID_ID, RD::get_singleton()->framebuffer_get_format(p_dest_framebuffer)));
 	RD::get_singleton()->draw_list_bind_uniform_set(draw_list, uniform_set_cache->get_cache(shader, 0, u_source_rd_texture), 0);
 
 	RD::get_singleton()->draw_list_set_push_constant(draw_list, &resolve_raster.push_constant, sizeof(ResolvePushConstant));
