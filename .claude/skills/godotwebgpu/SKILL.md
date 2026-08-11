@@ -64,6 +64,35 @@ fly behind a cache.
   implementations report 16. This is *why* CommonGrounds is a Mobile-renderer consumer.
 - **Timestamp queries are optional** — gated on the `timestamp-query` feature, with dummy fallback.
 
+## Binding a depth texture (all measured against Dawn in Chrome 151, 2026-08-11)
+
+Four rules, in the order Dawn applies them. Getting any one wrong looks like the others, which is
+how WA-18 (`hint_depth_texture` reading zeros engine-wide) survived the whole port. See RL-049.
+
+1. **Aspect first.** A view over a depth/stencil format with `aspect = All` cannot be bound as a
+   sampled texture at all — "Multiple aspects (Depth|Stencil) selected" — whatever its sample type.
+   ⚠ `texture_create` builds every `default_view` with `All`, and Godot's Mobile depth attachment is
+   `D24_UNORM_S8_UINT`, so a depth binding always needs the separate depth-aspect view
+   (`_get_sampled_depth_view`).
+2. **Leave that view's `format` Undefined**, so Dawn resolves it to the *aspect's* format. Naming
+   the texture's own format is an error: "The view format (Depth24PlusStencil8) is not compatible
+   with TextureAspect::DepthOnly … (Depth24Plus)".
+3. **Sample type: `depth` and `unfilterable-float` both work; `float` never does.** Dawn's rejection
+   names the permitted pair verbatim. Verified for depth16unorm, depth24plus, depth24plus-stencil8,
+   depth32float and depth32float-stencil8, multisampled and not. ⚠ The blank-fallback shim was never
+   the only option.
+4. **The real constraint is the sampler.** What cannot be expressed is a depth texture *statically
+   paired with a filtering sampler* — a property of the shader, not the binding. So the driver
+   declares a binding `unfilterable-float` only when no sampler is paired with it
+   (`_wgsl_texture_is_sampled`), and engine shaders that copy depth texel-fetch it instead of
+   sampling (`resolve_raster.glsl` `MODE_COPY_DEPTH`, `bokeh_dof_raster.glsl`).
+
+⚠ **`readonly_and_readwrite_storage_textures` is a WGSL *language* feature**, on
+`navigator.gpu.wgslLanguageFeatures`, spelled with underscores — never a `GPUFeatureName` and never
+on `adapter.features`. And it does not make every storage format read-writable: `read_write` is
+confined to **r32float / r32uint / r32sint**, so the read_write split is decided per declaration on
+the format. `read` (read-only) has no such restriction. See RL-051.
+
 ## Thread model (proven 2026-08-10, phase 8)
 
 **Game threads are real; rendering is pinned to the browser main thread, permanently.** A `GPUDevice`

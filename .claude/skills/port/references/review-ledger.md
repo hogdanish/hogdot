@@ -1534,3 +1534,137 @@ Two smaller findings, neither ours to fix here:
   pipeline from the TARGET count** (`texture_storage.cpp:1745` vs `:1795`). With mismatched counts
   a fragment shader declaring N outputs would be paired with a framebuffer of M attachments. This
   is mainline 4.7.1 code, not a port hunk, and the gate deliberately keeps the counts equal.
+
+---
+
+### RL-049 — 2026-08-11 — **blocker** (fixed)
+**Where:** `drivers/webgpu/rendering_device_driver_webgpu.cpp` (`uniform_set_create`, the BGL
+construction in `shader_create_from_container`), `servers/rendering/renderer_rd/effects/resolve.{h,cpp}`,
+`servers/rendering/renderer_rd/shaders/effects/resolve_raster.glsl`,
+`servers/rendering/renderer_rd/renderer_scene_render_rd.cpp`
+**Found while:** the 2026-08-11 CommonGrounds web audit (WA-18)
+**What:** **`hint_depth_texture` read zeros engine-wide on this backend, and had since the port
+began.** `uniform_set_create` substituted a 4×4 all-zero RGBA8 texture for any depth-format texture
+bound as a combined sampler. The Mobile renderer's depth back-buffer copy is exactly that shape —
+`_render_buffers_can_be_storage()` is false unconditionally, so `renderer_scene_render_rd.cpp:447`
+took the raster path through `CopyEffects::copy_to_fb_rect`, which binds its source as
+`UNIFORM_TYPE_SAMPLER_WITH_TEXTURE`. The copy shader therefore sampled zeros and `RB_TEX_BACK_DEPTH`
+filled with 0.0. Godot 4.7 uses reverse-Z and clears depth to 0.0, so **zero means the far plane**:
+every `DEPTH_TEXTURE` reader in every project saw an empty scene at infinite distance. In
+CommonGrounds this rendered the water fully opaque.
+
+Three distinct WebGPU rules were in play, and the fork's shim conflated them. Measured against Dawn
+in Chrome 151 on an Apple M5, 2026-08-11:
+
+1. **Sample type.** A `float` layout entry admits no depth format. But `unfilterable-float` admits
+   every one of them — Dawn's own rejection names the permitted set as `UnfilterableFloat|Depth`.
+   Verified for depth16unorm, depth24plus, depth24plus-stencil8, depth32float and
+   depth32float-stencil8, multisampled and not. The blank fallback was never the only option.
+2. **Filtering.** What actually cannot be expressed is a depth texture *statically paired with a
+   filtering sampler*. That is a property of the shader, not of the binding.
+3. ⚠ **Aspect, which nothing in the fork accounted for.** A `depth24plus-stencil8` view with
+   `aspect = All` cannot be bound as a sampled texture *at all* — "Multiple aspects (Depth|Stencil)
+   selected" — whatever its sample type. `texture_create` builds every `default_view` with
+   `WGPUTextureAspect_All`, and Godot's Mobile depth attachment is `D24_UNORM_S8_UINT`. So even a
+   correct sample type would have failed. ⚠ The view's `format` must then be left Undefined so Dawn
+   resolves it to the *aspect's* format; naming the texture's own format is a separate error.
+
+**Disposition:** **fixed**, in three parts.
+- The driver reflects whether a sampler is statically paired with each texture binding
+  (`_wgsl_texture_is_sampled`) and declares the never-sampled ones `unfilterable-float`. A pure
+  widening: it accepts strictly more formats and removes nothing, because a texel fetch takes no
+  sampler. ⚠ The paired sampler entry is deliberately left `Filtering` — `NonFiltering` would reject
+  the linear sampler Godot binds by default and turn a working bind group into a validation error.
+- `uniform_set_create` binds a cached depth-aspect view (`_get_sampled_depth_view`) whenever the
+  layout can take one, and falls back to the blank texture only when it genuinely cannot.
+- The engine stops routing the non-MSAA depth copy through `copy_to_fb_rect`. A new
+  `MODE_COPY_DEPTH` variant of `resolve_raster.glsl` texel-fetches the depth attachment, matching
+  what the MSAA sibling already did. This is correct on every backend — a 1:1 depth copy has no use
+  for a filtering sampler — and it is what makes the binding qualify under the first part.
+
+⚠ **The MSAA depth resolve (`resolve_depth_raster`) was broken the same way and is fixed by the
+driver half alone**, with no shader change: it already texel-fetched.
+
+⚠ **A second live instance, found by RL-050's new warning on the first run:**
+`bokeh_dof_raster.glsl` read the depth attachment through `textureLod` and was getting the same
+blank texture, so depth of field computed its circle of confusion from an empty depth buffer. Fixed
+the same way — `texelFetch` at the same texel. Interpolating depth across a silhouette edge yields a
+distance no surface is at, so nearest is the better answer there regardless of backend. The compute
+sibling `bokeh_dof.glsl` is deliberately untouched: `_render_buffers_can_be_storage()` is false, so
+forward-mobile never reaches it.
+
+⚠ **The obvious implementation of "is this binding sampled" is wrong, and Dawn caught it on the
+first run.** Looking for `textureSample*` calls naming the variable finds nothing when the shader
+hands the texture to a helper function, because the call names the *parameter*. That shipped
+`SceneForwardMobileShaderRD` with `Texture binding (group:0, binding:34) is
+TextureSampleType::UnfilterableFloat but used statically with a sampler (group:1, binding:32) that's
+SamplerBindingType::Filtering` and every scene pipeline invalid. The predicate is now a whitelist:
+unsampled only if **every** use of the name is the first argument of a samplerless builtin.
+RL-027's rewrite tracks function parameters for the same reason.
+
+**Verified at `renders`, 2026-08-11**, by an A/B on the rebuilt `screen_read` gate with the
+one-line call-site change as the only difference. Fixed: right half solid green, no substitution
+warning. Control: right half solid red, and the console names
+`CopyToFbShaderRD:0 set 0 binding 1, depth24plus-stencil8`. Left half identical in both, so the
+screen copy is held constant. `[ShaderCoverage] PASS`, zero GPUValidationErrors.
+
+### RL-050 — 2026-08-11 — **smell** (fixed)
+**Where:** `drivers/webgpu/rendering_device_driver_webgpu.cpp` — the eight fallback-substitution
+branches in `uniform_set_create` and `_get_compatible_bind_group`
+**Found while:** the 2026-08-11 audit, generalizing RL-049
+**What:** The driver has a whole class of repair that keeps Dawn from rejecting a bind group by
+handing the shader empty data, and **not one of the eight sites printed anything**. The failure mode
+is invisible by construction: validation passes, the frame renders, and the output is silently wrong.
+Two of the eight sit inside data-movement shaders, where zeros are never a plausible answer. The fork
+had already named this exact hazard for float32 textures and built a mitigation there; it built none
+for depth, and RL-049 is what that cost.
+**Disposition:** **fixed** — every site now warns once per distinct site, format and binding, naming
+the shader, the set, the binding and what the shader will now read. The next instance of this bug
+class is a console read rather than a multi-session hunt.
+
+### RL-051 — 2026-08-11 — **bug** (fixed)
+**Where:** `drivers/webgpu/rendering_device_driver_webgpu.cpp` (`_initialize`, the read_write storage
+split), `platform/web/js/engine/engine.js`
+**Found while:** the 2026-08-11 audit (WA-01 cause A)
+**What:** `has_rw_storage_textures` asked `device.features` for
+`'readonly-and-readwrite-storage-textures'`. **That string is not a `GPUFeatureName` and never was.**
+The capability is a WGSL *language* feature, spelled with underscores, on
+`navigator.gpu.wgslLanguageFeatures`. The probe therefore returned false on every browser, forever,
+and the lossy read_write split ran unconditionally. `engine.js` requested the same non-feature from
+the adapter, where it was silently dropped every time. Measured in Chrome 151, 2026-08-11:
+`wgslLanguageFeatures.has('readonly_and_readwrite_storage_textures')` is `true`;
+`adapter.features.has('readonly-and-readwrite-storage-textures')` is `false`.
+
+⚠ **Fixing the probe is not the whole story, and the plan that scheduled this work assumed it was.**
+`read_write` access is confined to **r32float, r32uint and r32sint** whatever the language feature
+says — every other storage format is rejected at BGL creation with "does not support storage texture
+access StorageTextureAccess::ReadWrite" (measured against rgba8unorm, rgba16float and rgba32float).
+`read` (read-only) has no such restriction. So the split must be decided per declaration, on the
+format, not once on the capability — and a consumer whose read_write texture is rgba32float gains
+nothing from the corrected probe.
+**Disposition:** **fixed** — probe corrected to the language feature, split gated per declaration on
+the format, dead request removed from `engine.js`. The split's `[RW-SPLIT]` announcement is promoted
+from `WEBGPU_DIAG` (which compiles to `((void)0)` in every shipped build) to `WARN_PRINT_ONCE`, and
+`uniform_set_create` now warns when it registers a shadow for a GPU-produced texture that nothing can
+ever refresh — the specific condition that made the jump-flood outline read an empty buffer.
+
+### RL-052 — 2026-08-11 — **smell** (fixed)
+**Where:** `drivers/webgpu/rendering_context_driver_webgpu.cpp` (`_initialize`),
+`platform/web/js/engine/engine.js` (`Engine.requestWebGPUDevice`),
+`drivers/webgpu/rendering_device_driver_webgpu.cpp` (`get_total_memory_used`)
+**Found while:** the 2026-08-11 audit (WA-10-c, WA-10-d)
+**What:** `RenderingServer.get_video_adapter_name()` returned the literal `"WebGPU Device"` on every
+machine, and `get_total_memory_used()` returned a flat 0. Both are fork placeholders in fork-only
+files, so both are hogdot defects by the scope test.
+**Disposition:** **fixed** — `engine.js` stashes `GPUAdapterInfo` on the device (the adapter is
+otherwise discarded and unreachable from the engine), and the context driver builds the name from it
+and maps the vendor string onto Godot's vendor IDs. ⚠ The measured ceiling on this machine is
+`apple · metal-3`: Chrome gates `device` and `description` behind a developer flag. Memory is now
+accounted by summing owned buffer and texture allocations; shared and sliced texture views alias one
+allocation and are deliberately not counted twice. ⚠ It is an accounting figure, not a driver query —
+WebGPU exposes no allocator statistics, so it excludes alignment, tiling and everything else the
+browser adds.
+
+⚠ **`stringToNewUTF8` needed an explicit `EM_JS_DEPS`.** Emscripten does not scan EM_ASM bodies for
+JS library symbols, so a runtime helper reached only from one gets dead-stripped and fails at run
+time rather than at link time.

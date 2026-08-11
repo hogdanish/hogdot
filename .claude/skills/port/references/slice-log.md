@@ -1158,3 +1158,60 @@ by-eye brightness check on the XDR panel and all Safari verification are **not**
   stale. Regenerate it rather than touching the file, so the check keeps its meaning.
 - The Bash tool runs **zsh**, which does not word-split unquoted parameters — `set -- $var` in a
   build loop silently passed empty scons options. Write the invocations out.
+
+## The 2026-08-11 CommonGrounds web audit — hogdot's share
+
+Two rows of the audit reached this repository (`.claude/work/commongrounds/ROOTCAUSE-2026-08-11.md`):
+WA-18 whole, and cause A of WA-01. Both sit in `drivers/webgpu/`, which does not exist at
+`4.7.1-stable`. WA-10-c and WA-10-d rode along, being fork placeholders in fork-only files. Findings
+are RL-049 to RL-052; what follows is what the session changed about how to *work* here.
+
+### Measure the browser, do not reason about it
+
+Four WebGPU rules decided the whole shape of the WA-18 fix, and **three of the four were not what
+the plan or the audit assumed.** Each took one `javascript_tool` call against Dawn in Chrome 151 and
+cost less than a single build:
+
+| Question | Assumed | Measured |
+| --- | --- | --- |
+| Can a depth format bind to a sampled-texture entry? | No — hence the blank-fallback shim | **Yes**, as `unfilterable-float`. Dawn names the set: `UnfilterableFloat\|Depth` |
+| Can a `depth24plus-stencil8` view bind with `aspect = All`? | Never asked | **No**, for any sample type. Nothing in the fork accounted for this |
+| What `format` does an aspect view take? | The texture's | The **aspect's**. Naming the texture's is an error; leave it Undefined |
+| Does `readonly_and_readwrite_storage_textures` make storage textures read-writable? | Yes | Only **r32float / r32uint / r32sint**. Every other format is still rejected |
+
+⚠ **A capability probe that reads the wrong object answers "absent" forever, and looks exactly like
+a browser that lacks the feature.** WA-01 cause A had `device.features.has('readonly-and-readwrite-
+storage-textures')` — a string that is not a `GPUFeatureName` at all. The audit reached the same
+wrong conclusion by reading the same wrong list. When a capability reads absent everywhere,
+re-derive *where it is meant to live* before designing around its absence.
+
+### A silent shim is worse than a broken one
+
+Eight branches substituted a blank texture and printed nothing, and one of them hid an
+engine-wide blocker for the whole port. The first run after adding a warning to each named
+**two** live data-loss sites, one of which (`bokeh_dof_raster.glsl`) nobody had suspected. ⚠ Whenever
+a repair keeps validation happy by handing a shader different data than it asked for, it must say
+so — the cost is one line and the alternative is a multi-session hunt.
+
+### Give a gate a control, in the same run
+
+Fourth instance of the standing lesson (RL-037, RL-046, RL-048, now RL-049). `screen_read.gdshader`
+folded depth into a 15 % tint over a panel that could face open sky, where `raw_depth == 0` is the
+correct answer — so its depth half read pass whether or not depth worked. It is now two binary
+halves over an opaque backer, and **the fix was proved by rebuilding with the one-line call site
+reverted and confirming the same gate goes solid red.** A one-line control is affordable; do it
+rather than arguing that green must mean something.
+
+### Traps banked
+
+- ⚠ **`EM_ASM` is a macro, so the C preprocessor splits its body on every top-level comma.** Square
+  brackets do not protect one the way parentheses do — a JS array literal inside `EM_ASM` becomes a
+  wall of "use of undeclared identifier". Concatenate instead.
+- ⚠ **Emscripten does not scan `EM_ASM` bodies for JS library symbols.** A runtime helper reached
+  only from one (here `stringToNewUTF8`) is dead-stripped and fails at run time, not at link time.
+  Declare it with `EM_JS_DEPS`.
+- ⚠ **Keep runtime strings ASCII.** The web console print path renders UTF-8 as Latin-1, so a `·`
+  separator in the adapter name shows as `Â·` in the engine banner. Comments are unaffected.
+- **A WGSL usage predicate must be a whitelist.** Searching for the *bad* usage misses it whenever
+  the shader passes the resource into a function, because the call names the parameter. Enumerate
+  the safe uses and treat everything else as unsafe.
