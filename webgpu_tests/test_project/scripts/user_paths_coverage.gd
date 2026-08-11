@@ -94,6 +94,11 @@ func _setup_stencil_material(p_root: Node3D) -> void:
 ## ⚠ Visual gate only — see the shader's header for how to read it. Nothing here can
 ## assert on the result: a WebGPU canvas reads back all black under getImageData, and
 ## there is no synchronous GPU readback on this backend.
+##
+## ⚠ The backer below is what makes the depth half able to fail. Without it the panel can
+## face open sky, where reverse-Z depth is legitimately 0.0 and a driver that hands the
+## depth copy a blank texture reads exactly the same thing as one that works. That is how
+## WA-18 survived every run of this gate.
 func _setup_screen_read(p_root: Node3D) -> void:
 	var shader: Shader = load("res://shaders/screen_read.gdshader")
 	if shader == null:
@@ -114,7 +119,40 @@ func _setup_screen_read(p_root: Node3D) -> void:
 	panel.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	p_root.add_child(panel)
 
-	print("  [OK] Screen read: SCREEN_TEXTURE + DEPTH_TEXTURE panel (visual — inspect with ?hold)")
+	# Opaque backer, parented to the panel and 0.8 m behind it. The camera sits 3 m in
+	# front of the panel, so a quad 0.8 m further away needs to be 3.8 / 3.0 ≈ 1.27× the
+	# panel to cover its whole footprint; 4.0 × 2.7 leaves margin for the panel sitting
+	# slightly above the view axis. It writes depth, so every texel the panel samples has
+	# a non-zero reverse-Z depth when the copy works.
+	var backer := MeshInstance3D.new()
+	var backer_quad := QuadMesh.new()
+	backer_quad.size = Vector2(4.0, 2.7)
+	backer.mesh = backer_quad
+	# Two flat colors rather than one: the left half of the panel wobbles its sample, and
+	# a single flat colour would hide whether the screen copy is live or frozen.
+	var backer_mat := StandardMaterial3D.new()
+	backer_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	backer_mat.albedo_color = Color(1.0, 0.55, 0.0)
+	backer.material_override = backer_mat
+	backer.position = Vector3(0.0, 0.0, -0.8)
+	backer.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	panel.add_child(backer)
+
+	var stripe := MeshInstance3D.new()
+	var stripe_quad := QuadMesh.new()
+	stripe_quad.size = Vector2(0.6, 2.7)
+	stripe.mesh = stripe_quad
+	var stripe_mat := StandardMaterial3D.new()
+	stripe_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	stripe_mat.albedo_color = Color(0.05, 0.05, 0.4)
+	stripe.material_override = stripe_mat
+	# In front of the backer and behind the panel, so it also gives the depth half two
+	# distinct non-zero depths instead of one.
+	stripe.position = Vector3(-0.7, 0.0, -0.4)
+	stripe.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	panel.add_child(stripe)
+
+	print("  [OK] Screen read: SCREEN_TEXTURE + DEPTH_TEXTURE panel over an opaque backer (visual — inspect with ?hold)")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
