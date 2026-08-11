@@ -1668,3 +1668,52 @@ browser adds.
 ⚠ **`stringToNewUTF8` needed an explicit `EM_JS_DEPS`.** Emscripten does not scan EM_ASM bodies for
 JS library symbols, so a runtime helper reached only from one gets dead-stripped and fails at run
 time rather than at link time.
+
+### RL-053 — 2026-08-11 — **blocker** (fixed)
+**Where:** `thirdparty/tint/src/tint/utils/ice/ice.{h,cc}` (patch 0008),
+`drivers/webgpu/tint_wrapper.cpp`
+**Found while:** CommonGrounds' first playable browser session (`web-p5.5-1-log.md` § 1)
+**What:** any `TINT_ASSERT` / `TINT_ICE` / `TINT_UNREACHABLE` fired during SPIR-V→WGSL translation
+ends in `InternalCompilerError`'s `[[noreturn]]` destructor, which `__builtin_trap()`s — on wasm
+that aborts the module (`RuntimeError: unreachable`) and permanently kills the browser main loop.
+One untranslatable user shader took the whole tab down. The trigger in the wild was a `.gdshader`
+`switch` with case fallthrough, legal in Godot's shading language but asserted on by Tint's SPIR-V
+reader (`parser.cc:3428`). It presents as a frozen canvas with the AudioWorklet still playing, which
+reads as a hang, not a crash.
+
+⚠ The diagnosable-failure path was never the problem: `tint::SpirvToWgsl` returns a `Result`, the
+wrapper already surfaced it, the driver already turned it into `error_text`, and
+`ShaderRD::_compile_version_end` already leaves the version invalid so the material falls back.
+Only the ICE path bypassed all of it.
+
+**Disposition:** **fixed, verified at *renders* with a controlled A/B.** Patch 0008 adds
+`tint::SetInternalCompilerErrorHandler()`, a process-global hook the destructor consults before
+trapping; unlike the per-call callback it may transfer control away instead of returning.
+`tint_wrapper.cpp` installs a handler that `longjmp`s back to the `SpirvToWgsl` call site (web
+builds set `-sSUPPORT_LONGJMP='wasm'`; objects alive inside Tint leak, accepted on this path), so an
+ICE reports through the existing failure plumbing. Gate: `?scene=badshader` — a fallthrough-switch
+shader beside a control cube. Pre-fix template: trap at `parser.cc:3428`, no report line ever
+prints. Fixed template: ten contained ICEs (5 variants × 2 stages), clean
+`_translate_spirv_to_wgsl:479` → `shader_create_from_container:5625` → `RID()` chain,
+`[BAD_SHADER_GATE] PASS frames=30`, control cube and fallback-material sphere both rendering.
+⚠ Failures are not cached: each variant re-runs Tint on every version recompile. Bounded (a version
+compiles once and stays invalid until the shader is edited) — revisit only if a consumer hot-reloads
+broken shaders in a loop.
+
+### RL-054 — 2026-08-11 — **bug** (fixed; upstream Godot, worth upstreaming)
+**Where:** `platform/web/os_web.cpp:201` (`OS_Web::add_frame_delay`)
+**Found while:** CommonGrounds' first playable browser session (`web-p5.5-1-log.md`, frame-cap
+correction)
+**What:** the guard read `#ifndef PROXY_TO_PTHREAD_ENABLED`, so every **non-proxied** build — the
+only kind hogdot ships — forwarded to `OS::add_frame_delay` → `delay_usec` → emscripten `nanosleep`,
+which busy-waits on the browser main thread. Its own header comment (`os_web.h:98`) says the
+override exists to *avoid* that, because pacing is "Implemented in web_main.cpp loop callback
+instead" — and `web_main.cpp:81-105` does exactly that, rAF-skipping under the same `#ifndef`. The
+two guards were meant to be complementary; one was inverted. ⚠ Only engages while the game outruns
+`Engine.max_fps`, which is why it read as "the cap busy-spins" rather than a constant burn.
+⚠ All three files are byte-identical to `4.7.1-stable` — an inherited upstream bug, not a fork
+regression. Best upstreaming candidate alongside Tint patch 0007.
+**Disposition:** **fixed** — guard flipped to `#ifdef`. Verified at *runs* (the badshader gate ran
+on a template carrying the fix); the pacing benefit itself is reasoned from `web_main.cpp`, not
+measured. CommonGrounds can now set `Engine.max_fps` directly and drop the `CGNet.setFrameCap` rAF
+decimator once it consumes a rebuilt template.

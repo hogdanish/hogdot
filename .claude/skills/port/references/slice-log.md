@@ -1215,3 +1215,37 @@ rather than arguing that green must mean something.
 - **A WGSL usage predicate must be a whitelist.** Searching for the *bad* usage misses it whenever
   the shader passes the resource into a function, because the call names the parameter. Enumerate
   the safe uses and treat everything else as unsafe.
+
+## The first-playable follow-ups — 2026-08-11 (session 2)
+
+CommonGrounds' first playable browser session (`web-p5.5-1-log.md`) handed hogdot four items. WA-18
+was already fixed this morning (`e672bb45ef`, RL-049). The other three landed here: RL-053 (Tint ICE
+containment, *renders* with a controlled A/B), RL-054 (the inverted `add_frame_delay` guard, *runs*),
+and the shader-baker feasibility assessment (`work/plans/features/feature-shader-baker.md` — step 1
+cheap, step 2 gated on separating glslang cost from Tint cost in a browser).
+
+### Containing a `[[noreturn]]` destructor with `longjmp`
+
+Tint's ICE machinery has no non-fatal path: the per-call callback in `TINT_ICE(...)` is
+capture-then-crash, and nothing installs it anyway. Patch 0008 adds a process-global handler the
+destructor consults first, and `tint_wrapper.cpp` escapes with `setjmp`/`longjmp` — web builds
+already set `-sSUPPORT_LONGJMP='wasm'` (`platform/web/detect.py:334`), so the unwind crosses Tint's
+frames. Everything downstream of the wrapper needed **zero changes**: the `Result` failure path was
+already plumbed end to end (wrapper nullptr → driver `error_text` → `ShaderID()` → `RID()` at
+`rendering_device.cpp:4534` → null variant → invalid version → default-material fallback). The whole
+fix is "make the ICE path join the failure path".
+
+### Traps banked
+
+- ⚠ **Editing a widely-included vendored header costs a near-full rebuild.** `ice.h` is transitively
+  included by most of Tint; the incremental debug build after patch 0008 recompiled ~2,900 objects
+  (6m29s at `num_jobs=4`, ccache warm-ish). Batch vendored-header edits accordingly.
+- ⚠ **The console reader dropped the gate's PASS line and replayed a phantom third scene build** on
+  first read — both directions of the known artifact in one session. The line existed; a
+  clear-console + fresh reload + prompt read showed it. Never diagnose from one read.
+- **The A/B needs the pre-fix template saved before the rebuild.** `bin/*.zip` is overwritten in
+  place; copy it to scratch first, export the gate against it, then swap the fixed one in. Proving
+  the gate *can* fail cost one `cp` and one extra export.
+- `switch` fallthrough in a `.gdshader` compiles clean natively (Metal path) and dies only in Tint's
+  SPIR-V reader — another entry in the class "valid Godot shader, web-only failure". The gate keeps
+  one on screen permanently.

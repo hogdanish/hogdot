@@ -44,6 +44,10 @@ numbers, counts and API signatures must be re-derived. `./hogdot/port-surface.sh
   rewrite push-constant blocks to the binding-120 storage buffer, depth-image flags, position-Y negation,
   point-size stripping) → **Tint** emits WGSL. `wgsl_precompile.py` moves the translation to build time
   using WGSL `override` constants for Godot's specialization constants.
+  ⚠ A Tint internal error (`TINT_ASSERT`/`TINT_ICE`, e.g. a `.gdshader` switch fallthrough) used to
+  abort the wasm module and kill the tab. Since RL-053 it is contained: vendored patch 0008 adds a
+  global ICE handler and `tint_wrapper.cpp` longjmps back, so it reports as an ordinary translation
+  failure and the material falls back. Gate: `?scene=badshader`.
 - **Barriers are no-ops.** WebGPU tracks hazards itself; every barrier/sync command returns immediately.
 - **Buffer mapping is async, so the driver shadows it.** A CPU-side copy is flushed with
   `wgpuQueueWriteBuffer()` on unmap; reads go through `wgpuBufferMapAsync` + callback. There is **no
