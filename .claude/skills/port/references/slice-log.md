@@ -1249,3 +1249,46 @@ fix is "make the ICE path join the failure path".
 - `switch` fallthrough in a `.gdshader` compiles clean natively (Metal path) and dies only in Tint's
   SPIR-V reader — another entry in the class "valid Godot shader, web-only failure". The gate keeps
   one on screen permanently.
+
+## The shader baker — 2026-08-11 (session 3)
+
+RL-042's two steps both landed and verified: `1bb169d371` (step 1, bake SPIR-V — kills runtime
+glslang) and `49eb3381e3` (step 2, bake WGSL — kills runtime preprocessing + Tint). The decision
+between them was measured, not argued: a subagent A/B put the unbaked gate-project cold start at
+16,950 ms — glslang 4,389 ms (26%), wasm-side preprocess+Tint ~7,590 ms (45%), JS-visible GPU
+compile ~0.4% (Chrome defers real compilation into the frame phase). Step 2 cleared its ≳2 s gate
+by nearly 4×. Design and protocol: `feature-shader-baker.md` plus the session scratchpad.
+
+### The cache key is the commit hash (RL-055)
+
+`ShaderRD::setup()` hashes `GODOT_VERSION_HASH` into every cache directory name, so a baked pck
+only hits in a template built from the same commit — and the miss is silent, full runtime
+compilation behind a normal-looking export. Worse for verification: the runtime checks
+`user://shader_cache` (IndexedDB, persistent per origin) before `res://`, so a browser tab that
+ran earlier gates reads "cache hit" from IndexedDB and proves nothing about the pck. Fifth
+instance of the pass-state-equals-failure-state lesson. A pck verification requires a fresh
+context with empty IndexedDB; a shipped bake requires editor and templates from one HEAD.
+
+### The dormant path was the design
+
+Step 2 cost ~500 LOC because the driver already contained the hard half, dormant:
+`render_pipeline_create` passes `WGPUConstantEntry` overrides whenever a shader has
+`@id(N) override` declarations — never exercised because `freeze_spec_constant_ops` folded every
+spec constant before Tint ran. Bake mode skips that one pass. That also dissolved RL-009's keying
+trap (override WGSL is value-independent; there is no post-patch-bytes key to miss) and the
+per-bucket re-translation cost of pipeline specialization. Bake-time translation shells out to
+`bin/tint_convert_cli --overrides --batch` (fork-isolated, so a Tint abort is an error entry, not
+a dead editor) with a `--pipeline-id` stamp over `pipeline_id_inputs.txt` as the staleness gate.
+
+### Traps banked
+
+- A macOS editor bakes SPIR-V at Metal's 1.6 unless the target container format is plumbed into
+  `compile_stages`; Tint's reader rejects 1.6, and the failure mode is silent fallback (step 1's
+  fourth blocker, fixed in `1bb169d371`).
+- Baking is GUI-only forever: `--headless` has no `RendererSceneRenderRD`. A windowed
+  `--export-debug` run with `--rendering-method mobile` is the scriptable form.
+- 2 `TonemapMobileShaderRD` subpass-input variants fail WGSL translation and ship SPIR-V-only
+  (RL-056) — unreachable on web because subpass flattening never instantiates them.
+- The laptop slept twice under battery+lid and killed both subagents mid-run; `caffeinate -is`
+  does not survive a lid close. Benchmarks on this machine need the lid open and AC, or the runs
+  re-checked against `pmset -g log` sleep windows.
