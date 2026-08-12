@@ -1266,6 +1266,16 @@ materials — unbakeable by design), clean render. RL-041's deferred half is clo
 change. Step 2 (bake WGSL) still gated on the measurement; see
 `.claude/work/plans/features/feature-shader-baker.md`.
 
+**Addendum 2026-08-11 (session 3, later): step 2 is implemented and verified at renders**
+(`49eb3381e3`). The measurement gate ran (glslang 4.4 s / preprocess+Tint ~7.6 s / JS-visible GPU
+compile ~0 of a 16.95 s cold start — step 2 passed at ~4× its threshold). Architecture:
+tint_convert_cli `--overrides` subprocess at bake time with a `--pipeline-id` staleness gate,
+container v2 (per-stage zstd WGSL beside the SPIR-V, ~15% cache growth), runtime consumption via
+the driver's previously dormant override-constants path. Evidence: 159 genuine pck hits in fresh
+browser contexts (closing the verification owed above), 159/159 via baked WGSL, 51 shaders on
+the override pipeline path, corpus 14/14, rendering matches reference. RL-056 records the two
+subpass-input variants that bake SPIR-V-only. The step-1 claim correction stands closed.
+
 ### RL-043 — 2026-08-10 — **blocker** (fixed)
 **Where:** `servers/rendering/renderer_rd/shader_rd.cpp` (`_compile_variant`, `_compile_version_end`),
 `servers/rendering/rendering_device_driver.h`, `servers/rendering/rendering_device.h`,
@@ -1727,3 +1737,39 @@ regression. Best upstreaming candidate alongside Tint patch 0007.
 on a template carrying the fix); the pacing benefit itself is reasoned from `web_main.cpp`, not
 measured. CommonGrounds can now set `Engine.max_fps` directly and drop the `CGNet.setFrameCap` rAF
 decimator once it consumes a rebuilt template.
+
+### RL-055 — 2026-08-11 — **blocker** (structural; constrains RL-042 forever)
+**Where:** `servers/rendering/renderer_rd/shader_rd.cpp` (`setup()`, ~line 171; `_load_from_cache`)
+**Found while:** session 3, the shader-baker timing A/B (subagent measurement)
+**What:** `ShaderRD::setup()` hashes `GODOT_VERSION_HASH` — the git commit of the build — into
+`base_sha256`, which names every shader-cache directory. A pck baked by an editor built at one
+commit can therefore never hit in a web template built at another: measured 0 hits / 60 misses for
+a pck baked by a `226b38f36c` editor against a `0316e3e9e` template, with the version-level sha1
+matching (isolating the cause to the base hash). The degradation is silent — every shader falls
+back to runtime compilation and the export looks normal.
+⚠ **This also poisons a naive verification.** The runtime checks `user://shader_cache` (IndexedDB,
+persistent per origin) *before* `res://` — so the 15:45 in-Chrome check that read "~177 Loading
+cache lines" as proof the pck worked was actually reading IndexedDB entries saved by earlier
+same-origin gate runs. Fifth instance of the standing lesson (RL-037, RL-046, RL-048, RL-049): the
+pass signal did not distinguish the two cache sources. A pck-cache verification is only valid in a
+fresh browser context with empty IndexedDB.
+**Rule going forward: bake exports with an editor and templates built from the same commit.** The
+commit `1bb169d371` message's "verified at renders, ~177 cache hits" claim is corrected by this
+entry: what that run proved is the byte-identical `_load_from_cache` container path (via
+`user://`); a same-commit pck-hit verification is still owed and belongs to the step-2 gate run.
+**Disposition:** structural — the hash coupling is correct cache invalidation, not a bug to fix;
+the constraint is recorded here, in the build-export skill, and in the CommonGrounds handoff.
+
+### RL-056 — 2026-08-11 — **smell** (recorded; per-shader fallback covers it)
+**Where:** `drivers/webgpu/tint_cli/main.cpp` (bake-time translation), `TonemapMobileShaderRD`
+subpass variants
+**Found while:** session 3, the step-2 gate export
+**What:** two `TonemapMobileShaderRD` variants fail bake-time WGSL translation with
+`textureLoad: no matching call to 'textureLoad(input_attachment<f32>, vec2<i32>, i32)'` — their
+SPIR-V reads a subpass input attachment, which Tint's WGSL writer cannot express. The runtime
+never sees this: the fork's subpass flattening means those variants are never instantiated on
+web, and the baker is simply the first thing to translate *every* variant eagerly. The failure
+mode is the designed one — the shader bakes SPIR-V-only with a warning, and the runtime would
+translate it live (and fail identically) only if something ever used it.
+**Disposition:** recorded — no action. If a subpass-input variant is ever *used* on web, the
+failure moves from bake-time warning to runtime error and becomes a real finding.

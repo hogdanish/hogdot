@@ -231,9 +231,20 @@ CommonGrounds/web) or the core shaders bake for the wrong renderer and miss at r
 through `compile_stages` (a Metal editor otherwise emits 1.6, which runtime Tint rejects). Keep
 that in mind before "simplifying" the extra parameter away.
 
-⚠ **Baking does not remove Tint**: the runtime still runs SPIR-V preprocessing + Tint→WGSL +
-`createShaderModule` + `createRenderPipeline` per first use. Step 2 (bake WGSL) is the open
-follow-up in the feature doc.
+⚠ **The baked cache only hits when the editor and the export template are built from the same
+commit** — `GODOT_VERSION_HASH` is part of every cache path (RL-055). Commit first, then build
+both, then export. A skewed pair degrades silently to full runtime compilation.
+
+**Step 2 (bake WGSL) landed 2026-08-11 (`49eb3381e3`)** and removes SPIR-V preprocessing + Tint
+from the runtime too (~7.6 s of a 16.95 s measured cold start; glslang was ~4.4 s). It needs
+`bin/tint_convert_cli` **beside the editor binary and built from the same tree** — the baker
+runs `tint_convert_cli --pipeline-id` and refuses WGSL baking (warning, SPIR-V-only bake) when
+the stamp differs from the editor's build-time copy. Rebuild it with
+`drivers/webgpu/tint_cli/build.sh` after touching anything in
+`drivers/webgpu/tint_cli/pipeline_id_inputs.txt`. Only `createShaderModule` +
+`createRenderPipeline` remain at runtime for baked shaders; runtime-generated materials
+(procedural `ShaderMaterial`s) still pay the full path — only shaders visible at export time
+can bake. Verification and numbers: `feature-shader-baker.md`.
 
 ## The lint baseline (established 2026-08-06, before the first port commit)
 
