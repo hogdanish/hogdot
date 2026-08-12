@@ -45,6 +45,16 @@ fi
 
 mkdir -p "$BUILD_DIR/spirv_tools" "$BUILD_DIR/tint" "$BUILD_DIR/cli"
 
+# Translation-pipeline stamp: hash of the files named in pipeline_id_inputs.txt,
+# embedded into the binary and printed by --pipeline-id. The editor's shader
+# baker compares it against its own build-time copy of the same hash.
+PIPELINE_ID="$(
+    grep -v '^#' "$SHIM_DIR/pipeline_id_inputs.txt" | while IFS= read -r f; do
+        [[ -n "$f" ]] && cat "$f"
+    done | shasum -a 256 | cut -c1-16
+)"
+echo "Pipeline id: $PIPELINE_ID"
+
 # Common flags.
 WARNINGS="-w"  # Suppress warnings from thirdparty code.
 COMMON_FLAGS="-O2 $WARNINGS"
@@ -249,13 +259,16 @@ compile_one "drivers/webgpu/tint_wrapper.cpp" \
     "${TINT_INCLUDES[@]}" "${TINT_DEFINES[@]}" \
     -I"drivers/webgpu/" &
 
-# main.cpp — compiled with shim + Tint includes.
-compile_one "drivers/webgpu/tint_cli/main.cpp" \
-    "$BUILD_DIR/cli/main.o" \
-    "c++20" \
+# main.cpp — compiled with shim + Tint includes. Always recompiled: the
+# pipeline-id stamp changes with files compile_one's mtime check cannot see.
+$CXX -c "drivers/webgpu/tint_cli/main.cpp" \
+    -o "$BUILD_DIR/cli/main.o" \
+    -std=c++20 $COMMON_FLAGS \
     -I"$SHIM_DIR" \
     -I"drivers/webgpu/" \
-    "${TINT_INCLUDES[@]}" "${TINT_DEFINES[@]}" &
+    -I. \
+    "${TINT_INCLUDES[@]}" "${TINT_DEFINES[@]}" \
+    -DTINT_CLI_PIPELINE_ID="\"$PIPELINE_ID\"" &
 
 wait
 

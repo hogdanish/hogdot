@@ -42,36 +42,69 @@ class RenderingShaderContainerWebGPU : public RenderingShaderContainer {
 public:
 	// Format identifier for WebGPU shader containers.
 	static constexpr uint32_t FORMAT_WEBGPU = 0x57475055; // "WGPU"
-	static constexpr uint32_t FORMAT_VERSION = 1;
+	// Version 2 adds optional baked per-stage WGSL (shader baker step 2).
+	// A version-1 runtime rejects version-2 containers cleanly (format_version
+	// check) and falls back to runtime compilation; a version-2 runtime reads
+	// version-1 containers as SPIR-V-only (flags bit absent).
+	static constexpr uint32_t FORMAT_VERSION = 2;
 	static constexpr uint32_t NO_PUSH_CONSTANTS = UINT32_MAX;
+
+	// header_data.flags bit: every stage carries a baked WGSL block after its
+	// SPIR-V payload. Set only when all stages baked (all-or-nothing — RL-027
+	// requires the BGLs and modules of one shader to come from consistent WGSL).
+	static constexpr uint32_t FLAG_HAS_BAKED_WGSL = 0x1;
 
 	struct HeaderData {
 		uint32_t push_constant_bind_group = NO_PUSH_CONSTANTS; // UINT32_MAX = no push constants.
 		uint32_t push_constant_binding = 0;
+		// ⚠ HeaderData must keep this exact size: from_bytes() parses the header
+		// extra block before it validates format_version, so both versions must
+		// read it identically.
 		uint32_t flags = 0;
+	};
+
+	struct BakedStageWGSL {
+		uint32_t decompressed_size = 0; // UTF-8 byte length, no null terminator.
+		uint32_t compression_flags = 0; // CompressionFlags (zstd or raw).
+		PackedByteArray bytes;
 	};
 
 protected:
 	HeaderData header_data;
+	Vector<BakedStageWGSL> stage_wgsl;
 
 	// --- RenderingShaderContainer overrides ---
 
 	virtual uint32_t _format() const override { return FORMAT_WEBGPU; }
 	virtual uint32_t _format_version() const override { return FORMAT_VERSION; }
 
-	/// Called by set_code_from_spirv() — stores raw SPIR-V bytes per stage.
-	/// Dawn's WebGPU implementation supports WGPUShaderSourceSPIRV natively;
-	/// no WGSL/Tint translation step is needed.
+	/// Called by set_code_from_spirv() — stores raw SPIR-V bytes per stage,
+	/// which the runtime driver translates to WGSL (preprocess + Tint) on
+	/// first use, unless a baked WGSL block is present.
 	virtual bool _set_code_from_spirv(const ReflectShader &p_shader) override;
 
-	// Serialization overrides for extra header data.
+	// Serialization overrides for extra header data and per-stage WGSL.
 	virtual uint32_t _from_bytes_header_extra_data(const uint8_t *p_bytes) override;
 	virtual uint32_t _to_bytes_header_extra_data(uint8_t *p_bytes) const override;
+	virtual uint32_t _from_bytes_shader_extra_data(const uint8_t *p_bytes, uint32_t p_index) override;
+	virtual uint32_t _to_bytes_shader_extra_data(uint8_t *p_bytes, uint32_t p_index) const override;
 
 public:
 	uint32_t get_push_constant_bind_group() const { return header_data.push_constant_bind_group; }
 	uint32_t get_push_constant_binding() const { return header_data.push_constant_binding; }
 	bool has_push_constants() const { return header_data.push_constant_bind_group != NO_PUSH_CONSTANTS; }
+
+	// --- Baked WGSL (shader baker step 2) ---
+
+	// Store bake-time WGSL for one stage (editor side). Compresses with zstd.
+	bool bake_stage_wgsl(uint32_t p_index, const String &p_wgsl);
+	// Set FLAG_HAS_BAKED_WGSL if and only if every stage has WGSL; otherwise
+	// drop any partial bakes (all-or-nothing per shader).
+	void finalize_baked_wgsl();
+	bool has_baked_wgsl() const { return (header_data.flags & FLAG_HAS_BAKED_WGSL) != 0; }
+	// Malloc'd, null-terminated WGSL for a stage, or nullptr when absent or
+	// corrupt. The caller owns the allocation (free()).
+	char *get_stage_wgsl_alloc(uint32_t p_index) const;
 
 	RenderingShaderContainerWebGPU();
 	virtual ~RenderingShaderContainerWebGPU();

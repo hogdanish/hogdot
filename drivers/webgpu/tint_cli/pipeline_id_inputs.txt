@@ -1,0 +1,24 @@
+# Translation-defining inputs of tint_convert_cli, hashed into its --pipeline-id.
+# The editor's shader baker refuses to bake WGSL when the CLI's id differs from
+# the one the editor was built with, so a stale binary degrades loudly to
+# SPIR-V-only baking instead of shipping mismatched WGSL (RL-009's failure shape).
+#
+# Rules (RL-028: name every input):
+# - Paths are repo-relative, hashed in listed order; lines starting with # are skipped.
+# - Adding a Tint patch, or any file that changes what the translation pipeline
+#   emits, means adding its path here in the same change.
+# - A vendored Tint/SPIRV-Tools bump must be accompanied by a patches/ change or
+#   a new line here; the vendored trees themselves are deliberately not hashed.
+drivers/webgpu/spirv_preprocess.h
+drivers/webgpu/spirv_preprocess.cpp
+drivers/webgpu/tint_wrapper.h
+drivers/webgpu/tint_wrapper.cpp
+drivers/webgpu/tint_cli/main.cpp
+thirdparty/tint/patches/0001-skip-block-layout-validation.patch
+thirdparty/tint/patches/0002-allow-struct-member-size-mismatch.patch
+thirdparty/tint/patches/0003-decompose-strided-array-stride-guard.patch
+thirdparty/tint/patches/0004-accept-non-constant-point-size.patch
+thirdparty/tint/patches/0005-size-emission-and-capability.patch
+thirdparty/tint/patches/0006-remove-abseil-dependency.patch
+thirdparty/tint/patches/0007-drop-unreachable-functions-in-texture-lowering.patch
+thirdparty/tint/patches/0008-global-ice-handler.patch

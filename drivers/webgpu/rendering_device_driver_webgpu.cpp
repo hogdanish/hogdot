@@ -4140,9 +4140,37 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 	// Set of (set << 16 | binding) keys for read-only storage textures converted to texture_2d.
 	HashSet<uint32_t> wgsl_read_storage_to_sampled;
 
+	// --- Baked WGSL (shader baker step 2) ---
+	// All-or-nothing per shader: use baked WGSL only when every stage decompresses,
+	// so the BGLs and modules always come from textually consistent WGSL (RL-027)
+	// and constants are never silently frozen on a subset of stages. Any failure
+	// falls back to live translation from the container's SPIR-V for all stages.
+	Vector<RenderingShaderContainer::Shader> &stage_shaders = p_shader_container->shaders;
+	LocalVector<char *> baked_wgsl;
+	bool use_baked_wgsl = wg_container->has_baked_wgsl();
+	if (use_baked_wgsl) {
+		baked_wgsl.resize(stage_shaders.size());
+		for (int i = 0; i < stage_shaders.size(); i++) {
+			baked_wgsl[i] = wg_container->get_stage_wgsl_alloc(i);
+			if (baked_wgsl[i] == nullptr) {
+				use_baked_wgsl = false;
+			}
+		}
+		if (!use_baked_wgsl) {
+			WARN_PRINT(vformat("WebGPU: shader '%s' has a baked WGSL flag but a stage failed to decompress; translating live instead.", shader->name));
+			for (uint32_t i = 0; i < baked_wgsl.size(); i++) {
+				free(baked_wgsl[i]);
+				baked_wgsl[i] = nullptr;
+			}
+		} else {
+			// Countable evidence line for the bake gate: a fully baked project
+			// must log one of these per shader and zero tint_translations.
+			print_verbose(vformat("WebGPU: shader '%s' using baked WGSL (%d stages).", shader->name, (int)stage_shaders.size()));
+		}
+	}
+
 	// --- Create one WGPUShaderModule per stage ---
 	bool detected_override_declarations = false;
-	Vector<RenderingShaderContainer::Shader> &stage_shaders = p_shader_container->shaders;
 	for (int i = 0; i < stage_shaders.size(); i++) {
 		const RenderingShaderContainer::Shader &s = stage_shaders[i];
 
@@ -4170,10 +4198,18 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 
 		// emdawnwebgpu does NOT support WGPUShaderSourceSPIRV — it's a thin wrapper
 		// around the browser's WebGPU API which only accepts WGSL.
-		// We convert SPIR-V → WGSL at runtime using Tint (C++, linked directly).
+		// Baked containers carry export-time WGSL (override-constant form), which
+		// skips the preprocess+Tint translation entirely; otherwise we convert
+		// SPIR-V → WGSL at runtime using Tint (C++, linked directly).
 		// Many shader stages share SPIR-V bytes; _spv_to_wgsl_cached looks up a
 		// process-lifetime cache before invoking Tint (see helper definition).
-		char *wgsl_str = _spv_to_wgsl_cached(spv_bytes.ptr(), (int)spv_bytes.size());
+		char *wgsl_str;
+		if (use_baked_wgsl) {
+			wgsl_str = baked_wgsl[i];
+			baked_wgsl[i] = nullptr; // Ownership moves to the malloc'd-string pipeline below.
+		} else {
+			wgsl_str = _spv_to_wgsl_cached(spv_bytes.ptr(), (int)spv_bytes.size());
+		}
 
 		if (wgsl_str == nullptr) {
 			error_text = vformat("WebGPU: SPIR-V→WGSL conversion failed for stage %d.", (int)s.shader_stage);
@@ -5069,6 +5105,11 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 		if (!shader->module) {
 			shader->module = mod;
 		}
+	}
+
+	// Free any baked stage strings not consumed by the loop (error break paths).
+	for (uint32_t bi = 0; bi < baked_wgsl.size(); bi++) {
+		free(baked_wgsl[bi]);
 	}
 
 	shader->has_override_declarations = detected_override_declarations;

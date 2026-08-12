@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 from misc.utility.scons_hints import *
 
+import shader_baker_builders
+
 Import("env")
 
 if env["vulkan"]:
@@ -15,3 +17,18 @@ if env["metal"]:
 # Always compiled: the WebGPU container it wraps is host-portable and built into
 # every editor (see drivers/SCsub), so any editor can bake for web exports.
 env.add_source_files(env.editor_sources, "shader_baker_export_plugin_platform_webgpu.cpp")
+
+# The editor's copy of tint_convert_cli's --pipeline-id stamp, hashed from the
+# same input list build.sh uses, so a stale CLI is detected at bake time.
+pipeline_id_inputs = File("#drivers/webgpu/tint_cli/pipeline_id_inputs.txt")
+pipeline_id_deps = [pipeline_id_inputs]
+with open(pipeline_id_inputs.abspath, encoding="utf-8") as inputs_file:
+    for input_line in inputs_file:
+        input_line = input_line.strip()
+        if input_line and not input_line.startswith("#"):
+            pipeline_id_deps.append(File("#" + input_line))
+env.CommandNoCache(
+    "tint_pipeline_id.gen.h",
+    pipeline_id_deps,
+    env.Run(shader_baker_builders.make_tint_pipeline_id_header),
+)

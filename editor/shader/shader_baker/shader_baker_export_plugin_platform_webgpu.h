@@ -30,7 +30,39 @@
 
 #pragma once
 
+#include "drivers/webgpu/rendering_shader_container_webgpu.h"
 #include "editor/export/shader_baker_export_plugin.h"
+
+// Bake-time container: after storing SPIR-V (base class), translates every
+// stage to override-constant WGSL by shelling out to bin/tint_convert_cli
+// (--overrides --batch) and stores the result beside the SPIR-V (container v2).
+// With an empty CLI path it degrades to the base SPIR-V-only bake.
+class RenderingShaderContainerWebGPUBaked : public RenderingShaderContainerWebGPU {
+	GDSOFTCLASS(RenderingShaderContainerWebGPUBaked, RenderingShaderContainerWebGPU);
+
+	String cli_path;
+
+	void _bake_wgsl();
+
+protected:
+	virtual bool _set_code_from_spirv(const ReflectShader &p_shader) override;
+
+public:
+	void set_cli_path(const String &p_cli_path) { cli_path = p_cli_path; }
+};
+
+class RenderingShaderContainerFormatWebGPUBaked : public RenderingShaderContainerFormatWebGPU {
+	GDSOFTCLASS(RenderingShaderContainerFormatWebGPUBaked, RenderingShaderContainerFormatWebGPU);
+
+	// Empty when WGSL baking is unavailable (missing or stale CLI) — containers
+	// then bake SPIR-V only.
+	String cli_path;
+
+public:
+	explicit RenderingShaderContainerFormatWebGPUBaked(const String &p_cli_path) :
+			cli_path(p_cli_path) {}
+	virtual Ref<RenderingShaderContainer> create_container() const override;
+};
 
 class ShaderBakerExportPluginPlatformWebGPU : public ShaderBakerExportPluginPlatform {
 	GDCLASS(ShaderBakerExportPluginPlatformWebGPU, ShaderBakerExportPluginPlatform);

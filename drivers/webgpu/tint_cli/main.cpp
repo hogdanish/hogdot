@@ -38,9 +38,23 @@
 // Usage:
 //   tint_convert_cli <file.spv>                       # single file → WGSL to stdout
 //   tint_convert_cli --batch <file1.spv> <file2.spv>  # batch → JSON to stdout
+//   tint_convert_cli --overrides ...                  # keep spec constants as WGSL overrides
+//   tint_convert_cli --pipeline-id                    # print the translation-pipeline stamp
+//
+// --overrides skips freeze_spec_constant_ops, so Tint's reader emits
+// `@id(N) override` declarations instead of frozen defaults; the engine then
+// specializes pipelines with WGPUConstantEntry values at pipeline creation.
+//
+// --pipeline-id prints the hash build.sh computed over the files listed in
+// pipeline_id_inputs.txt. The editor bakes WGSL only when this stamp matches
+// the one it was built with; a stale CLI degrades the bake to SPIR-V-only.
 
 #include "drivers/webgpu/spirv_preprocess.h"
 #include "drivers/webgpu/tint_wrapper.h"
+
+#ifndef TINT_CLI_PIPELINE_ID
+#define TINT_CLI_PIPELINE_ID "unstamped"
+#endif
 
 #include <fcntl.h>
 #include <sys/wait.h>
@@ -70,6 +84,10 @@ static std::vector<uint8_t> read_file(const char *p_path) {
 	return buf;
 }
 
+// When true (--overrides), freeze_spec_constant_ops is skipped so spec
+// constants survive into Tint and come out as `@id(N) override` declarations.
+static bool g_keep_overrides = false;
+
 // Run the full SPIR-V preprocessing pipeline + Tint conversion.
 // Returns WGSL string on success, empty string on failure (error written to r_error).
 static std::string convert_spirv_to_wgsl(const std::vector<uint8_t> &p_spv_bytes, std::string &r_error) {
@@ -83,8 +101,11 @@ static std::string convert_spirv_to_wgsl(const std::vector<uint8_t> &p_spv_bytes
 	spv.resize((int64_t)p_spv_bytes.size());
 	memcpy(spv.ptrw(), p_spv_bytes.data(), p_spv_bytes.size());
 
-	// 13 preprocessing passes (same order as rendering_device_driver_webgpu.cpp).
-	spv = spirv_preprocess::freeze_spec_constant_ops(spv);
+	// 13 preprocessing passes (same order as rendering_device_driver_webgpu.cpp),
+	// minus the freeze in overrides mode.
+	if (!g_keep_overrides) {
+		spv = spirv_preprocess::freeze_spec_constant_ops(spv);
+	}
 	spv = spirv_preprocess::rewrite_copy_logical(spv);
 	spv = spirv_preprocess::rewrite_terminate_invocation(spv);
 	spv = spirv_preprocess::convert_push_constants_to_uniforms(spv);
@@ -244,30 +265,40 @@ static std::string convert_isolated(const std::vector<uint8_t> &p_spv_bytes, std
 
 static void print_usage() {
 	fprintf(stderr, "Usage:\n");
-	fprintf(stderr, "  tint_convert_cli <file.spv>                       Single file → WGSL to stdout\n");
-	fprintf(stderr, "  tint_convert_cli --batch <file1.spv> [file2.spv]  Batch → JSON to stdout\n");
+	fprintf(stderr, "  tint_convert_cli [--overrides] <file.spv>                       Single file → WGSL to stdout\n");
+	fprintf(stderr, "  tint_convert_cli [--overrides] --batch <file1.spv> [file2.spv]  Batch → JSON to stdout\n");
+	fprintf(stderr, "  tint_convert_cli --pipeline-id                                  Print translation-pipeline stamp\n");
 }
 
 int main(int argc, char *argv[]) {
-	if (argc < 2) {
+	// Collect file arguments; flags may appear anywhere before them.
+	bool batch_mode = false;
+	std::vector<const char *> files;
+	for (int i = 1; i < argc; i++) {
+		if (strcmp(argv[i], "--pipeline-id") == 0) {
+			printf("%s\n", TINT_CLI_PIPELINE_ID);
+			return 0;
+		} else if (strcmp(argv[i], "--overrides") == 0) {
+			g_keep_overrides = true;
+		} else if (strcmp(argv[i], "--batch") == 0) {
+			batch_mode = true;
+		} else {
+			files.push_back(argv[i]);
+		}
+	}
+
+	if (files.empty()) {
 		print_usage();
 		return 1;
 	}
 
 	tint_wrapper_initialize();
 
-	bool batch_mode = (strcmp(argv[1], "--batch") == 0);
-
 	if (batch_mode) {
-		if (argc < 3) {
-			fprintf(stderr, "Error: --batch requires at least one file argument.\n");
-			return 1;
-		}
-
 		// Batch mode: output JSON { "path": "wgsl" | {"error": "msg"}, ... }
 		std::cout << "{" << std::endl;
-		for (int i = 2; i < argc; i++) {
-			const char *path = argv[i];
+		for (size_t i = 0; i < files.size(); i++) {
+			const char *path = files[i];
 			auto spv_bytes = read_file(path);
 
 			std::cout << "  \"" << json_escape(path) << "\": ";
@@ -284,7 +315,7 @@ int main(int argc, char *argv[]) {
 				}
 			}
 
-			if (i + 1 < argc) {
+			if (i + 1 < files.size()) {
 				std::cout << ",";
 			}
 			std::cout << std::endl;
@@ -294,7 +325,7 @@ int main(int argc, char *argv[]) {
 
 	} else {
 		// Single file mode: output WGSL to stdout.
-		const char *path = argv[1];
+		const char *path = files[0];
 		auto spv_bytes = read_file(path);
 		if (spv_bytes.empty()) {
 			fprintf(stderr, "Error: Failed to read '%s'\n", path);
