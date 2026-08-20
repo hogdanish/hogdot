@@ -30,7 +30,7 @@
 
 #include "shader_baker_export_plugin_platform_webgpu.h"
 
-#include "tint_pipeline_id.gen.h"
+#include "editor/shader/shader_baker/tint_pipeline_id.gen.h"
 
 #include "core/io/dir_access.h"
 #include "core/io/file_access.h"
