@@ -1,12 +1,12 @@
 # hogdot
 
-A fork of [Godot 4.7.1](https://github.com/godotengine/godot) that renders through WebGPU on the web for [COMMONGROUNDS](https://hogdani.sh) (my game)
+A fork of [Godot 4.7.2](https://github.com/godotengine/godot) that renders through WebGPU on the web for [COMMONGROUNDS](https://hogdani.sh) (my game)
 
-The WebGPU backend was borrowed directly from **[GodotWebGPU](https://github.com/dwalter/godotwebgpu)** by [dwalter](https://github.com/dwalter) who did all the hard work. This fork ports over his work to Godot 4.7.1 and adds a few additional features, fixes, and improvements on top of it.
+The WebGPU backend was borrowed directly from **[GodotWebGPU](https://github.com/dwalter/godotwebgpu)** by [dwalter](https://github.com/dwalter) who did all the hard work. This fork ports over his work to Godot 4.7.2 and adds a few additional features, fixes, and improvements on top of it.
 
 ## What this adds on top of GodotWebGPU
 
-**Godot 4.7 parity**: GodotWebGPU is for 4.6.2, this fork brings it to 4.7.1 with full compatibility with new features, such as rectangular area lights (`AreaLight3D`) w/ shadows, per-mesh light selection, `DrawableTexture2D` and `BlitMaterial` texture-authoring API, rewritten clearcoat and reflection shading, the discardable-texture rework, etc.
+**Godot 4.7 parity**: GodotWebGPU is for 4.6.2, this fork brings it to 4.7.2 with full compatibility with new features, such as rectangular area lights (`AreaLight3D`) w/ shadows, per-mesh light selection, `DrawableTexture2D` and `BlitMaterial` texture-authoring API, rewritten clearcoat and reflection shading, the discardable-texture rework, etc.
 
 **HDR display output on the web**: Godot 4.7 added HDR for all platforms except the browser. This fork enables extended tone mapping on the WebGPU canvas so an HDR panel gets actual HDR... in theory. HDR is really complicated
 
