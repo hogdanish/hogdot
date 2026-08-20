@@ -44,7 +44,7 @@ of the fork and mainline, which is what makes `git diff FORK_POINT WEBGPU_REF` t
 WebGPU delta. `--no-renames` is deliberate — with rename detection on, a file mainline renamed would drop
 silently out of the conflict set.
 
-**Measured 2026-08-06 against `4.7.1-stable`:** 1,447 additive · 1 collision
+**Measured 2026-08-20 against `4.7.2-stable`:** 1,447 additive · 1 collision
 (`thirdparty/spirv-headers/include/spirv/unified1/spirv.hpp11`, which mainline grew its own copy of) ·
 13 clean · **39 conflicts** · 0 deletions.
 

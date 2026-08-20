@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **hogdot** — Ethan's self-maintained fork of the Godot Engine, existing for exactly one purpose: to carry [GodotWebGPU](https://github.com/dwalter/godotwebgpu)'s WebGPU rendering backend on top of a current mainline Godot release. Its sole consumer is **`/Users/ethan/Projects/commongrounds`** (in-browser multiplayer game; Mobile renderer, web export, wants compute shaders). Read access to that repo is granted in `.claude/settings.json`.
 
-- **Current base**: `4.7.1-stable` · **WebGPU source**: `webgpu/webgpu-4.6.2`, which forked mainline at `4.6.2-stable` and is 165 linear commits ahead with **zero merge commits**.
+- **Current base**: `4.7.2-stable` (merged 2026-08-20; the 4.7.1→4.7.2 delta touched zero rendering/driver/shader surface) · **WebGPU source**: `webgpu/webgpu-4.6.2`, which forked mainline at `4.6.2-stable` and is 165 linear commits ahead with **zero merge commits**.
 - **Status (2026-08-11, the CommonGrounds web audit):** the port is complete and through feature implementation — all 8 slices landed, `pre-commit run --all-files` passes, CommonGrounds boots on WebGPU, threaded web builds ship, and 4.7's new features are validated or implemented (HDR display output is live in Chrome). ⚠ **Treat every "renders correctly" claim older than 2026-08-11 as unproven, and expect the next silent one to be a shim rather than a bug.** 2026-08-10's area-light gate found that **no positional light had ever cast a shadow** (RL-048); 2026-08-11's audit found that **`hint_depth_texture` had read zeros engine-wide since the port began** (RL-049, WA-18) — the driver was substituting a blank texture for every depth binding, silently, at eight sites that printed nothing. Both were invisible to gates whose pass state was also their failure state. Rendering is now judged against a native reference for four gates plus a controlled A/B on the screen-read gate; CommonGrounds has **not** been re-run since. No performance number exists. See `.claude/work/plans/STATUS.md` and `PORT-REPORT.md`.
 - ⚠ **`./hogdot/port-surface.sh` derives the port surface; it does NOT measure progress** and will report 39 conflicts forever. The per-file "did we carry it" check is in the slice-8 slice-log entry.
 - This is a **long-term** fork: every future mainline release repeats the same rebase-forward exercise. That is why the port surface is _derived by a script_ rather than written down — a checked-in ledger would rot within one release.
@@ -21,14 +21,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | `upstream` | `godotengine/godot`                                | **disabled** (push URL set to a stub) |
 | `webgpu`   | `dwalter/godotwebgpu`                              | **disabled** (push URL set to a stub) |
 
-- **`main` is the trunk**, based at `4.7.1-stable`. There is deliberately no local `master` — it was deleted so it can never be confused with upstream's.
+- **`main` is the trunk**, based at `4.7.2-stable` (4.7.1-stable merged forward 2026-08-20). There is deliberately no local `master` — it was deleted so it can never be confused with upstream's.
 - The 165 original WebGPU commits are **never rewritten and never lost**: `git log 4.6.2-stable..webgpu/webgpu-4.6.2`. Read them for the _why_ behind any hunk you port; their messages are unusually good.
 - The three refs every derivation depends on live in **`hogdot/refs.env`**. Bump `HOGDOT_UPSTREAM_BASE` there — and nowhere else — when moving onto a newer Godot.
-- ⚠ `webgpu` is fetched with `--no-tags` on purpose: GodotWebGPU carries Godot's own tags, and letting them in would silently clobber the local `4.6.2-stable` / `4.7.1-stable` that all the port math is measured against.
+- ⚠ `webgpu` is fetched with `--no-tags` on purpose: GodotWebGPU carries Godot's own tags, and letting them in would silently clobber the local `4.6.2-stable` / `4.7.2-stable` that all the port math is measured against.
 
 ## The port, in one line
 
-Run **`./hogdot/port-surface.sh --all`** — it classifies every file the fork touches in about a second and is the authority over any number written anywhere. Measured 2026-08-06 against `4.7.1-stable`: **1,447 additive · 1 collision · 13 clean · 39 conflicts · 0 deletions**, of which the 39 conflicts are the entire real integration surface. ⚠ **Start at the RD core.** Everything else — strategy, slice order, per-slice gotchas — is the **`port`** skill.
+Run **`./hogdot/port-surface.sh --all`** — it classifies every file the fork touches in about a second and is the authority over any number written anywhere. Measured 2026-08-20 against `4.7.2-stable`: **1,447 additive · 1 collision · 13 clean · 39 conflicts · 0 deletions**, of which the 39 conflicts are the entire real integration surface. ⚠ **Start at the RD core.** Everything else — strategy, slice order, per-slice gotchas — is the **`port`** skill.
 
 **The phase-by-phase execution plan is `.claude/work/plans/ROADMAP.md`** (authored 2026-08-06; gitignored scratch, like all of `.claude/work/`). Enter every port session through it — it routes to `STATUS.md` (where we are), `conventions.md` (session protocol, review directive, verification cadence) and the per-phase briefs.
 
