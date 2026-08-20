@@ -198,9 +198,20 @@ corrected here from the fork's own sources. Don't reintroduce it.
 `/Users/ethan/Projects/commongrounds` is the sole consumer — in-browser multiplayer, Mobile renderer, web
 export, wants compute shaders. Read access is granted in `.claude/settings.json`.
 
-FILL: the actual handoff — whether CommonGrounds points at `bin/godot.macos.editor.arm64` directly or at
-an installed editor, and where its export templates are expected. Derive from that repo's `build-export`
-skill and record it here the first time a build is handed over.
+**The handoff is: rebuild in place — CommonGrounds consumes hogdot's `bin/` directly** (derived
+2026-08-20 from `scripts/run-web.sh` + `godot/export_presets.cfg`):
+
+- **Editor:** `run-web.sh` requires `GODOT_BIN` to resolve under a hogdot `bin/` (default
+  `../hogdot/bin/godot.macos.editor.arm64`; the `hogdot` fish function points there). A stock
+  editor is rejected — it has no WebGPU backend and its exports churn importer keys (RL-040).
+- **Templates:** the export presets hardcode relative paths into hogdot —
+  `custom_template/{debug,release}="../../hogdot/bin/godot.web.template_{debug,release}.wasm32[.nothreads].zip"`
+  (threaded presets use the suffixless names). Nothing is installed into
+  `~/Library/Application Support/Godot/export_templates/` — the version-named install dir is not
+  part of this flow, so a base-version bump needs no re-install step.
+- **Freshness is checked on their side:** `run-web.sh` dies if a template zip is older than the
+  newest hogdot commit touching engine code (`--allow-stale-template` overrides).
+- Threads handoff details: `.claude/work/plans/THREADS.md`.
 
 ### Shader baking for web works as of 2026-08-11 (RL-042 step 1)
 

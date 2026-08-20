@@ -1292,3 +1292,41 @@ a dead editor) with a `--pipeline-id` stamp over `pipeline_id_inputs.txt` as the
 - The laptop slept twice under battery+lid and killed both subagents mid-run; `caffeinate -is`
   does not survive a lid close. Benchmarks on this machine need the lid open and AC, or the runs
   re-checked against `pmset -g log` sleep windows.
+
+### rebase-forward: 4.7.2-stable — 2026-08-20 — ec8beac626 (merge) + f6f51afba8-era docs
+
+**Source:** upstream `4.7.1-stable..4.7.2-stable` (62 commits, tag verified = `ed1daf0bf`), not fork
+content — no `Webgpu-Port:` trailer applies. First maintenance bump since the port landed.
+**Verification:** editor **runs** natively (headless editor boot + full native gate run); web
+**renders** — `[ShaderCoverage] PASS` in Ethan's Chrome on the rebuilt debug-nothreads template,
+device up on Forward Mobile / metal-3. Other three templates reach **links**.
+
+**Adapted**
+- Nothing. `git merge 4.7.2-stable` auto-merged everything. Only three files intersected the
+  fork surface (`main/main.cpp`, `.github/workflows/web_builds.yml`, `thirdparty/README.md`),
+  all in regions disjoint from the fork's hunks; both sides verified present post-merge.
+
+**Dropped**
+- Nothing.
+
+**Gotchas**
+- ⚠ The 4.7.2 delta contains zero rendering/driver/shader surface: no `drivers/`, no `.glsl`, no
+  RenderingDevice/driver-contract files. The bulk (153k insertions) is translation `.po` sync.
+- ⚠ Upstream reworked main-thread identity (`17cd7dbac7`, `a30e7e1151`: `core/os/thread.*`,
+  `main.cpp` — `make_main_thread` now CRASH_CONDs on a second main thread) and removed
+  `emscripten_cancel_main_loop` from the web exit callback (`bfbe912233`). Both exercised by the
+  gate run; no startup/runtime regression observed.
+- ⚠ **New web-only exit noise after the gate PASSes** (quit path, debug nothreads template):
+  2× `ERROR: Thread must have been started to wait for its completion.` (`core_bind.cpp:1529` —
+  the script-facing Thread, though the executed scene starts no script threads) followed by
+  `ERROR: 1 resources still in use at exit` (`rendering_device.cpp` finalize). Native run of the
+  same scene is clean of both, so it is web-specific. The known cosmetic `runtimeKeepalivePop`
+  abort still follows. Suspected interaction of `bfbe912233`'s shutdown-sequencing change with
+  the already-messy web quit path; nothing before the quit is affected. Not investigated —
+  flagged for a later session; no prior-session log records these lines, but absence of a record
+  is not proof they are new.
+- The RL-055 same-commit batch discipline held: all five artifacts built at `76f546c531`
+  (editor stamps `4.7.2.stable.custom_build.76f546c53`); gate export baked against that pair.
+- CommonGrounds handoff derived and recorded in `build-export` (its FILL gap): CommonGrounds
+  consumes `hogdot/bin/` in place — no install/copy step exists, so a base bump needs nothing
+  beyond the in-place rebuild.
