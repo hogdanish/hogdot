@@ -211,7 +211,11 @@ canary job deliberately **stays on upstream's 4.0.11** — it exists to prove th
 still builds as upstream builds it, and it is unverified under emcc 6. ⚠ CI is pinned to an exact
 emsdk on purpose while the local Homebrew emcc floats (table above) — when they drift, local
 observations stop transferring to CI; bump `EM_VERSION_WEBGPU` (both files, in lockstep) only
-together with rebuilt-and-verified shipped templates.
+together with rebuilt-and-verified shipped templates. ⚠ The webgpu CI jobs also pass
+`cxxflags=-Wno-unused-template`: 6.0.8's clang warns on unused static function templates in
+**upstream** headers (`modules/gltf/gltf_template_convert.h`) that upstream's own 4.0.11 clang
+never sees, and dev_mode's werror turns that into a fork-CI-only failure. Fork code stays held to
+the remaining warning set; drop the flag when an upstream merge makes those headers clean.
 
 ## Getting a build into CommonGrounds
 

@@ -39,14 +39,14 @@ jobs:
           - name: Template WebGPU, 32-bit (target=template_release, threads=no, arch=wasm32, webgpu=yes)
             cache-name: web-webgpu-template
             target: template_release
-            scons-flags: threads=no arch=wasm32 webgpu=yes opengl3=no
+            scons-flags: threads=no arch=wasm32 webgpu=yes opengl3=no cxxflags=-Wno-unused-template
             em-version-override: webgpu
             artifact: true
 
           - name: Template WebGPU debug, 32-bit (target=template_debug, threads=no, arch=wasm32, webgpu=yes)
             cache-name: web-webgpu-template-debug
             target: template_debug
-            scons-flags: threads=no arch=wasm32 webgpu=yes opengl3=no
+            scons-flags: threads=no arch=wasm32 webgpu=yes opengl3=no cxxflags=-Wno-unused-template
             em-version-override: webgpu
             artifact: false
 
