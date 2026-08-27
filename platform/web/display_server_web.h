@@ -69,11 +69,13 @@ private:
 #endif
 #ifdef WEBGPU_ENABLED
 	RenderingContextDriver *rendering_context = nullptr;
-	// What the project asked for. Whether the browser granted it is a separate question, answered
-	// live by window_is_hdr_output_supported(); the two together are window_is_hdr_output_enabled().
-	bool hdr_output_requested = false;
 	RenderingDevice *rendering_device = nullptr;
 #endif
+	// What the project asked for. Whether the browser granted it is a separate question, answered
+	// live by window_is_hdr_output_supported(); the two together are window_is_hdr_output_enabled().
+	// Unconditional on purpose: window_request_hdr_output() records and reports the request in
+	// every build, while the swap-chain work behind it stays RD-only.
+	bool hdr_output_requested = false;
 
 	HashMap<int64_t, CharString> utterance_ids;
 
