@@ -106,8 +106,9 @@ static constexpr uint32_t DECO_BINDING = 33;
 static constexpr uint32_t DECO_DESCRIPTOR_SET = 34;
 
 // SPIR-V BuiltIn values.
+// (BuiltIn PointSize is 1; WGSL has no point-size builtin and Tint drops it,
+// so nothing here reads it.)
 static constexpr uint32_t BUILTIN_POSITION = 0;
-static constexpr uint32_t BUILTIN_POINT_SIZE = 1;
 
 // SPIR-V execution model values.
 static constexpr uint32_t EXEC_MODEL_VERTEX = 0;
