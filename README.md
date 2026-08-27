@@ -36,6 +36,19 @@ scons platform=web target=template_release webgpu=yes opengl3=no threads=yes
 - **Chrome is the only tested browser:** Safari and Firefox are confirmed working but have not been thoroughly tested. Chrome provides best results.
 - **Not battle tested**: This hasn't been tested in production and is subject to change as I develop my game. Use at your own risk.
 
+## CI and releases
+
+This fork exists to ship one thing: WebGPU web export templates (plus the Linux editor that bakes
+their shaders) to [COMMONGROUNDS](https://hogdani.sh). CI is deliberately trimmed to match and
+**diverges from upstream Godot's by design**: pushes run static checks, the web template matrix
+(the two `webgpu=yes` wasm32 builds plus one vanilla wasm32 canary), and a single linuxbsd editor
+build. The android/ios/macos/windows workflows are still in-tree but are not called — those
+platforms ship on official Godot, not this fork.
+
+Engine artifacts are published by the `cg_release.yml` workflow: pushing a `cg-v*` tag builds the
+linuxbsd editor (with `tint_convert_cli`) and all four production web templates from that one
+commit and attaches them, with sha256 digests, to a GitHub Release.
+
 ## Upstream and license
 
 hogdot tracks [godotengine/godot](https://github.com/godotengine/godot) and is MIT-licensed, exactly

@@ -1,5 +1,17 @@
 name: 🔗 GHA
-on: [push, pull_request, merge_group, workflow_dispatch]
+# Fork CI is deliberately trimmed to what hogdot ships to CommonGrounds:
+# static checks, the web templates (WebGPU + one vanilla canary), and the
+# linuxbsd editor (the cg-release baker target). The android/ios/macos/windows
+# platform workflows still exist in-tree but are not called — the game's
+# desktop/server exports use official Godot. Rebase-forward note:
+# .claude/skills/build-export/SKILL.md ("Fork CI").
+# `branches` only: tag pushes (cg-v*) belong to cg_release.yml, not the matrix.
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  merge_group:
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}|${{ github.ref_name }}
@@ -15,20 +27,6 @@ jobs:
 
   # Second stage: Run all the builds and some of the tests.
 
-  android-build:
-    name: 🤖 Android
-    needs: static-checks
-    if: needs.static-checks.outputs.sources-changed == 'true' || github.event_name != 'pull_request'
-    uses: ./.github/workflows/android_builds.yml
-    secrets:
-      SERVICE_ACCOUNT_KEY: ${{ secrets.SERVICE_ACCOUNT_KEY }}
-
-  ios-build:
-    name: 🍏 iOS
-    needs: static-checks
-    if: needs.static-checks.outputs.sources-changed == 'true' || github.event_name != 'pull_request'
-    uses: ./.github/workflows/ios_builds.yml
-
   linux-build:
     name: 🐧 Linux
     needs: static-checks
@@ -36,18 +34,6 @@ jobs:
     uses: ./.github/workflows/linux_builds.yml
     with:
       changed-files: ${{ needs.static-checks.outputs.changed-files }}
-
-  macos-build:
-    name: 🍎 macOS
-    needs: static-checks
-    if: needs.static-checks.outputs.sources-changed == 'true' || github.event_name != 'pull_request'
-    uses: ./.github/workflows/macos_builds.yml
-
-  windows-build:
-    name: 🏁 Windows
-    needs: static-checks
-    if: needs.static-checks.outputs.sources-changed == 'true' || github.event_name != 'pull_request'
-    uses: ./.github/workflows/windows_builds.yml
 
   web-build:
     name: 🌐 Web

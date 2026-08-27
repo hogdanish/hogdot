@@ -1,6 +1,6 @@
 ---
 name: build-export
-description: Compiling hogdot — the scons invocations for the macOS editor and the web export templates, the ccache/pre-commit/Emscripten toolchain and why each is pinned the way it is, running Godot's own lint gates, the unit-test target, and getting a build into CommonGrounds.
+description: Compiling hogdot — the scons invocations for the macOS editor and the web export templates, the ccache/pre-commit/Emscripten toolchain and why each is pinned the way it is, running Godot's own lint gates, the unit-test target, fork CI and the cg-release artifact channel, and getting a build into CommonGrounds.
 when_to_use: Load before running scons, before linting, when a build or link fails, when choosing which verification tier a change needs to reach, or when an Emscripten or web-export problem appears. Boundary — what to build and in what order is the port skill; what the WebGPU backend does is godotwebgpu; the tier policy itself is the verification rule.
 user-invocable: false
 ---
@@ -199,6 +199,20 @@ The reasoning, because it will need revisiting if a web build misbehaves:
 ⚠ An **earlier claim that the fork targeted "4.0.10+" and that 6.0.5 was a two-major gap was wrong** —
 corrected here from the fork's own sources. Don't reintroduce it.
 
+**CI pin, decided 2026-08-27: emsdk `6.0.8` for every `webgpu=yes` CI build** — the two WebGPU jobs
+in `web_builds.yml` (per-matrix `em-version-override: webgpu` → `EM_VERSION_WEBGPU`) and all four
+templates in `cg_release.yml`. Rationale: the driver targets emdawnwebgpu's current `webgpu.h`
+(4-parameter `WGPUQueueWorkDoneCallback` etc.), which upstream's `EM_VERSION: 4.0.11` pin cannot
+compile — run 33120336421 failed exactly there — and 6.0.8 is the exact emcc the shipped
+CommonGrounds templates were built and verified with (the local Homebrew keg measured 6.0.8,
+2026-08-27). The pin was chosen over `#ifdef`-ing the driver for old headers: the fork is verified
+on 6.0.x only, so compiling it under 4.x would produce an artifact nobody tests. The vanilla web
+canary job deliberately **stays on upstream's 4.0.11** — it exists to prove the default web config
+still builds as upstream builds it, and it is unverified under emcc 6. ⚠ CI is pinned to an exact
+emsdk on purpose while the local Homebrew emcc floats (table above) — when they drift, local
+observations stop transferring to CI; bump `EM_VERSION_WEBGPU` (both files, in lockstep) only
+together with rebuilt-and-verified shipped templates.
+
 ## Getting a build into CommonGrounds
 
 `/Users/ethan/Projects/commongrounds` is the sole consumer — in-browser multiplayer, Mobile renderer, web
@@ -290,6 +304,35 @@ Ubuntu 24.04 arm64 — the OrbStack VM `cg-hogdot-build`, gcc 13.3, scons 4.5.2:
   (lavapipe presents a Vulkan 1.4 `llvmpipe` device under Xvfb, satisfying the windowed-export
   requirement for baking on a headless host). `tint_convert_cli`: `shasum`
   (`libdigest-sha-perl`) + `g++`.
+
+## Fork CI (trimmed 2026-08-27 — deliberate, owner-approved)
+
+**CI runs only what the fork ships**: `runner.yml` calls static-checks, `linux_builds.yml` (one
+plain `target=editor` job — the compile gate for the release channel's baker editor) and
+`web_builds.yml` (the two `webgpu=yes` wasm32 jobs + one vanilla wasm32 nothreads canary on
+upstream's emsdk 4.0.11). The android/ios/macos/windows workflows and the rest of upstream's
+Linux/web matrices are **not called** — those platforms ship on official Godot (the game's S8
+engine split), and the ~20 concurrent-job account cap means dead jobs queue against the release
+workflow and the game repo's Actions. `webgpu_tests.yml` is untouched (self-triggered on
+`drivers/webgpu/**` PRs). `runner.yml` triggers on `branches: ['**']` only, so `cg-v*` tag pushes
+never start the matrix.
+
+⚠ **Rebase-forward: these workflow edits are a recorded mechanical step** to re-apply on every
+future upstream merge — upstream will reintroduce the platform jobs and matrix entries. The
+re-apply list: (1) `runner.yml` — keep only static-checks/linux/web call jobs, `branches`-only
+push trigger; (2) `web_builds.yml` — drop wasm64 + extras, keep the vanilla wasm32 canary, keep
+the two webgpu jobs with `em-version-override: webgpu` and the `EM_VERSION_WEBGPU: 6.0.8` env;
+(3) `linux_builds.yml` — one plain editor matrix entry; (4) re-SHA-pin any new third-party
+`uses:` (repo setting `sha_pinning_required` rejects tag refs, and `allowed_actions: selected`
+blocks unlisted owners — patterns live in the repo's Actions settings, set 2026-08-27).
+
+- **Every third-party action is SHA-pinned** (`@<40-hex> # vN`), across workflows *and* the
+  `.github/actions/*` composites. Local `./.github/actions/*` and same-repo reusable workflows are
+  exempt from both repo settings.
+- **No secrets in this repo's Actions, ever** (decision of record) — the release channel uses only
+  the ambient `GITHUB_TOKEN`. The game repo is private; anything needing its content is *copied
+  into* hogdot (see the build profile below), never checked out from it.
+- ⚠ A README.md missing its final newline blocked every fork CI run ever (see lint section).
 
 ## The lint baseline (established 2026-08-06, before the first port commit)
 
