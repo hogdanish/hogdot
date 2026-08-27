@@ -339,7 +339,9 @@ never start the matrix.
 future upstream merge — upstream will reintroduce the platform jobs and matrix entries. The
 re-apply list: (1) `runner.yml` — keep only static-checks/linux/web call jobs, `branches`-only
 push trigger; (2) `web_builds.yml` — drop wasm64 + extras, keep the vanilla wasm32 canary, keep
-the two webgpu jobs with `em-version-override: webgpu` and the `EM_VERSION_WEBGPU: 6.0.8` env;
+the two webgpu jobs with `em-version-override: webgpu`, the `EM_VERSION_WEBGPU: 6.0.8` +
+`EMCC_CFLAGS: -Wno-unused-template` env, and per-job `import_env_vars=EMCC_CFLAGS
+use_closure_compiler=no` (rationale for each: the Emscripten decision record above);
 (3) `linux_builds.yml` — one plain editor matrix entry; (4) re-SHA-pin any new third-party
 `uses:` (repo setting `sha_pinning_required` rejects tag refs, and `allowed_actions: selected`
 blocks unlisted owners — patterns live in the repo's Actions settings, set 2026-08-27).
