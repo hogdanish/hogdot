@@ -1773,3 +1773,21 @@ mode is the designed one — the shader bakes SPIR-V-only with a warning, and th
 translate it live (and fail identically) only if something ever used it.
 **Disposition:** recorded — no action. If a subpass-input variant is ever *used* on web, the
 failure moves from bake-time warning to runtime error and becomes a real finding.
+
+### RL-057 — 2026-08-27 — **bug** (fixed)
+**Where:** `drivers/SCsub` (the editor-build container fallback), `editor/shader/shader_baker/SCsub`
+**Found while:** the first linuxbsd editor build ever attempted (Ubuntu 24.04 arm64, OrbStack VM,
+for CommonGrounds CI spike 6.A.1)
+**What:** the shader baker's WebGPU container was compiled into `libdrivers.a` (`drivers/SCsub`'s
+`elif env.editor_build:` fallback) while its only consumer,
+`shader_baker_export_plugin_platform_webgpu.cpp`, sits in `libeditor.a`. GNU ld resolves static
+archives in a single pass, so an archive member referenced only by a later archive is silently
+skipped and the link dies with `undefined reference to RenderingShaderContainerWebGPU::…`
+(constructor, `_to_bytes_shader_extra_data`, `bake_stage_wgsl`, `finalize_baked_wgsl`). Apple's ld
+resolves across archives, which is why every macOS editor linked — the bug was invisible on the
+only platform that had ever built an editor.
+**Disposition:** **fixed** — the drivers/-side fallback is deleted;
+`editor/shader/shader_baker/SCsub` compiles the container into the editor library beside its
+consumer when `webgpu=no`. Verified at *links*: a linuxbsd editor links and stamps
+`4.7.2.stable.custom_build.2ba2026a5` (Ubuntu 24.04 arm64, gcc 13.3, 2026-08-27); linuxbsd and
+macOS both pass the configure-only gate with the change in place.

@@ -64,11 +64,6 @@ if env["webgpu"]:
         print_error("Target platform '{}' does not support the WebGPU rendering driver".format(env["platform"]))
         Exit(255)
     SConscript("webgpu/SCsub")
-elif env.editor_build:
-    # The shader baker needs the WebGPU shader container to bake shaders for web
-    # exports, and the container is host-portable (it depends only on
-    # servers/rendering). Compile just it — never the driver — into every editor.
-    env.add_source_files(env.drivers_sources, "webgpu/rendering_shader_container_webgpu.cpp")
 
 # Input drivers
 if env["sdl"] and env["platform"] in ["linuxbsd", "macos", "windows", "ios", "visionos"]:

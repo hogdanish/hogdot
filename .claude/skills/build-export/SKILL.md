@@ -218,7 +218,9 @@ export, wants compute shaders. Read access is granted in `.claude/settings.json`
 `shader_baker/enabled=true` in a Web preset now bakes SPIR-V containers into the pck at
 `res://.godot/shader_cache/…/*.webgpu.cache`; the runtime loads them and skips glslang on first
 use of every baked shader. The pieces: the WebGPU shader container compiles into every editor
-build (`drivers/SCsub`), `ShaderBakerExportPluginPlatformWebGPU` is registered unconditionally in
+build (`editor/shader/shader_baker/SCsub` when `webgpu=no` — beside its only consumer, moved out
+of `drivers/SCsub` 2026-08-27 for GNU ld; RL-057), `ShaderBakerExportPluginPlatformWebGPU` is
+registered unconditionally in
 `editor_node.cpp`, and the web export plugin declares the option, pushes the `shader_baker`
 feature, and warns on renderer mismatch. Details and verification:
 `.claude/work/plans/features/feature-shader-baker.md`.
@@ -256,6 +258,32 @@ the stamp differs from the editor's build-time copy. Rebuild it with
 `createRenderPipeline` remain at runtime for baked shaders; runtime-generated materials
 (procedural `ShaderMaterial`s) still pay the full path — only shaders visible at export time
 can bake. Verification and numbers: `feature-shader-baker.md`.
+
+## Linux editor (linuxbsd) — first built 2026-08-27
+
+The first linuxbsd editor build ever attempted (CommonGrounds CI spike 6.A.1) succeeded on
+Ubuntu 24.04 arm64 — the OrbStack VM `cg-hogdot-build`, gcc 13.3, scons 4.5.2:
+`scons platform=linuxbsd target=editor` with the usual ccache trio, **~8 min cold at `-j8` on
+9 M5 cores**, stamping `4.7.2.stable.custom_build`.
+
+- ⚠ **`webgpu=yes` stays a hard error on linuxbsd by design** — the driver is web-only. The
+  editor still bakes for web through the always-compiled
+  `ShaderBakerExportPluginPlatformWebGPU` plus the WebGPU shader container (section above).
+- ⚠ **The first link died with `undefined reference to RenderingShaderContainerWebGPU::…`**
+  (RL-057): the container was compiled into `libdrivers.a` while its only consumer sits in
+  `libeditor.a`, and GNU ld scans static archives in a single pass, so the member was silently
+  skipped — Apple ld resolves it, which is why macOS editors always linked. Fixed 2026-08-27 by
+  compiling the container into the editor library beside its consumer
+  (`editor/shader/shader_baker/SCsub`, `webgpu=no` builds).
+- ⚠ **This Mac cannot even configure linuxbsd** — `platform/linuxbsd` fails `can_build()` on a
+  macOS host, so SCons does not offer the platform (measured 2026-08-27). The configure-only
+  smoke test (`scons platform=linuxbsd target=editor --help`) must run in the VM.
+- **Ubuntu 24.04 deps:** `build-essential scons pkg-config libx11-dev libxcursor-dev
+  libxinerama-dev libgl1-mesa-dev libglu1-mesa-dev libasound2-dev libpulse-dev libudev-dev
+  libxi-dev libxrandr-dev libwayland-dev`. Bake environment: `xvfb` + `mesa-vulkan-drivers`
+  (lavapipe presents a Vulkan 1.4 `llvmpipe` device under Xvfb, satisfying the windowed-export
+  requirement for baking on a headless host). `tint_convert_cli`: `shasum`
+  (`libdigest-sha-perl`) + `g++`.
 
 ## The lint baseline (established 2026-08-06, before the first port commit)
 

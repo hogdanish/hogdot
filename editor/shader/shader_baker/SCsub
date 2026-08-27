@@ -15,8 +15,18 @@ if env["metal"]:
     env.add_source_files(env.editor_sources, "shader_baker_export_plugin_platform_metal.cpp")
 
 # Always compiled: the WebGPU container it wraps is host-portable and built into
-# every editor (see drivers/SCsub), so any editor can bake for web exports.
+# every editor (see below), so any editor can bake for web exports.
 env.add_source_files(env.editor_sources, "shader_baker_export_plugin_platform_webgpu.cpp")
+
+if not env["webgpu"]:
+    # The baker wraps the WebGPU shader container from drivers/, which is
+    # host-portable (it depends only on servers/rendering). When the driver itself
+    # is not in the build, the container must be compiled into the editor library
+    # beside its only consumer: GNU ld resolves static archives in a single pass,
+    # so a libdrivers.a member referenced only by libeditor.a is silently skipped
+    # (Apple ld resolves it, which is why the drivers/-side fallback linked on
+    # macOS but never on linuxbsd).
+    env.add_source_files(env.editor_sources, "#drivers/webgpu/rendering_shader_container_webgpu.cpp")
 
 # The editor's copy of tint_convert_cli's --pipeline-id stamp, hashed from the
 # same input list build.sh uses, so a stale CLI is detected at bake time.
