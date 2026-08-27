@@ -158,6 +158,12 @@ tree. A "failed" codespell run reporting `files were modified by this hook` has 
 working tree** — re-run to confirm, don't hand-revert. This paragraph deliberately names no en-GB
 word, because codespell would rewrite the example too.
 
+⚠ **A missing final newline in README.md blocked every fork CI run ever** (found 2026-08-27):
+upstream's `static_checks.yml` runs prek's `file-format` hook, which fails on a file without a
+trailing newline, and `runner.yml` gates every build job on static-checks — so one missing `\n`
+at EOF failed all of fork CI. Fixed the same day; `pre-commit run file-format --files <path>`
+catches it locally before CI does.
+
 ⚠ **`validate-codeowners` fails on any tracked file with no `.github/CODEOWNERS` entry.** `hogdot/`
 needed its own line (added `7d5f060`-era, commit `e2450de`). `.claude/**` passes only by accident —
 upstream's root catch-all `/*.*` compiles to a regex that matches any path whose first segment
