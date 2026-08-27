@@ -427,8 +427,10 @@ static void _rewrite_depth_texture_samples(char **r_wgsl) {
 // Uses a 64-bit key (two MurmurHash3 passes with different seeds) to avoid
 // birthday-paradox collisions that a 32-bit hash would risk at ~1k entries.
 static HashMap<uint64_t, String> _spv_to_wgsl_cache;
-static uint32_t _spv_to_wgsl_cache_hits = 0;
-static uint32_t _spv_to_wgsl_cache_misses = 0;
+// The counters are only read inside WEBGPU_DIAG, which compiles out in
+// non-verbose builds — hence maybe_unused.
+[[maybe_unused]] static uint32_t _spv_to_wgsl_cache_hits = 0;
+[[maybe_unused]] static uint32_t _spv_to_wgsl_cache_misses = 0;
 
 // Run SPIR-V preprocessing passes and translate to WGSL via Tint.
 // Returns a malloc'd null-terminated WGSL string, or nullptr on failure.
@@ -570,7 +572,9 @@ static bool _storage_format_supports_read_write(WGPUTextureFormat p_format) {
 // Returns true if the format carries a stencil aspect alongside its depth aspect.
 // A view over such a texture must select one aspect before it can be bound as a
 // sampled texture; `WGPUTextureAspect_All` is rejected outright.
-static bool _is_depth_stencil_format(WGPUTextureFormat p_format) {
+// Currently has no caller (the aspect-selection sites test formats inline) but
+// kept for the next depth-binding fix — hence maybe_unused.
+[[maybe_unused]] static bool _is_depth_stencil_format(WGPUTextureFormat p_format) {
 	switch (p_format) {
 		case WGPUTextureFormat_Depth24PlusStencil8:
 		case WGPUTextureFormat_Depth32FloatStencil8:
