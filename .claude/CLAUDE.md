@@ -39,7 +39,7 @@ Run **`./hogdot/port-surface.sh --all`** — it classifies every file the fork t
 | **`port`** | Sequencing and integrating the port — derivation, the hybrid strategy and why a rebase was rejected, the 8 slices in order, and `references/slice-log.md` (living, append-only). |
 | **`godotwebgpu`** | How the WebGPU backend works — the driver, push-constant ring, subpass flattening, `spirv_preprocess.cpp` → Tint → WGSL, `wgsl_precompile.py`, the IPC optimizations. Owns the **50 imported fork documents** in `references/`, mapped by `references/index.md`. |
 | **`engine`** | Mainline 4.7.1 internals the port touches — `RenderingDevice`/`RenderingDeviceDriver`, `storage_rd`, forward-mobile, driver registration. ⚠ **Scaffold — fill it as the RD-core slice lands.** |
-| **`build-export`** | Compiling the editor and export templates, the ccache/pre-commit/Emscripten toolchain, lint gates, handing a build to CommonGrounds. |
+| **`build-export`** | Compiling the editor and export templates, the ccache/pre-commit/Emscripten toolchain, lint gates, fork CI (deliberately trimmed) and the `cg-v*` release channel, handing a build to CommonGrounds. |
 | **`docs`** | Where facts come from — in-tree `doc/classes/` (810 XML files at exactly this version), Context7 for external libs, which upstream URLs are safe to cite. |
 | **`claude-framework`** | The framework itself — the skill map, authoring mechanics, frontmatter, budgets, templates. |
 

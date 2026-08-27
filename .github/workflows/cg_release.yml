@@ -1,0 +1,256 @@
+name: 📦 CG Release
+# The engine-artifact channel for CommonGrounds (the fork's sole consumer).
+# A `cg-v*` tag builds the linuxbsd editor (+ tint_convert_cli, same commit —
+# the shader baker refuses a skewed pair) and all four production web
+# templates, then publishes them as a GitHub Release whose body carries the
+# digests game CI verifies before laying assets out.
+#
+# Deliberately standalone: not gated on static-checks or any upstream job, and
+# its own concurrency group so the upstream matrix can never cancel it.
+# Decision records: .claude/skills/build-export/SKILL.md ("The release
+# channel" + the Emscripten decision record).
+
+on:
+  push:
+    tags:
+      - cg-v*
+
+concurrency:
+  group: cg-release|${{ github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  # The exact emsdk the shipped CommonGrounds templates were verified with.
+  # Keep in lockstep with EM_VERSION_WEBGPU in web_builds.yml.
+  EM_VERSION_WEBGPU: 6.0.8
+  # The game's engine build profile, vendored as a tracked copy (the game repo
+  # is private and this repo holds zero secrets). Its sha256 goes into the
+  # release body so game CI can detect drift against its own copy.
+  BUILD_PROFILE: hogdot/build_profile.web.gdbuild
+
+jobs:
+  linux-editor:
+    name: Editor linuxbsd x86_64 (+ tint_convert_cli)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: recursive
+
+      - name: Setup dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libx11-dev \
+            libxcursor-dev libxinerama-dev libgl1-mesa-dev libglu1-mesa-dev \
+            libasound2-dev libpulse-dev libudev-dev libxi-dev libxrandr-dev \
+            libwayland-dev libwayland-bin libdigest-sha-perl
+
+      - name: Restore Godot build cache
+        uses: ./.github/actions/godot-cache-restore
+        with:
+          cache-name: cg-release-linux-editor
+        continue-on-error: true
+
+      - name: Setup Python and SCons
+        uses: ./.github/actions/godot-deps
+
+      - name: Build editor
+        # No BUILD_NAME override: the version string must stay
+        # `custom_build` — game CI pins it as HOGDOT_BUILD.
+        run: |
+          scons platform=linuxbsd target=editor debug_symbols=no \
+            "cache_path=${{ github.workspace }}/.scons_cache/" redirect_build_objects=no
+          ls -l bin/
+
+      - name: Build tint_convert_cli
+        # Native host tool the editor's shader baker shells out to at export
+        # time; it must sit beside the editor binary and come from this same
+        # tree (the baker compares its --pipeline-id stamp).
+        run: |
+          ./drivers/webgpu/tint_cli/build.sh
+          ./bin/tint_convert_cli --pipeline-id
+
+      - name: Save Godot build cache
+        uses: ./.github/actions/godot-cache-save
+        with:
+          cache-name: cg-release-linux-editor
+        continue-on-error: true
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          ./bin/godot.linuxbsd.editor.x86_64 --version | tail -n 1 > dist/editor-version.txt
+          cat dist/editor-version.txt
+          tar -C bin -czf dist/editor-linux-x86_64.tar.gz \
+            godot.linuxbsd.editor.x86_64 tint_convert_cli
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: cg-release-editor
+          path: dist/*
+          if-no-files-found: error
+
+  web-template:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # All four are profiled production-channel builds. Per the recipe of
+          # record (CommonGrounds prod-web-build.md §1): release templates get
+          # production=yes (ThinLTO), debug templates deliberately do NOT —
+          # but every variant takes the same build_profile or the artifacts
+          # diverge in behavior.
+          - name: Template release, threads (production=yes, threads=yes)
+            cache-name: cg-release-web-release-threads
+            target: template_release
+            scons-flags: production=yes threads=yes
+            bin-zip: godot.web.template_release.wasm32.zip
+            asset: web-template_release.threads.wasm32.zip
+
+          - name: Template release, nothreads (production=yes, threads=no)
+            cache-name: cg-release-web-release-nothreads
+            target: template_release
+            scons-flags: production=yes threads=no
+            bin-zip: godot.web.template_release.wasm32.nothreads.zip
+            asset: web-template_release.nothreads.wasm32.zip
+
+          - name: Template debug, threads (threads=yes)
+            cache-name: cg-release-web-debug-threads
+            target: template_debug
+            scons-flags: threads=yes
+            bin-zip: godot.web.template_debug.wasm32.zip
+            asset: web-template_debug.threads.wasm32.zip
+
+          - name: Template debug, nothreads (threads=no)
+            cache-name: cg-release-web-debug-nothreads
+            target: template_debug
+            scons-flags: threads=no
+            bin-zip: godot.web.template_debug.wasm32.nothreads.zip
+            asset: web-template_debug.nothreads.wasm32.zip
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: recursive
+
+      - name: Set up Emscripten
+        uses: emscripten-core/setup-emsdk@4528d102f7230f0e7b276855c01ea1159be0e984 # v16
+        with:
+          version: ${{ env.EM_VERSION_WEBGPU }}
+          no-cache: true
+
+      - name: Verify Emscripten setup
+        run: emcc -v
+
+      - name: Restore Godot build cache
+        uses: ./.github/actions/godot-cache-restore
+        with:
+          cache-name: ${{ matrix.cache-name }}
+        continue-on-error: true
+
+      - name: Setup Python and SCons
+        uses: ./.github/actions/godot-deps
+
+      - name: Build template
+        run: |
+          scons platform=web target=${{ matrix.target }} arch=wasm32 \
+            webgpu=yes vulkan=no opengl3=no ${{ matrix.scons-flags }} \
+            build_profile=${{ env.BUILD_PROFILE }} initial_memory=256 \
+            "cache_path=${{ github.workspace }}/.scons_cache/" redirect_build_objects=no
+          ls -l bin/
+
+      - name: Save Godot build cache
+        uses: ./.github/actions/godot-cache-save
+        with:
+          cache-name: ${{ matrix.cache-name }}
+        continue-on-error: true
+
+      - name: Stage asset
+        # Godot's own zip names encode threads-ness only as a `.nothreads`
+        # suffix (suffixless = threads) — the release asset names state both
+        # dimensions explicitly. The body maps each asset back to the bin/
+        # filename the export presets expect.
+        run: |
+          mkdir -p dist
+          cp "bin/${{ matrix.bin-zip }}" "dist/${{ matrix.asset }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ${{ matrix.cache-name }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    runs-on: ubuntu-24.04
+    needs: [linux-editor, web-template]
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Download artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Compose release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          cd dist
+          EDITOR_VERSION="$(cat editor-version.txt)"
+          rm editor-version.txt
+          PROFILE_SHA="$(sha256sum "../${BUILD_PROFILE}" | cut -d' ' -f1)"
+          sha256sum $(ls | sort) > checksums.txt
+          cat checksums.txt
+
+          {
+            echo "hogdot engine artifacts for CommonGrounds."
+            echo
+            echo "| Key | Value |"
+            echo "| --- | --- |"
+            echo "| Fork commit | \`${GITHUB_SHA}\` |"
+            echo "| Editor \`--version\` (HOGDOT_BUILD) | \`${EDITOR_VERSION}\` |"
+            echo "| emsdk pin | \`${EM_VERSION_WEBGPU}\` |"
+            echo "| Build profile sha256 | \`${PROFILE_SHA}\` |"
+            echo
+            echo "Templates: \`production=yes\` (release only) \`webgpu=yes vulkan=no opengl3=no\`," \
+                 "\`build_profile=${BUILD_PROFILE}\` \`initial_memory=256\`, wasm32."
+            echo "Editor tarball contains \`godot.linuxbsd.editor.x86_64\` and \`tint_convert_cli\`" \
+                 "(must stay beside each other; both from the fork commit above)."
+            echo
+            echo "Game-side layout (asset -> hogdot/bin/ name the export presets expect):"
+            echo
+            echo '```'
+            echo "web-template_release.threads.wasm32.zip   -> godot.web.template_release.wasm32.zip"
+            echo "web-template_release.nothreads.wasm32.zip -> godot.web.template_release.wasm32.nothreads.zip"
+            echo "web-template_debug.threads.wasm32.zip     -> godot.web.template_debug.wasm32.zip"
+            echo "web-template_debug.nothreads.wasm32.zip   -> godot.web.template_debug.wasm32.nothreads.zip"
+            echo '```'
+            echo
+            echo "sha256 per asset (also shipped as \`checksums.txt\`):"
+            echo
+            echo '```'
+            cat checksums.txt
+            echo '```'
+          } > ../release-body.md
+
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --notes-file ../release-body.md \
+            --verify-tag \
+            $(ls | sort)

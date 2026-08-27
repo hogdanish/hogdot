@@ -334,6 +334,36 @@ blocks unlisted owners — patterns live in the repo's Actions settings, set 202
   into* hogdot (see the build profile below), never checked out from it.
 - ⚠ A README.md missing its final newline blocked every fork CI run ever (see lint section).
 
+## The cg-release channel (`cg_release.yml`, first cut 2026-08-27)
+
+**Pushing a tag matching `cg-v*`** (scheme: `cg-v<godot-base>-r<N>`, e.g. `cg-v4.7.2-r1`) builds,
+from that one commit, everything game CI consumes, and publishes a GitHub Release. Standalone
+workflow — not gated on static-checks, own concurrency group (`cg-release|<tag>`,
+`cancel-in-progress: false`), `permissions: contents: write`.
+
+**Assets** (names state both variant dimensions explicitly; the body maps them back to the
+`bin/` filenames the game's export presets expect):
+
+| Asset | Contents |
+| --- | --- |
+| `editor-linux-x86_64.tar.gz` | `godot.linuxbsd.editor.x86_64` + `tint_convert_cli` — the baker pair, same commit (RL-055 + the tint pipeline-id stamp), must stay beside each other. |
+| `web-template_{release,debug}.{threads,nothreads}.wasm32.zip` | The four production templates: `webgpu=yes vulkan=no opengl3=no initial_memory=256 build_profile=hogdot/build_profile.web.gdbuild`, `production=yes` on release only (the prod-web-build recipe: debug skips exactly that flag). |
+| `checksums.txt` | sha256 per asset; also in the release body. |
+
+The release body carries the fork commit, the editor `--version` string (game CI's
+`HOGDOT_BUILD`; format `4.7.2.stable.custom_build.<sha9>` — CI must NOT set `BUILD_NAME`, which
+upstream's godot-build composite sets to `gh`), the emsdk pin, and the build profile's sha256.
+
+**`hogdot/build_profile.web.gdbuild` is a tracked COPY of the game's
+`godot/build_profile.web.gdbuild`** (copied-profile-with-drift-check, decided 2026-08-27 — a
+cross-repo checkout was rejected: the game repo is private and hogdot holds zero secrets). Its
+sha256 in the release body is the drift check: game CI compares it against its own copy, and a
+mismatch means "profile changed ⇒ cut a new engine release". ⚠ When the game's profile changes,
+re-copy it here and tag a new release — the copy is otherwise never edited by hand.
+
+Iterating on a failed release: each fix is a new push to main; re-tag (`-r2`, …) only when the
+tagged commit itself must change — while nothing consumes a tag yet, delete + re-push is fine.
+
 ## The lint baseline (established 2026-08-06, before the first port commit)
 
 `pre-commit run --all-files` on untouched 4.7.1 **passes every hook**. The snapshot is
