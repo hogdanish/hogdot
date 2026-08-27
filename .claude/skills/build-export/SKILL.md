@@ -211,11 +211,19 @@ canary job deliberately **stays on upstream's 4.0.11** — it exists to prove th
 still builds as upstream builds it, and it is unverified under emcc 6. ⚠ CI is pinned to an exact
 emsdk on purpose while the local Homebrew emcc floats (table above) — when they drift, local
 observations stop transferring to CI; bump `EM_VERSION_WEBGPU` (both files, in lockstep) only
-together with rebuilt-and-verified shipped templates. ⚠ The webgpu CI jobs also pass
-`cxxflags=-Wno-unused-template`: 6.0.8's clang warns on unused static function templates in
-**upstream** headers (`modules/gltf/gltf_template_convert.h`) that upstream's own 4.0.11 clang
-never sees, and dev_mode's werror turns that into a fork-CI-only failure. Fork code stays held to
-the remaining warning set; drop the flag when an upstream merge makes those headers clean.
+together with rebuilt-and-verified shipped templates. ⚠ The webgpu CI jobs also carry
+`EMCC_CFLAGS: -Wno-unused-template` (workflow env + `import_env_vars=EMCC_CFLAGS` in their scons
+flags): 6.0.8's clang warns on unused static function templates in **upstream** headers
+(`modules/gltf/gltf_template_convert.h`) that upstream's own 4.0.11 clang never sees, and
+dev_mode's werror turns that into a fork-CI-only failure. Policy (owner, 2026-08-27): **suppress,
+never patch upstream module code** — that is pure rebase tax; and if a *second* upstream warning
+class ever surfaces under emcc 6, flip the webgpu jobs to `werror=no` rather than grow the list
+(fork-owned code cleanliness is already proven; upstream's warning set is calibrated to 4.0.11's
+clang). ⚠ Suppression mechanics matter: scons `ccflags=`/`cxxflags=` append **before** the
+warnings block, so a later `-Wall` re-enables the warning (measured, run 33122928238) — emcc
+appends `EMCC_CFLAGS` after everything, which is the only injection point that wins (verified
+locally on 6.0.8, 2026-08-27). Release-channel templates never set werror, so they need none of
+this.
 
 ## Getting a build into CommonGrounds
 

@@ -16,6 +16,16 @@ env:
   # with 6.0.8. Decision record: .claude/skills/build-export/SKILL.md.
   EM_VERSION: 4.0.11
   EM_VERSION_WEBGPU: 6.0.8
+  # 6.0.8's clang fires -Wunused-template on upstream headers
+  # (modules/gltf/gltf_template_convert.h) that upstream's 4.0.11 clang never
+  # flags; under dev_mode's werror that fails only the webgpu jobs. Policy:
+  # suppress, never patch upstream module code (pure rebase tax). emcc appends
+  # EMCC_CFLAGS after every other flag — the only spot that beats the -Wall
+  # SConstruct appends after custom ccflags/cxxflags — and only the webgpu
+  # jobs import it (import_env_vars in their scons flags). If a SECOND
+  # upstream warning class ever surfaces under emcc 6, flip these two jobs to
+  # werror=no instead of growing this list.
+  EMCC_CFLAGS: -Wno-unused-template
 
 jobs:
   web-template:
@@ -39,14 +49,14 @@ jobs:
           - name: Template WebGPU, 32-bit (target=template_release, threads=no, arch=wasm32, webgpu=yes)
             cache-name: web-webgpu-template
             target: template_release
-            scons-flags: threads=no arch=wasm32 webgpu=yes opengl3=no cxxflags=-Wno-unused-template
+            scons-flags: threads=no arch=wasm32 webgpu=yes opengl3=no import_env_vars=EMCC_CFLAGS
             em-version-override: webgpu
             artifact: true
 
           - name: Template WebGPU debug, 32-bit (target=template_debug, threads=no, arch=wasm32, webgpu=yes)
             cache-name: web-webgpu-template-debug
             target: template_debug
-            scons-flags: threads=no arch=wasm32 webgpu=yes opengl3=no cxxflags=-Wno-unused-template
+            scons-flags: threads=no arch=wasm32 webgpu=yes opengl3=no import_env_vars=EMCC_CFLAGS
             em-version-override: webgpu
             artifact: false
 
