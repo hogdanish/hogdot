@@ -223,7 +223,13 @@ clang). ⚠ Suppression mechanics matter: scons `ccflags=`/`cxxflags=` append **
 warnings block, so a later `-Wall` re-enables the warning (measured, run 33122928238) — emcc
 appends `EMCC_CFLAGS` after everything, which is the only injection point that wins (verified
 locally on 6.0.8, 2026-08-27). Release-channel templates never set werror, so they need none of
-this.
+this. The webgpu jobs additionally pass `use_closure_compiler=no` (overriding upstream's env
+flag — scons last-value-wins): under emcc 6.0.8 closure's bundled externs now declare
+`OVR_multiview2`, colliding with Godot's `platform/web/js/libs/library_godot_webgl2.externs.js`
+(`JSC_VAR_MULTIPLY_DECLARED_ERROR`, run 33124255404). Nothing shipped uses closure
+(prod-web-build §1 lists it as candidate-only) and the 4.0.11 canary keeps upstream's closure
+coverage. ⚠ That externs collision must be solved for real (fix the externs file, or
+`--jscomp_off`) before the game's closure-compiler A/B can run on emcc 6.
 
 ## Getting a build into CommonGrounds
 
