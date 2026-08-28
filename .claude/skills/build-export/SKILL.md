@@ -356,10 +356,24 @@ blocks unlisted owners — patterns live in the repo's Actions settings, set 202
 
 ## The cg-release channel (`cg_release.yml`, first cut 2026-08-27)
 
-**Pushing a tag matching `cg-v*`** (scheme: `cg-v<godot-base>-r<N>`, e.g. `cg-v4.7.2-r1`) builds,
-from that one commit, everything game CI consumes, and publishes a GitHub Release. Standalone
-workflow — not gated on static-checks, own concurrency group (`cg-release|<tag>`,
-`cancel-in-progress: false`), `permissions: contents: write`.
+**The release path is `workflow_dispatch` on `main` with a `tag` input** (scheme:
+`cg-v<godot-base>-r<N>`; driven by the game repo's `cg engine release`): the run validates the
+tag fast-fail (well-formed, not already existing), builds everything game CI consumes from the
+dispatched `GITHUB_SHA`, creates+pushes the tag only after every build succeeded (a failed run
+leaves no tag; a `GITHUB_TOKEN`-pushed tag cannot retrigger the workflow), and publishes the
+GitHub Release. Standalone workflow — not gated on static-checks, own concurrency group
+(`cg-release|<tag>`, `cancel-in-progress: false`), `permissions: contents: write`.
+
+⚠ **Dispatch-from-main is what makes releases cacheable (fixed 2026-08-28).** GitHub cache
+isolation scopes a run's saved caches to the run's own ref plus the default branch — so the
+original tag-push design saved every `cg-release-*` scons cache under `refs/tags/<tag>`, where
+no later tag could ever restore it: r2 recompiled everything from scratch, and main's
+`linux-editor`/`web-webgpu-template*` caches were no help either (different cache names AND
+different build signatures — `dev_mode`, no `production`, no `build_profile`). A dispatch run
+executes on `refs/heads/main`, so its saves land at `cg-release-*|main|<sha>` — exactly the
+default-branch fallback every later run's restore step reads. **Pushing a `cg-v*` tag by hand
+still works as the break-glass path, but it is cold by construction and skips the cache-save
+steps** (a tag-scoped save is unreachable dead weight against the 10 GiB cache quota).
 
 **Assets** (names state both variant dimensions explicitly; the body maps them back to the
 `bin/` filenames the game's export presets expect):
@@ -382,8 +396,10 @@ sha256 in the release body is the drift check: game CI compares it against its o
 mismatch means "profile changed ⇒ cut a new engine release". ⚠ When the game's profile changes,
 re-copy it here and tag a new release — the copy is otherwise never edited by hand.
 
-Iterating on a failed release: each fix is a new push to main; re-tag (`-r2`, …) only when the
-tagged commit itself must change — while nothing consumes a tag yet, delete + re-push is fine.
+Iterating on a failed release: each fix is a new push to main, then re-dispatch with the same
+tag input — a failed dispatch run created no tag, so there is nothing to clean up. Once a tag
+exists (the run succeeded), it is consumed by the game's `engine.env` digest pins: cut the next
+`-rN` instead of touching it.
 
 ## The lint baseline (established 2026-08-06, before the first port commit)
 

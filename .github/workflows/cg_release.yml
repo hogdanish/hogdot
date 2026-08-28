@@ -10,13 +10,33 @@ name: 📦 CG Release
 # Decision records: .claude/skills/build-export/SKILL.md ("The release
 # channel" + the Emscripten decision record).
 
+# ⚠ Two triggers, one warm and one cold. `workflow_dispatch` on main is THE
+# release path (what `cg engine release` drives): the run executes on
+# refs/heads/main, so its scons caches save under `<name>|main|<sha>` — which
+# is exactly the default-branch fallback every later run's restore step reads.
+# A `cg-v*` tag push still works as the break-glass path, but it is cold by
+# construction: GitHub cache isolation scopes a tag run's saved caches to that
+# tag's own ref, where no other tag can ever restore them (measured on
+# r1→r2, 2026-08-28 — every release job recompiled from scratch). Tag-push
+# runs therefore skip the cache-save steps entirely: their saves are
+# unreachable dead weight against the 10 GiB cache quota.
+#
+# On dispatch the tag does not exist yet — the release job creates and pushes
+# it (at the run's own GITHUB_SHA) only after every build succeeded, so a
+# failed run leaves no tag behind and a re-dispatch needs no cleanup.
 on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to create (cg-v<godot-base>-r<N>)
+        required: true
+        type: string
   push:
     tags:
       - cg-v*
 
 concurrency:
-  group: cg-release|${{ github.ref_name }}
+  group: cg-release|${{ github.event.inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 permissions:
@@ -30,9 +50,38 @@ env:
   # is private and this repo holds zero secrets). Its sha256 goes into the
   # release body so game CI can detect drift against its own copy.
   BUILD_PROFILE: hogdot/build_profile.web.gdbuild
+  # The tag this run releases as: the dispatch input, or the pushed tag ref.
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
 
 jobs:
+  preflight:
+    # Fails a bad dispatch in seconds instead of 40 build-minutes later: the
+    # tag input must be well-formed and must not already exist (the release
+    # job pushes it at the end). Trivially green on the tag-push path.
+    name: Validate the release tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check the tag input
+        run: |
+          set -eu
+          if [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
+            echo "tag-push run for ${TAG} — nothing to validate"
+            exit 0
+          fi
+          case "$TAG" in
+            cg-v*) ;;
+            *) echo "tag '$TAG' does not match cg-v*" >&2; exit 1 ;;
+          esac
+          if git ls-remote --exit-code --tags \
+              "https://github.com/${{ github.repository }}" "refs/tags/$TAG" >/dev/null; then
+            echo "tag '$TAG' already exists — pick the next -rN" >&2
+            exit 1
+          fi
+          echo "will release ${GITHUB_SHA} as ${TAG}"
+
   linux-editor:
+    needs: [preflight]
     name: Editor linuxbsd x86_64 (+ tint_convert_cli)
     runs-on: ubuntu-24.04
     timeout-minutes: 120
@@ -76,6 +125,10 @@ jobs:
           ./bin/tint_convert_cli --pipeline-id
 
       - name: Save Godot build cache
+        # Dispatch runs only: they execute on refs/heads/main, so the save is
+        # restorable by every later run. A tag-push run's save is scoped to
+        # its own tag ref, where nothing can ever restore it.
+        if: github.event_name == 'workflow_dispatch'
         uses: ./.github/actions/godot-cache-save
         with:
           cache-name: cg-release-linux-editor
@@ -97,6 +150,7 @@ jobs:
           if-no-files-found: error
 
   macos-editor:
+    needs: [preflight]
     # 6.A.4: the Mac's local toolchain becomes a pinned, versioned release
     # asset instead of an mtime in bin/. arm64 only — the dev machine is
     # Apple Silicon and nothing consumes an x86_64 mac editor.
@@ -137,6 +191,10 @@ jobs:
           ./bin/tint_convert_cli --pipeline-id
 
       - name: Save Godot build cache
+        # Dispatch runs only: they execute on refs/heads/main, so the save is
+        # restorable by every later run. A tag-push run's save is scoped to
+        # its own tag ref, where nothing can ever restore it.
+        if: github.event_name == 'workflow_dispatch'
         uses: ./.github/actions/godot-cache-save
         with:
           cache-name: cg-release-macos-editor
@@ -157,6 +215,7 @@ jobs:
           if-no-files-found: error
 
   web-template:
+    needs: [preflight]
     name: ${{ matrix.name }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
@@ -230,6 +289,10 @@ jobs:
           ls -l bin/
 
       - name: Save Godot build cache
+        # Dispatch runs only: they execute on refs/heads/main, so the save is
+        # restorable by every later run. A tag-push run's save is scoped to
+        # its own tag ref, where nothing can ever restore it.
+        if: github.event_name == 'workflow_dispatch'
         uses: ./.github/actions/godot-cache-save
         with:
           cache-name: ${{ matrix.cache-name }}
@@ -265,6 +328,19 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+
+      - name: Create and push the release tag
+        # Dispatch runs only (a tag-push run's tag already exists). Pushed at
+        # this run's own GITHUB_SHA so the tag records exactly what was built,
+        # and only after every build job succeeded — a failed run leaves no
+        # tag. A GITHUB_TOKEN push cannot retrigger this workflow (GitHub
+        # suppresses workflow events from workflow-created refs), so the
+        # `push: tags:` trigger above does not double-run.
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          set -euo pipefail
+          git tag "$TAG" "$GITHUB_SHA"
+          git push origin "refs/tags/$TAG"
 
       - name: Compose release
         env:
@@ -311,8 +387,8 @@ jobs:
             echo '```'
           } > ../release-body.md
 
-          gh release create "${GITHUB_REF_NAME}" \
-            --title "${GITHUB_REF_NAME}" \
+          gh release create "${TAG}" \
+            --title "${TAG}" \
             --notes-file ../release-body.md \
             --verify-tag \
             $(ls | sort)
