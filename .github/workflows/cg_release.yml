@@ -96,6 +96,66 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  macos-editor:
+    # 6.A.4: the Mac's local toolchain becomes a pinned, versioned release
+    # asset instead of an mtime in bin/. arm64 only — the dev machine is
+    # Apple Silicon and nothing consumes an x86_64 mac editor.
+    name: Editor macOS arm64 (+ tint_convert_cli)
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: recursive
+
+      - name: Setup Vulkan SDK
+        # Required, not best-effort: the editor links -lMoltenVK, and an
+        # editor built without it would not match the local recipe of record
+        # (build-export SKILL "Commands").
+        run: sh misc/scripts/install_vulkan_sdk_macos.sh
+
+      - name: Restore Godot build cache
+        uses: ./.github/actions/godot-cache-restore
+        with:
+          cache-name: cg-release-macos-editor
+        continue-on-error: true
+
+      - name: Setup Python and SCons
+        uses: ./.github/actions/godot-deps
+
+      - name: Build editor
+        # No BUILD_NAME override: the version string must stay `custom_build`.
+        run: |
+          scons platform=macos target=editor arch=arm64 debug_symbols=no \
+            "cache_path=${{ github.workspace }}/.scons_cache/" redirect_build_objects=no
+          ls -l bin/
+
+      - name: Build tint_convert_cli
+        run: |
+          ./drivers/webgpu/tint_cli/build.sh
+          ./bin/tint_convert_cli --pipeline-id
+
+      - name: Save Godot build cache
+        uses: ./.github/actions/godot-cache-save
+        with:
+          cache-name: cg-release-macos-editor
+        continue-on-error: true
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          ./bin/godot.macos.editor.arm64 --version | tail -n 1
+          tar -C bin -czf dist/editor-macos-arm64.tar.gz \
+            godot.macos.editor.arm64 tint_convert_cli
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: cg-release-editor-macos
+          path: dist/*
+          if-no-files-found: error
+
   web-template:
     name: ${{ matrix.name }}
     runs-on: ubuntu-24.04
@@ -194,7 +254,7 @@ jobs:
   release:
     name: Publish release
     runs-on: ubuntu-24.04
-    needs: [linux-editor, web-template]
+    needs: [linux-editor, macos-editor, web-template]
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -230,8 +290,8 @@ jobs:
             echo
             echo "Templates: \`production=yes\` (release only) \`webgpu=yes vulkan=no opengl3=no\`," \
                  "\`build_profile=${BUILD_PROFILE}\` \`initial_memory=256\`, wasm32."
-            echo "Editor tarball contains \`godot.linuxbsd.editor.x86_64\` and \`tint_convert_cli\`" \
-                 "(must stay beside each other; both from the fork commit above)."
+            echo "Editor tarballs each contain their editor binary and a same-commit" \
+                 "\`tint_convert_cli\` (must stay beside each other; the baker shells out to it)."
             echo
             echo "Game-side layout (asset -> hogdot/bin/ name the export presets expect):"
             echo
@@ -240,6 +300,8 @@ jobs:
             echo "web-template_release.nothreads.wasm32.zip -> godot.web.template_release.wasm32.nothreads.zip"
             echo "web-template_debug.threads.wasm32.zip     -> godot.web.template_debug.wasm32.zip"
             echo "web-template_debug.nothreads.wasm32.zip   -> godot.web.template_debug.wasm32.nothreads.zip"
+            echo "editor-linux-x86_64.tar.gz                -> godot.linuxbsd.editor.x86_64 + tint_convert_cli"
+            echo "editor-macos-arm64.tar.gz                 -> godot.macos.editor.arm64 + tint_convert_cli"
             echo '```'
             echo
             echo "sha256 per asset (also shipped as \`checksums.txt\`):"
