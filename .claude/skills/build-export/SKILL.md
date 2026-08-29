@@ -71,7 +71,7 @@ support anyway.
 | --- | --- | --- |
 | `scons` | brew | Godot's build system. |
 | `ccache` | 4.13.6 | ⚠ **NOT automatic, and needs THREE things, not one** — see "Making ccache actually work" below. Config `~/.config/ccache/ccache.conf`, cache `~/.cache/ccache`, cap 30G. |
-| Vulkan SDK | LunarG, installed 2026-08-06 | Needed for `-lMoltenVK` at link time. Installed with `sh misc/scripts/install_vulkan_sdk_macos.sh` — headless, no sudo, lands in `~/VulkanSDK`. Outside Homebrew, so `brewup` does not cover it. |
+| Vulkan SDK | LunarG, installed 2026-08-06 | Needed for `-lMoltenVK` at link time. Headless, no sudo, lands in `~/VulkanSDK`; outside Homebrew, so `brewup` does not cover it. ⚠ Prefer **`./hogdot/install-vulkan-sdk-macos.sh`** (pinned + sha256-verified, what CI runs) over upstream's `misc/scripts/install_vulkan_sdk_macos.sh` (fetches `latest`, verifies nothing) — using the same one locally keeps the dev machine on the SDK the release channel builds against. |
 | `pre-commit` | 4.6.1 | The only way to run Godot's `.pre-commit-config.yaml`. |
 | `emcc` | 6.0.x | Web targets only. `EM_CACHE` → `~/.cache/emscripten` (fish `conf.d/xdg-apps.fish`). ⚠ **Do not pin a patch version in prose** — `brew autoupdate` moves it every 12 h. Measured 6.0.5 on 2026-08-06 morning and **6.0.6-git** the same afternoon, and RL-039 is what a stale version assertion costs. `emcc --version` is the answer. |
 | `glslang` | brew 16.5.0 | ⚠ **No longer a build dependency of `webgpu=yes`** — see below. Still needed for the offline dev tooling in `webgpu_tests/shader_corpus/` (`compile_fixtures.sh`, `validate_spirv_dump.mjs`) and for `bin/tint_convert_cli` corpus work. |
@@ -611,6 +611,13 @@ blocks unlisted owners — patterns live in the repo's Actions settings, set 202
   template `--dry-run`. Neither the SCons version (CI pins 4.10.1 in `.github/actions/godot-deps`,
   Homebrew ships 4.11.1) nor Python 3.14 was implicated — both reproduce identically once `editor/`
   is gone.
+- **Repo default workflow permissions are `read`** (measured 2026-08-28 via
+  `gh api repos/hogdanish/hogdot/actions/permissions/workflow`), and the repo is public. That is
+  why only `cg_release.yml` needed the least-privilege fix below: every other workflow's persisted
+  checkout credential is a read token on a public tree, and adding `persist-credentials: false` to
+  upstream's workflow files would buy nothing while costing a conflict on every rebase-forward.
+  ⚠ **If that default is ever flipped to write, or the repo is made private, revisit that** —
+  the reasoning, not the conclusion, is what is recorded here.
 - ⚠ A README.md missing its final newline blocked every fork CI run ever (see lint section).
 
 ## The cg-release channel (`cg_release.yml`, first cut 2026-08-27)
@@ -621,7 +628,7 @@ tag fast-fail (well-formed, not already existing), builds everything game CI con
 dispatched `GITHUB_SHA`, creates+pushes the tag only after every build succeeded (a failed run
 leaves no tag; a `GITHUB_TOKEN`-pushed tag cannot retrigger the workflow), and publishes the
 GitHub Release. Standalone workflow — not gated on static-checks, own concurrency group
-(`cg-release|<tag>`, `cancel-in-progress: false`), `permissions: contents: write`.
+(`cg-release|<tag>`, `cancel-in-progress: false`).
 
 ⚠ **Dispatch-from-main is what makes releases cacheable (fixed 2026-08-28).** GitHub cache
 isolation scopes a run's saved caches to the run's own ref plus the default branch — so the
@@ -640,13 +647,18 @@ steps** (a tag-scoped save is unreachable dead weight against the 10 GiB cache q
 | Asset | Contents |
 | --- | --- |
 | `editor-linux-x86_64.tar.gz` | `godot.linuxbsd.editor.x86_64` + `tint_convert_cli` — the baker pair, same commit (RL-055 + the tint pipeline-id stamp), must stay beside each other. |
-| `editor-macos-arm64.tar.gz` | `godot.macos.editor.arm64` + `tint_convert_cli` (since r2, 6.A.4) — the Mac dev editor as a pinned asset instead of an mtime in `bin/`. Built on `macos-15` with the Vulkan SDK step REQUIRED (the editor links `-lMoltenVK`; matches the local recipe above). arm64 only. |
+| `editor-macos-arm64.tar.gz` | `godot.macos.editor.arm64` + `tint_convert_cli` (since r2, 6.A.4) — the Mac dev editor as a pinned asset instead of an mtime in `bin/`. Built on `macos-15` with the Vulkan SDK step REQUIRED (the editor links `-lMoltenVK`; matches the local recipe above), via the pinned `hogdot/install-vulkan-sdk-macos.sh`. arm64 only. |
 | `web-template_{release,debug}.{threads,nothreads}.wasm32.zip` | The four production templates: `webgpu=yes vulkan=no opengl3=no initial_memory=256 build_profile=hogdot/build_profile.web.gdbuild`, `production=yes` on release only (the prod-web-build recipe: debug skips exactly that flag). |
 | `checksums.txt` | sha256 per asset; also in the release body. |
+| `build-manifest.txt` | Runner image + toolchain per asset (see "Reproducibility" below); also in the release body, folded into a `<details>`. |
 
 The release body carries the fork commit, the editor `--version` string (game CI's
 `HOGDOT_BUILD`; format `4.7.2.stable.custom_build.<sha9>` — CI must NOT set `BUILD_NAME`, which
 upstream's godot-build composite sets to `gh`), the emsdk pin, and the build profile's sha256.
+
+⚠ **The game downloads assets by name** (`web-export.yml`: an explicit list, each verified against
+an `HOGDOT_SHA256_*` pin in `engine.env`), so adding an asset to a release is safe and removing or
+renaming one is not.
 
 **`hogdot/build_profile.web.gdbuild` is a tracked COPY of the game's
 `godot/build_profile.web.gdbuild`** (copied-profile-with-drift-check, decided 2026-08-27 — a
@@ -659,6 +671,73 @@ Iterating on a failed release: each fix is a new push to main, then re-dispatch 
 tag input — a failed dispatch run created no tag, so there is nothing to clean up. Once a tag
 exists (the run succeeded), it is consumed by the game's `engine.env` digest pins: cut the next
 `-rN` instead of touching it.
+
+### Least privilege and the supply chain (hardened 2026-08-28)
+
+This channel is the fork's only workflow with write access and the only one whose output is
+consumed as a trusted binary, so it is the only one where either mistake is expensive.
+
+- **`permissions: contents: read` at workflow level; `contents: write` on the `release` job
+  alone.** It used to be workflow-level write, which handed a repo-mutating credential to
+  preflight and all six compilation jobs — jobs that pull apt packages, an emsdk, a Vulkan SDK and
+  a pip SCons, then run a build system that executes arbitrary in-tree Python for two hours. The
+  `release` job compiles nothing (`download-artifact` + `gh`), so write lives on the smallest
+  possible surface.
+- **`persist-credentials: false` on every checkout except `release`'s.** `actions/checkout`
+  otherwise leaves the token in `.git/config` as an extraheader for the life of the job. ⚠ The
+  `release` job's checkout keeps it *and says so explicitly* — its tag step is a real
+  `git push origin`, which authenticates through exactly that header. `gh release create` does
+  not need it (`GH_TOKEN` from the environment); the tag push does. Do not "tidy" it away.
+- ⚠ **The macOS Vulkan SDK is pinned and digest-verified, by
+  `hogdot/install-vulkan-sdk-macos.sh`, NOT upstream's
+  `misc/scripts/install_vulkan_sdk_macos.sh`.** Upstream's fetches LunarG's `latest` and executes
+  the installer with no pin, no digest and no signature — ~360 MiB of remote code running on the
+  runner that builds a shipped asset, and a silent reproducibility hole ("latest" is a different
+  SDK every few weeks, recorded nowhere). The replacement verifies sha256 *before* it unzips
+  anything and fails closed. Currently **1.4.357.1** (LunarG 2026-08-17, `cf23e604…c769a5`,
+  376,108,497 bytes) — which was `latest` when it was pinned, so pinning changed nothing about
+  what gets built. Upstream's script is deliberately left untouched: it is mainline Godot's file
+  and editing it would conflict on every rebase-forward. **Bumping the pin moves two constants in
+  that script and they must move together** — the header carries the exact `curl | shasum` recipe.
+  A version without its matching digest is worse than no pin, because it looks verified.
+
+### Reproducibility — `build-manifest.txt`
+
+`ubuntu-24.04` and `macos-15` are rolling labels, not images, and everything inside them floats.
+Each build job therefore drops a `manifest-NN-*.txt` fragment (runner `ImageOS`/`ImageVersion`,
+compiler, Python, SCons, plus emcc/emsdk on web and the Vulkan SDK on macOS); the `release` job
+concatenates them into the `build-manifest.txt` asset with the fork commit, build-profile sha256
+and the workflow-run URL on top. A missing fragment fails the step on purpose — a manifest with a
+hole in it is worse than none.
+
+**Python is pinned to `3.13` at this channel's `godot-deps` call sites** (`env.PYTHON_VERSION`),
+not in the composite: the composite's `3.x` default is upstream's file, and a floating Python is
+the right behavior for a pass/fail CI gate — it is only wrong for a shipped artifact. SCons is
+already pinned (`4.10.1`) inside the composite.
+
+### Artifact and cache storage (HOG-03, 2026-08-28)
+
+- **`retention-days: 1` on every `upload-artifact` in this workflow.** The `cg-release-*`
+  artifacts exist only to hand bytes to the `release` job in the same run; the permanent copy is
+  the Release asset, which is what the game downloads. At the 90-day default they were an exact
+  duplicate of the release — measured 2026-08-28, 12 unexpired `cg-release-*` artifacts holding
+  ~320 MB. (⚠ The larger consumer is fork-CI matrix output: 3.13 GB of unexpired artifacts total,
+  the rest of it from `./.github/actions/upload-artifact`, which upstream sets to 60 days.)
+- ⚠ **13 tag-scoped `cg-release-*` scons caches (~1.01 GB) are permanently unreachable** and
+  must be swept by hand — r1 and r2 ran as tag pushes, so their saves landed on
+  `refs/tags/cg-v4.7.2-r{1,2}` where no run can ever restore them. The dispatch-from-main design
+  plus the `if: github.event_name == 'workflow_dispatch'` guard on the save steps means no new
+  ones are created; this is a one-time cleanup:
+
+  ```fish
+  # dry run — list what would go
+  gh api --paginate '/repos/hogdanish/hogdot/actions/caches?per_page=100' \
+    --jq '.actions_caches[] | select(.ref | test("refs/tags/cg-v")) | [.id, .ref, .key] | @tsv'
+  # then delete
+  gh api --paginate '/repos/hogdanish/hogdot/actions/caches?per_page=100' \
+    --jq '.actions_caches[] | select(.ref | test("refs/tags/cg-v")) | .id' |
+    while read -l id; gh api -X DELETE "/repos/hogdanish/hogdot/actions/caches/$id"; end
+  ```
 
 ## The lint baseline (established 2026-08-06, before the first port commit)
 
