@@ -6,9 +6,14 @@ name: 🔗 GHA
 # desktop/server exports use official Godot. Rebase-forward note:
 # .claude/skills/build-export/SKILL.md ("Fork CI").
 # `branches` only: tag pushes (cg-v*) belong to cg_release.yml, not the matrix.
+# ⚠ `!dependabot/**` because a Dependabot branch push would otherwise run the
+# full matrix AND the PR event would run it again — and on the push event the
+# `sources-changed` gate below does not apply, so a workflow-file-only bump
+# would trigger the editor and web builds for nothing. The PR event still runs
+# static checks over the changed YAML, which is the check that matters there.
 on:
   push:
-    branches: ['**']
+    branches: ['**', '!dependabot/**']
   pull_request:
   merge_group:
   workflow_dispatch:
