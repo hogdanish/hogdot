@@ -1,0 +1,138 @@
+# Keep the third-party GitHub Actions pins current.
+#
+# ⚠ This does NOT weaken the fork's pinning policy, and must not be changed so
+#   that it does. Every third-party `uses:` in this repo is pinned to a full
+#   40-hex commit SHA with a trailing `# vN` comment, and the repo's own Actions
+#   settings enforce it (`sha_pinning_required: true` rejects a tag ref;
+#   `allowed_actions: selected` blocks unlisted owners). Dependabot understands
+#   that shape: it rewrites the SHA *and* the version comment together, so an
+#   accepted PR stays SHA-pinned. A tag-pinned `uses:` would be rejected by the
+#   repo setting before it ever ran — which is the backstop, not this file.
+#
+# Only `github-actions` is watched. The engine's vendored C/C++ dependencies are
+# in-tree drops under thirdparty/ with no manifest for Dependabot to read, and
+# the Python side is `pip install scons==<pin>` inside a composite action, not a
+# requirements file. Neither is a package ecosystem here.
+#
+# ⚠ Scope note: for the `github-actions` ecosystem GitHub does NOT support the
+#   plural `directories:` key or its globs — `directory:` only, and a `/` entry
+#   covers `.github/workflows/` plus a root-level `action.yml` and nothing else.
+#   Composite actions in subdirectories therefore need one entry each. The seven
+#   entries below are exactly the directories in this repo that contain a
+#   third-party `uses:`; the other six `.github/actions/*` composites are pure
+#   shell and have nothing to update.
+#
+# ⚠ Rebase-forward: most of `.github/actions/*` is upstream Godot's, so an
+#   accepted bump there is one more hunk that diverges from mainline. That is a
+#   deliberate trade — a stale action pin is a supply-chain problem, a diverged
+#   one is a merge conflict — and it belongs on the re-apply list in
+#   .claude/skills/build-export/SKILL.md ("Fork CI").
+version: 2
+
+updates:
+  # Every workflow file: .github/workflows/*.yml
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '06:00'
+      timezone: America/Chicago
+    # One grouped PR a week, not one per action. runner.yml fires on every
+    # branch push, so each extra Dependabot branch is another full fork-CI run
+    # against a ~20 concurrent-job account cap that release runs also draw on.
+    # (runner.yml excludes `dependabot/**` from its push trigger for the same
+    # reason; the PR event still runs static checks.)
+    groups:
+      github-actions:
+        patterns: ['*']
+    open-pull-requests-limit: 3
+    commit-message:
+      # Conventional commits, like everything else in this repo's history.
+      prefix: ci(deps)
+
+  # The composite actions that carry a third-party `uses:`. Same settings as
+  # above — Dependabot has no config inheritance, so they are restated.
+  - package-ecosystem: github-actions
+    directory: /.github/actions/godot-deps # actions/setup-python
+    schedule:
+      interval: weekly
+      day: monday
+      time: '06:00'
+      timezone: America/Chicago
+    groups:
+      github-actions:
+        patterns: ['*']
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: ci(deps)
+
+  - package-ecosystem: github-actions
+    directory: /.github/actions/godot-cache-restore # actions/cache/restore
+    schedule:
+      interval: weekly
+      day: monday
+      time: '06:00'
+      timezone: America/Chicago
+    groups:
+      github-actions:
+        patterns: ['*']
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: ci(deps)
+
+  - package-ecosystem: github-actions
+    directory: /.github/actions/godot-cache-save # actions/cache/{save,restore}
+    schedule:
+      interval: weekly
+      day: monday
+      time: '06:00'
+      timezone: America/Chicago
+    groups:
+      github-actions:
+        patterns: ['*']
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: ci(deps)
+
+  - package-ecosystem: github-actions
+    directory: /.github/actions/upload-artifact # actions/upload-artifact
+    schedule:
+      interval: weekly
+      day: monday
+      time: '06:00'
+      timezone: America/Chicago
+    groups:
+      github-actions:
+        patterns: ['*']
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: ci(deps)
+
+  - package-ecosystem: github-actions
+    directory: /.github/actions/download-artifact # actions/download-artifact
+    schedule:
+      interval: weekly
+      day: monday
+      time: '06:00'
+      timezone: America/Chicago
+    groups:
+      github-actions:
+        patterns: ['*']
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: ci(deps)
+
+  - package-ecosystem: github-actions
+    directory: /.github/actions/godot-cpp-build # actions/checkout
+    schedule:
+      interval: weekly
+      day: monday
+      time: '06:00'
+      timezone: America/Chicago
+    groups:
+      github-actions:
+        patterns: ['*']
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: ci(deps)

@@ -332,23 +332,36 @@ upstream's emsdk 4.0.11). The android/ios/macos/windows workflows and the rest o
 Linux/web matrices are **not called** — those platforms ship on official Godot (the game's S8
 engine split), and the ~20 concurrent-job account cap means dead jobs queue against the release
 workflow and the game repo's Actions. `webgpu_tests.yml` is untouched (self-triggered on
-`drivers/webgpu/**` PRs). `runner.yml` triggers on `branches: ['**']` only, so `cg-v*` tag pushes
-never start the matrix.
+`drivers/webgpu/**` PRs). `runner.yml` triggers on `branches: ['**', '!dependabot/**']` only, so
+`cg-v*` tag pushes never start the matrix and a Dependabot branch push does not run the whole
+matrix a second time on top of its own PR (on the push event the `sources-changed` gate does not
+apply, so a workflow-file-only bump would otherwise trigger the editor and web builds for nothing).
 
 ⚠ **Rebase-forward: these workflow edits are a recorded mechanical step** to re-apply on every
 future upstream merge — upstream will reintroduce the platform jobs and matrix entries. The
 re-apply list: (1) `runner.yml` — keep only static-checks/linux/web call jobs, `branches`-only
-push trigger; (2) `web_builds.yml` — drop wasm64 + extras, keep the vanilla wasm32 canary, keep
-the two webgpu jobs with `em-version-override: webgpu`, the `EM_VERSION_WEBGPU: 6.0.8` +
-`EMCC_CFLAGS: -Wno-unused-template` env, and per-job `import_env_vars=EMCC_CFLAGS
-use_closure_compiler=no` (rationale for each: the Emscripten decision record above);
-(3) `linux_builds.yml` — one plain editor matrix entry; (4) re-SHA-pin any new third-party
-`uses:` (repo setting `sha_pinning_required` rejects tag refs, and `allowed_actions: selected`
-blocks unlisted owners — patterns live in the repo's Actions settings, set 2026-08-27).
+push trigger with `!dependabot/**`; (2) `web_builds.yml` — drop wasm64 + extras, keep the vanilla
+wasm32 canary, keep the two webgpu jobs with `em-version-override: webgpu`, the
+`EM_VERSION_WEBGPU: 6.0.8` + `EMCC_CFLAGS: -Wno-unused-template` env, and per-job
+`import_env_vars=EMCC_CFLAGS use_closure_compiler=no` (rationale for each: the Emscripten decision
+record above); (3) `linux_builds.yml` — one plain editor matrix entry; (4) re-SHA-pin any new
+third-party `uses:` (repo setting `sha_pinning_required` rejects tag refs, and
+`allowed_actions: selected` blocks unlisted owners — patterns live in the repo's Actions settings,
+set 2026-08-27); (5) `.github/dependabot.yml` is fork-only and survives untouched, but if upstream
+adds a composite action carrying a third-party `uses:`, it needs its own `directory:` entry there.
 
 - **Every third-party action is SHA-pinned** (`@<40-hex> # vN`), across workflows *and* the
   `.github/actions/*` composites. Local `./.github/actions/*` and same-repo reusable workflows are
   exempt from both repo settings.
+- **Dependabot watches `github-actions` only** (`.github/dependabot.yml`, added 2026-08-28):
+  weekly, Monday 06:00 America/Chicago, grouped into one PR, `ci(deps)` commit prefix. ⚠ It does
+  **not** weaken the SHA-pinning policy — Dependabot rewrites the 40-hex SHA *and* the trailing
+  `# vN` comment together, and `sha_pinning_required` is the backstop if it ever did. ⚠ The
+  `github-actions` ecosystem does **not** support the plural `directories:` key or its globs: `/`
+  covers `.github/workflows/` and nothing else, so each composite action that carries a
+  third-party `uses:` needs its own entry. Six do (`godot-deps`, `godot-cache-restore`,
+  `godot-cache-save`, `upload-artifact`, `download-artifact`, `godot-cpp-build`); the other six
+  are pure shell and have nothing to update.
 - **No secrets in this repo's Actions, ever** (decision of record) — the release channel uses only
   the ambient `GITHUB_TOKEN`. The game repo is private; anything needing its content is *copied
   into* hogdot (see the build profile below), never checked out from it.
