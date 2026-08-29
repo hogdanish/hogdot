@@ -122,6 +122,30 @@ jobs:
             libasound2-dev libpulse-dev libudev-dev libxi-dev libxrandr-dev \
             libwayland-dev libwayland-bin libdigest-sha-perl
 
+      - name: Reclaim runner disk
+        # ⚠ A precondition of `debug_symbols=yes` below, not housekeeping. A
+        # GitHub-hosted ubuntu-24.04 runner leaves ~12 GB free on `/`, and `-g2`
+        # inflates the object tree several-fold — the fork's own
+        # `linux-editor-llvm-sanitizers` SCons cache is 772 MB against 118 MB for
+        # the same editor built without symbols. The SCons CacheDir then keeps a
+        # second copy of every derived file, so 12 GB is not headroom a debug
+        # editor build can be assumed to fit in — and an ENOSPC surfaces as a
+        # baffling linker or Python error 25 minutes into a release, which is a
+        # bad way to learn it. What is deleted is preinstalled image
+        # ballast (Android NDK, .NET, GHC, CodeQL) that a C++ SCons build never
+        # opens. `df` on both sides so a future incident can see the headroom the
+        # build actually had rather than the headroom we assumed it had.
+        run: |
+          set -euo pipefail
+          df -h /
+          sudo rm -rf \
+            /usr/local/lib/android \
+            /usr/share/dotnet \
+            /usr/local/.ghcup \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL
+          df -h /
+
       - name: Restore Godot build cache
         uses: ./.github/actions/godot-cache-restore
         with:
@@ -136,10 +160,61 @@ jobs:
       - name: Build editor
         # No BUILD_NAME override: the version string must stay
         # `custom_build` — game CI pins it as HOGDOT_BUILD.
+        #
+        # ⚠ `debug_symbols=yes separate_debug_symbols=yes` does not change what
+        # this job ships. The pair only stops SConstruct linking with `-s` (its
+        # `debug_symbols=no` branch, SConstruct:885 — that single flag, not any
+        # explicit `strip`, is why every frame of the WEB-01 backtrace read
+        # `?? ()`) and turns on the linuxbsd post-action in
+        # platform/linuxbsd/platform_linuxbsd_builders.py, which does three
+        # things: `objcopy --only-keep-debug` lifts the DWARF out into
+        # `<binary>.debugsymbols`, `strip --strip-debug --strip-unneeded` puts
+        # the binary back to what `-s` produced, and `objcopy
+        # --add-gnu-debuglink` stamps the sidecar's basename and CRC into it.
+        # `-g` does not affect codegen, so `editor-linux-x86_64.tar.gz` stays
+        # the same editor at very nearly the same size — the symbols leave as a
+        # separate asset that nothing is obliged to download.
+        #
+        # Why: the game's web export intermittently deadlocks inside
+        # WorkerThreadPool during PCK packing (CommonGrounds audit WEB-01), and
+        # the watchdog's `thread apply all bt` was unreadable — a fully stripped
+        # binary cannot be post-mortemed at all. Laid beside the binary, the
+        # sidecar is found by gdb through `.gnu_debuglink` with no
+        # `add-symbol-file` and no PIE load-bias arithmetic, and the embedded
+        # CRC means a sidecar from the wrong build is a loud warning rather than
+        # confidently wrong function names.
         run: |
-          scons platform=linuxbsd target=editor debug_symbols=no \
+          scons platform=linuxbsd target=editor \
+            debug_symbols=yes separate_debug_symbols=yes \
             "cache_path=${{ github.workspace }}/.scons_cache/" redirect_build_objects=no
           ls -l bin/
+
+      - name: Verify the symbol split
+        # ⚠ Fail closed, because the post-action cannot. `make_debug_linuxbsd`
+        # drives objcopy and strip through bare `os.system()` and discards all
+        # three exit codes, so a missing binutils or an OOM-killed objcopy still
+        # leaves SCons reporting success — and this job would then ship an
+        # unstripped editor with no sidecar: a quietly fatter tarball, and
+        # symbols nobody discovers are absent until the next stalled export.
+        #
+        # Output is captured to files rather than piped into `grep -q`: grep
+        # exits at its first match and SIGPIPEs readelf, which under
+        # `pipefail` fails the pipeline that just succeeded.
+        run: |
+          set -euo pipefail
+          bin=bin/godot.linuxbsd.editor.x86_64
+          dbg="$bin.debugsymbols"
+          test -s "$dbg"
+          readelf -S "$dbg" >"$RUNNER_TEMP/sections-debugsymbols.txt"
+          readelf -S "$bin" >"$RUNNER_TEMP/sections-editor.txt"
+          readelf -p .gnu_debuglink "$bin" >"$RUNNER_TEMP/debuglink.txt"
+          # The sidecar carries the DWARF, the shipped binary does not, and the
+          # binary names the sidecar — the third check is the one that makes gdb
+          # resolve symbols from nothing but the two files in one directory.
+          grep -q '\.debug_info' "$RUNNER_TEMP/sections-debugsymbols.txt"
+          ! grep -q '\.debug_info' "$RUNNER_TEMP/sections-editor.txt"
+          grep -q 'godot\.linuxbsd\.editor\.x86_64\.debugsymbols' "$RUNNER_TEMP/debuglink.txt"
+          ls -l "$bin" "$dbg"
 
       - name: Build tint_convert_cli
         # Native host tool the editor's shader baker shells out to at export
@@ -166,6 +241,20 @@ jobs:
           cat dist/editor-version.txt
           tar -C bin -czf dist/editor-linux-x86_64.tar.gz \
             godot.linuxbsd.editor.x86_64 tint_convert_cli
+          # ⚠ A SEPARATE asset, deliberately not folded into the tarball above.
+          # The game unpacks that tarball on every web-export run and caches it
+          # by digest, whereas the symbols are wanted only once an export has
+          # already hung — making every run carry the DWARF for an incident that
+          # hits a minority of runs is the wrong trade, and the watchdog has
+          # minutes to spare in which to fetch it on demand. The `.tar.gz`
+          # extension is load-bearing: the game derives each digest-pin key
+          # mechanically from the asset filename (strip `.tar.gz`/`.zip`,
+          # uppercase, `-` and `.` become `_`), so this one lands on
+          # HOGDOT_SHA256_EDITOR_LINUX_X86_64_DEBUGSYMBOLS. A `.tar.zst` would
+          # compress far better and derive a nonsense key.
+          tar -C bin -czf dist/editor-linux-x86_64.debugsymbols.tar.gz \
+            godot.linuxbsd.editor.x86_64.debugsymbols
+          ls -l dist/
 
       - name: Record build manifest
         # Every build job drops one `manifest-NN-*.txt` fragment; the release job
@@ -186,6 +275,12 @@ jobs:
             echo "python:        $(python --version 2>&1)"
             echo "scons:         $(python -m pip show scons | awk '/^Version:/ { print $2 }')"
             echo "editor:        $(cat dist/editor-version.txt)"
+            echo "scons flags:   target=editor debug_symbols=yes separate_debug_symbols=yes"
+            echo
+            echo "### editor-linux-x86_64.debugsymbols.tar.gz"
+            echo "sidecar for:   godot.linuxbsd.editor.x86_64, via .gnu_debuglink (gdb checks the CRC)"
+            echo "editor bytes:  $(stat -c%s bin/godot.linuxbsd.editor.x86_64) (stripped, as shipped)"
+            echo "symbol bytes:  $(stat -c%s bin/godot.linuxbsd.editor.x86_64.debugsymbols) (uncompressed)"
             echo
           } | tee dist/manifest-10-editor-linux.txt
 
@@ -525,6 +620,12 @@ jobs:
             echo "editor-linux-x86_64.tar.gz                -> godot.linuxbsd.editor.x86_64 + tint_convert_cli"
             echo "editor-macos-arm64.tar.gz                 -> godot.macos.editor.arm64 + tint_convert_cli"
             echo '```'
+            echo
+            echo "\`editor-linux-x86_64.debugsymbols.tar.gz\` is that editor's separated DWARF." \
+                 "Nothing needs it to build or export — it exists to post-mortem a stalled or" \
+                 "crashed editor. Unpack it beside \`godot.linuxbsd.editor.x86_64\` and gdb finds" \
+                 "it through the binary's \`.gnu_debuglink\` with no extra flags; the shipped" \
+                 "binary is stripped either way, so the tarball above is unaffected."
             echo
             echo "sha256 per asset (also shipped as \`checksums.txt\`):"
             echo

@@ -662,6 +662,7 @@ steps** (a tag-scoped save is unreachable dead weight against the 10 GiB cache q
 | `editor-linux-x86_64.tar.gz` | `godot.linuxbsd.editor.x86_64` + `tint_convert_cli` — the baker pair, same commit (RL-055 + the tint pipeline-id stamp), must stay beside each other. |
 | `editor-macos-arm64.tar.gz` | `godot.macos.editor.arm64` + `tint_convert_cli` (since r2, 6.A.4) — the Mac dev editor as a pinned asset instead of an mtime in `bin/`. Built on `macos-15` with the Vulkan SDK step REQUIRED (the editor links `-lMoltenVK`; matches the local recipe above), via the pinned `hogdot/install-vulkan-sdk-macos.sh`. arm64 only. |
 | `web-template_{release,debug}.{threads,nothreads}.wasm32.zip` | The four production templates: `webgpu=yes vulkan=no opengl3=no initial_memory=256 build_profile=hogdot/build_profile.web.gdbuild`, `production=yes` on release only (the prod-web-build recipe: debug skips exactly that flag). |
+| `editor-linux-x86_64.debugsymbols.tar.gz` | The linuxbsd editor's separated DWARF (`godot.linuxbsd.editor.x86_64.debugsymbols`). Diagnostic-only; nothing needs it to build or export. See "Symbolizing a stalled editor" below. |
 | `checksums.txt` | sha256 per asset; also in the release body. |
 | `build-manifest.txt` | Runner image + toolchain per asset (see "Reproducibility" below); also in the release body, folded into a `<details>`. |
 
@@ -672,6 +673,59 @@ upstream's godot-build composite sets to `gh`), the emsdk pin, and the build pro
 ⚠ **The game downloads assets by name** (`web-export.yml`: an explicit list, each verified against
 an `HOGDOT_SHA256_*` pin in `engine.env`), so adding an asset to a release is safe and removing or
 renaming one is not.
+
+### Symbolizing a stalled editor
+
+**The linuxbsd editor is built `debug_symbols=yes separate_debug_symbols=yes` and ships its DWARF
+as a second asset.** This is a diagnostic-only change; it does not alter the editor.
+
+*Why.* The game's web export intermittently deadlocks inside `WorkerThreadPool` during PCK packing
+(CommonGrounds audit WEB-01: 19 threads, none running, two `WorkerThread N` blocked in
+`pthread_mutex_lock` while the main thread waits on a condvar under `savepack`). The watchdog's
+`thread apply all bt` was worthless — **every frame in the main binary read `?? ()`**, because
+`debug_symbols=no` makes SConstruct link with `-s` (`SConstruct:885`, the `else` of the
+`debug_symbols` branch). That one linker flag, not any explicit `strip` step, is the whole reason
+the fork's editors are unsymbolizable. A stripped binary cannot be post-mortemed at all, so an
+intermittent stall that costs 16–44 minutes a run stayed undiagnosable for weeks.
+
+*What the two flags do here* (verified in this tree, not assumed): `debug_symbols=yes` drops the
+`-s` and compiles `-g2 -gdwarf-4`; `separate_debug_symbols=yes` enables the linuxbsd post-action in
+`platform/linuxbsd/platform_linuxbsd_builders.py`, which runs `objcopy --only-keep-debug` →
+`strip --strip-debug --strip-unneeded` → `objcopy --add-gnu-debuglink`. The shipped binary ends up
+**stripped exactly as before plus a ~112-byte `.gnu_debuglink` section** (measured on a minimal
+ubuntu-24.04 repro: 67 664 B with `-s` vs 67 776 B through the post-action), so
+`editor-linux-x86_64.tar.gz` is unchanged in shape and effectively unchanged in size.
+
+*How to use it.* Unpack the sidecar so that `godot.linuxbsd.editor.x86_64.debugsymbols` sits **in
+the same directory as** `godot.linuxbsd.editor.x86_64`, then attach gdb normally. Nothing else:
+gdb reads `.gnu_debuglink`, finds the sidecar by basename beside the executable, verifies the
+embedded CRC, and resolves frames — no `add-symbol-file`, no PIE load-bias arithmetic, and a
+sidecar from the wrong build warns instead of inventing names. Verified against the WEB-01 failure
+shape: without the sidecar a blocked mutex frame is `#4 0x… in ?? ()`; with it, the same frame
+resolves to the function, its `file:line`, *and* the identity of the mutex being waited on.
+
+⚠ **Do not extend this to the web templates.** Emscripten debug info means `-g3` (`SConstruct:869`),
+which inflates the wasm players actually download. The macOS editor is also deliberately left at
+`debug_symbols=no`: `separate_debug_symbols` there means a `dsymutil` `.dSYM` bundle, and no
+incident has ever needed one.
+
+⚠ **`debug_symbols=yes` costs runner disk**, which is why the `linux-editor` job now deletes the
+preinstalled Android/.NET/GHC/CodeQL toolchains first. `-g2` inflates the object tree several-fold
+(the fork's `linux-editor-llvm-sanitizers` SCons cache is 772 MB against 118 MB for the same editor
+without symbols) and the SCons `CacheDir` keeps a second copy of every derived file, against ~12 GB
+free on a stock `ubuntu-24.04` runner. Linking with full DWARF also raises peak `ld` memory on a
+16 GB runner; if that is what breaks, the first lever is `linkflags=-Wl,--no-keep-memory` — SCons
+appends that variable to `LINKFLAGS` (`SConstruct:641`), so it needs no patch. If instead the job
+fails on ENOSPC, or the SCons cache starts crowding the 10 GiB repo quota, the cheaper fallback is
+a **symbol-table-only** sidecar: drop the `-s` *without* `-g`, which costs nothing at compile time
+and still names every frame, but needs a fork-local `SConstruct`/`platform/linuxbsd/SCsub` patch
+and gives no line numbers. Neither has been needed.
+
+⚠ **The post-action cannot fail.** `make_debug_linuxbsd` drives all three tools through bare
+`os.system()` and discards their exit codes, so a broken objcopy would leave SCons reporting
+success while shipping an unstripped editor with no sidecar. The job's `Verify the symbol split`
+step is the fail-closed check: DWARF present in the sidecar, absent from the binary, and the
+binary's `.gnu_debuglink` naming the sidecar.
 
 **`hogdot/build_profile.web.gdbuild` is a tracked COPY of the game's
 `godot/build_profile.web.gdbuild`** (copied-profile-with-drift-check, decided 2026-08-27 — a
