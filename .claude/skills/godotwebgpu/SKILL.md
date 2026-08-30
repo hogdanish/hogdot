@@ -193,6 +193,34 @@ __cgPerf.ts             live getter → { supported, requested, degraded_frames 
 ```
 Oldest→newest row `i`, field `f`: `buf[((head - count + i) % cap) * stride + f]`.
 
+⚠ **`frames_schema` slots 2..6 are driver-local creation counts** (render pipelines, compute
+pipelines, shader modules, bind-group layouts, bind groups) — **not** the engine's five
+`RENDERING_INFO_PIPELINE_COMPILATIONS_*` deltas, which the driver cannot see (deviation D-3, and the
+channel says so out loud in `frames_schema_note`). A consumer that wants both merges its own
+engine-side ring by `frame_idx`: on web one engine iteration is one `begin_segment` is one rAF, so
+the two rings are at identical granularity by construction.
+
+**Consumer protocol** — CommonGrounds' `perf` skill, `references/hogdot-tooling.md`, owns how the
+game repo reads this channel; do not restate it here.
+
+### The two release-visible console lines (D-1, D-7)
+
+```
+[CGPERF] build engine=<sha12> pipeline_id=<stamp> baked=0/0 threads=<0|1> adapter=<vendor>/<device|architecture>
+[CGPERF] baked=<hit>/<hit+miss> spv_wgsl=<hit>/<hit+miss> engine=<sha12>
+```
+
+- The **first** goes out at driver init, before the first frame, so a build-currency assertion can
+  key on `[CGPERF] build engine=` immediately and a device lost during boot still leaves provenance
+  behind. Its `baked=0/0` is structural, not a measurement — no shader has loaded yet.
+- The **second** is emitted once, ~3 s after the first `begin_segment`, and is the only line
+  carrying a true baked ratio. Same `[CGPERF] ` prefix on purpose, so one grep finds both.
+- ⚠ **The adapter's second field falls back to `architecture`.** Chrome leaves
+  `GPUAdapterInfo.device` and `.description` empty for fingerprinting reasons on every platform
+  measured (2026-08-30: `apple/metal-3` reports vendor and architecture, the other two `""`), so the
+  literal `<vendor>/<device>` printed `apple/unknown` on the one line meant to identify the machine
+  a report came from. All four fields stay on `__cgPerf.build.adapter` verbatim.
+
 Six rules, each of which cost something to learn:
 
 - ⚠ **Never cache a typed-array view over the wasm heap.** `-sALLOW_MEMORY_GROWTH=1` detaches it, and
@@ -234,10 +262,18 @@ Six rules, each of which cost something to learn:
 - ⚠ **`EM_ASM` is a macro** — its body splits on every top-level comma; parentheses protect one,
   brackets and braces do not. Field-name lists cross the boundary newline-joined, once.
 
-Per-frame cost is bounded structurally, not by discipline: the ring is static `.bss` (≈366 KB), and
-the only per-frame JS crossings are two-to-three `emscripten_get_now()` imports, one of which replaces
-the `EM_ASM_DOUBLE` `begin_segment` already paid. A `static_assert` in the header fails the build if a
-name list ever drifts from its enum.
+Per-frame cost is bounded structurally, not by discipline: the ring is static `.bss` (≈366 KB, so it
+costs no file bytes), and the only per-frame JS crossings are two-to-three `emscripten_get_now()`
+imports, one of which replaces the `EM_ASM_DOUBLE` `begin_segment` already paid. A `static_assert` in
+the header fails the build if a name list ever drifts from its enum.
+
+**Verified end-to-end 2026-08-30** against freshly built templates on a real GPU (`apple/metal-3`),
+not by reading: the ring recorded 403/403 frames on **both** the nothreads and the threads template,
+and `compiles[].t` (2960 ms) agreed with `events[].t` (2948 ms) on the page's own `performance.now()`
+timeline. Sample ring stats from that run, for calibration: `cpu_frame_ms` p50 8.37 / p95 16.03,
+`submit_ms` p50 0.025 / p95 0.055, `draw_calls` p50 1026 / max 8194, `fence_lag` p50 0.87 with 76 of
+that dump's 403 frames negative (worst −71.96 ms) — a fifth of the frames completed with the CPU
+already past the submit.
 
 `build.pipeline_id` is the **template's** Tint translation stamp, newly generated for `webgpu=yes`
 builds by `drivers/webgpu/SCsub` from the same input list and builder as the editor's copy, so the two
@@ -285,8 +321,16 @@ Settings dialog** — write the line into `project.godot` by hand.
   commit (`813189e2c4`): `command_buffer_end` drains → unmaps → drains → re-checks and **skips the
   resolve entirely** on a still-stuck buffer, so the copy is never encoded;
   `command_queue_execute_and_present` never issues a second `mapAsync` while one is outstanding; and
-  `_timestamp_readback_callback` discards stale callbacks by generation. **That is a reading, not a
-  result** — none of it has ever been exercised, which is why the flip is opt-in rather than default.
+  `_timestamp_readback_callback` discards stale callbacks by generation. That was a reading, not a
+  result, which is why the flip shipped opt-in rather than default.
+- **First result, 2026-08-30 (chunk 4).** `smoke_test.mjs --query=cgperf_ts` against the `benchdraws`
+  bench reported `ts = {supported: true, requested: true, degraded_frames: 0}` over 403 frames on
+  `apple/metal-3`, exit 0, with no rendering corruption — the first evidence that path has ever
+  produced. ⚠ **One run, one adapter, one browser** (Playwright's bundled Chromium on macOS/Metal);
+  the run log does not distinguish which of the two templates carried it, so treat even the
+  threads/nothreads split as unproven. Nothing at all is known about Firefox, Safari, or any
+  Windows/Linux adapter. That is not enough to flip the default — it is enough to stop calling the
+  defense unexercised. The bar for flipping is `degraded_frames = 0` across more than one adapter.
 - ⚠ **`__cgPerf.ts.degraded_frames` is the number that decides whether a GPU timing is real.** It
   counts every resolve the skip path threw away. While it climbs, rendering stays correct and the
   timings quietly stop advancing — the failure mode is *stale numbers*, not an error. A nonzero value
@@ -323,6 +367,11 @@ plumbing is `scripts/bench_common.gd`.
   macOS before that date was software-rendered. `smoke_test.mjs` now picks its args per
   `process.platform`, prints them, prints the adapter the run actually got, and warns loudly on a
   software adapter; `--gpu-args='<flags>'` overrides when a specific backend is the point.
+- ⚠ **A device lost *after* the scene's verdict is teardown, not a failure.** A scene that does not
+  `?hold` quits on pass, the wasm instance goes away, and the always-on listener faithfully reports
+  it. Counting that failed a green gate on whichever machine was slow enough to let the quit land
+  inside the harness's 1 s poll — a flake whose probability is a function of GPU speed. The harness
+  now counts those separately and reports `(+N at teardown, ignored)`.
 - ⚠ **These measure the driver, not the game.** They answer "what does a draw call / a pipeline
   create cost here", never "why is CommonGrounds slow". Anything gameplay-shaped belongs in that
   repo's `/bench`.

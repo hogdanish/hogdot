@@ -170,6 +170,68 @@ pre-commit run --all-files
 pre-commit run <hook-id> --files <path>      # scoped; much faster
 ```
 
+### The coherent build set — six artifacts, one commit (2026-08-30)
+
+Anything a consumer *measures* needs all six built from the **same** commit: the macOS editor, the
+four web templates (`template_{debug,release}` × `threads={no,yes}`), and `bin/tint_convert_cli`.
+`GODOT_VERSION_HASH` is part of every shader-cache path (RL-055) **and** of the driver's
+`[CGPERF] build engine=` boot line, so a skewed set degrades to zero baked hits silently and fails
+the consumer's currency assertion.
+
+⚠ **Commit BEFORE building.** The hash is baked in at compile time, so a build made from a dirty
+tree is stamped with the **parent** commit — the artifact does not carry the change you are about to
+quote a number for. Recovering is a stamp pass (one TU + relink per target), cheap but easy to
+forget: measured 2026-08-30, 39–56 s per web template, 7 s for the editor, 3 s for
+`tint_convert_cli`.
+
+```bash
+export CCACHE_DIR="$HOME/.cache/ccache" \
+       CCACHE_CONFIGPATH="$HOME/.config/ccache/ccache.conf" \
+       EM_CACHE="$HOME/.cache/emscripten"
+
+scons platform=macos target=editor arch=arm64 -j"$(sysctl -n hw.ncpu)" \
+      cpp_compiler_launcher=ccache c_compiler_launcher=ccache \
+      import_env_vars=HOME,CCACHE_DIR,CCACHE_CONFIGPATH
+
+for T in template_debug template_release; do
+  for TH in no yes; do
+    nice -n 10 scons platform=web target=$T webgpu=yes opengl3=no threads=$TH \
+         num_jobs=4 cpp_compiler_launcher=ccache c_compiler_launcher=ccache \
+         import_env_vars=HOME,CCACHE_DIR,CCACHE_CONFIGPATH,EM_CACHE
+  done
+done
+
+drivers/webgpu/tint_cli/build.sh          # the CLI the editor's shader baker shells out to
+```
+
+Measured wall times, this machine, 2026-08-30:
+
+| Step | Cold (first build after adopting the ccache launchers) | Warm (one driver TU + relink) |
+| --- | ---: | ---: |
+| macOS editor | — (already warm) | 7 s stamp-only |
+| web template_debug nothreads | 8 m 57 s | 42 s |
+| web template_debug threads | 6 m 06 s | ~43 s stamp-only |
+| web template_release threads | 7 m 19 s | ~49 s stamp-only |
+| web template_release nothreads | 5 m 06 s | ~56 s stamp-only |
+| `tint_convert_cli` | — | 3 s |
+| single-TU compile gate | — | 1.3 s |
+
+**Prove the set, don't assume it** — three cheap checks, all run 2026-08-30: `strings` each `.wasm`
+for the commit hash (all four carried it), `bin/godot.macos.editor.arm64 --version` (reported
+`4.7.2.stable.custom_build.e59d59c58`), and the `tint_convert_cli --pipeline-id` vs. generated-header
+diff below.
+
+⚠ **`production=yes` (and therefore LTO) is deliberately omitted from that recipe** — see the LTO
+section. Templates built this way are **not** byte-equivalent to a shipped CI release build, and no
+number taken on them describes the shipped artifact. Say so beside any figure.
+
+⚠ **The web template `.wasm` grew ~24 % somewhere between the 2026-08-20 and 2026-08-30 builds** and
+nobody has bisected it: `template_debug.nothreads` 35,420,664 → 43,906,827 bytes (the `.zip`
+9,339,405 → 11,701,202). It is **not** the `__cgPerf` ring, which is zero-init `.bss` and occupies no
+file bytes — the growth was already present in the first template built that day, so it landed
+somewhere in the ten commits between the two builds. This is first-load cost CommonGrounds pays;
+treat it as an open regression, not a baseline.
+
 ⚠ **`codespell` rewrites your files in place.** Godot sets `write-changes = true` and the
 `en-GB_to_en-US` builtin in `pyproject.toml`, so a lint run silently converts British/Canadian
 spelling to American in **any** tracked file, `.claude/skills/**` included — the `-our`/`-ise`/`-gement`
@@ -270,7 +332,12 @@ export, wants compute shaders. Read access is granted in `.claude/settings.json`
   part of this flow, so a base-version bump needs no re-install step.
 - **Freshness is checked on their side:** `run-web.sh` dies if a template zip is older than the
   newest hogdot commit touching engine code (`--allow-stale-template` overrides).
+- ⚠ **Re-export the pck after any editor rebuild.** The editor moving commits moves
+  `GODOT_VERSION_HASH`, which moves every shader-cache directory name (RL-055), so a pck exported
+  against an older editor is a 0-hit pck against these templates. Re-export before quoting a number.
 - Threads handoff details: `.claude/work/plans/THREADS.md`.
+- **Consumer protocol:** how CommonGrounds drives these artifacts and reads the `__cgPerf` channel is
+  its own `perf` skill, `references/hogdot-tooling.md` — one home, over there, not restated here.
 
 ### Shader baking for web works as of 2026-08-11 (RL-042 step 1)
 
@@ -529,8 +596,16 @@ reappears, something is building without `CCACHE_DIR` reaching it.
 
 - ccache hit rate across a realistic port session, and whether the 30G cap is justified. Now
   measurable, since ccache demonstrably records.
-- Whether `platform=web` **links** on Emscripten 6.0.5 (compilation is confirmed; see status table).
-- The CommonGrounds handoff above.
+- ~~Whether `platform=web` **links** on Emscripten 6.0.5~~ — settled: all four `webgpu=yes` templates
+  link and run under emcc 6.0.8-git (2026-08-30, the coherent build set above).
+- ~~The CommonGrounds handoff~~ — exercised end to end 2026-08-30; the open part is the release
+  channel, next line.
+- **A `cg-v4.7.2-r3` release has not been cut for the instrumentation work.** `engine.env` still
+  pins `HOGDOT_TAG=cg-v4.7.2-r2` / `HOGDOT_BUILD=4.7.2.stable.custom_build.3c2c5520f`, whose six
+  digests describe none of the current `bin/` artifacts. Cutting r3 means merging
+  `feat/shader-baker-fp16-gate` into `main` first and dispatching `cg_release.yml` **from `main`,
+  never a tag push**.
+- The ~24 % web `.wasm` growth flagged above is unbisected.
 
 ---
 *Source of truth for building hogdot — correct it in the same change as any build command you actually run.*
