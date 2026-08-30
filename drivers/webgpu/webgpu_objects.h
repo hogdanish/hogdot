@@ -157,6 +157,13 @@ struct WGShader {
 	// Per-stage raw SPIR-V bytes. Stored for deferred specialization constant patching.
 	PackedByteArray stage_spirv[STAGE_SLOTS];
 
+	// True when every stage module was built from the container's baked WGSL
+	// (all-or-nothing, see shader_create_from_container). Recorded so the
+	// window.__cgPerf compile records for the PIPELINES built from this shader can
+	// say whether they came from a bake or from a live Tint translation —
+	// otherwise the baked/unbaked A/B has no per-pipeline attribution at all.
+	bool used_baked_wgsl = false;
+
 	WGPUPipelineLayout pipeline_layout = nullptr;
 	LocalVector<WGPUBindGroupLayout> bind_group_layouts; // One per descriptor set.
 
@@ -472,6 +479,18 @@ struct WGFence {
 	uint64_t submission_id = 0;
 	bool work_done_pending = false; // True while wgpuQueueOnSubmittedWorkDone callback is in flight.
 	bool freed = false; // Freed while callback pending; callback will delete.
+
+	// --- window.__cgPerf fence_lag observable (instruments only) ---
+	// fence_wait() force-signals an unsignalled fence to avoid deadlocking the
+	// single-threaded browser main loop, which means the driver never learns
+	// whether the GPU had actually finished. These two stamps keep that fact
+	// observable without changing the force-signal behavior by one instruction:
+	// submit_time_ms is written beside `signaled = false` in
+	// command_queue_execute_and_present, signal_time_ms in the work-done callback
+	// beside `signaled = true`. Both are performance.now() (see
+	// CGPerfChannel::time_origin_ms). 0.0 means "never stamped".
+	double submit_time_ms = 0.0;
+	double signal_time_ms = 0.0;
 };
 
 // =============================================================================

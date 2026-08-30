@@ -130,6 +130,7 @@ static void _cgperf_install() {
 		var cap = $3;
 		var stride = $4;
 		var counterNames = UTF8ToString($5).split('\n');
+		var eventCap = $7;
 		// Function DECLARATIONS, not `x = function(){}` expressions: clang-format
 		// strips the semicolon off an assigned function expression, leaving the JS
 		// dependent on automatic semicolon insertion.
@@ -137,6 +138,56 @@ static void _cgperf_install() {
 		// initialize() — they fire in JS and never reach C++. `i` is a
 		// CGPerfChannel::Counter.
 		function cgperfBump(i) { Module['HEAPF64'][(countersPtr >> 3) + i] += 1; }
+		// The events write path. C++ sites pass their own `frames_drawn`; the two
+		// JS listener closures have no such number and omit it, in which case the
+		// frame index is recovered from the last COMPLETED ring row (field 0 is
+		// F_FRAME_IDX). A device lost before the first frame closes then honestly
+		// reports -1 rather than a fabricated 0.
+		// ⚠ `typeof x == 'number'`, not `x !== undefined`: clang-format formats
+		// this body as C++ and `!==` is not a C++ token, so it gets rewritten to
+		// `!= =` and the JS silently stops parsing.
+		//
+		// ⚠ Consecutive identical records COALESCE into one (`count`, `t_last`,
+		// `frame_last`) instead of pushing. Two of the five event types —
+		// acquire_fail and resize_skip — can fire on every frame of a bad run, and
+		// a 256-cap ring of 256 identical records would evict every other event in
+		// the session, i.e. destroy exactly the context that makes the run
+		// diagnosable. It also keeps the push O(1) with no array growth in that
+		// degenerate state. The counters carry the true totals regardless.
+		function cgperfPushEvent(type, detail, frame) {
+			var fi = -1;
+			if (typeof frame == 'number') {
+				fi = frame;
+			} else {
+				var head = Module['HEAPU32'][headPtr >> 2];
+				if (head > 0) {
+					fi = Module['HEAPF64'][(framesPtr >> 3) + ((head - 1) % cap) * stride];
+				}
+			}
+			var now = performance.now();
+			var a = ch.events;
+			if (a.length > 0) {
+				var last = a[a.length - 1];
+				if (last.type == type && last.detail == detail) {
+					last.count++;
+					last.t_last = now;
+					last.frame_last = fi;
+					return;
+				}
+			}
+			var r = {};
+			r.t = now;
+			r.frame = fi;
+			r.type = type;
+			r.detail = detail;
+			r.count = 1;
+			r.t_last = now;
+			r.frame_last = fi;
+			a.push(r);
+			while (a.length > eventCap) {
+				a.shift();
+			}
+		}
 		function cgperfReadCounters() {
 			var v = Module['HEAPF64'].subarray(countersPtr >> 3, (countersPtr >> 3) + counterNames.length);
 			var o = {};
@@ -168,6 +219,7 @@ static void _cgperf_install() {
 		ch.ts.requested = false;
 		ch.ts.degraded_frames = 0;
 		ch._bump = cgperfBump;
+		ch._event = cgperfPushEvent;
 		// ⚠ Getters, not cached typed-array views: -sALLOW_MEMORY_GROWTH=1
 		// detaches any view over the wasm heap when the heap grows, which on a
 		// real game happens during world load — i.e. exactly when the interesting
@@ -181,7 +233,55 @@ static void _cgperf_install() {
 		framesDesc.enumerable = true;
 		framesDesc.get = cgperfReadFrames;
 		Object.defineProperty(ch, 'frames', framesDesc);
-		g.__cgPerf = ch; }, (int)(intptr_t)_cgperf.frames, (int)(intptr_t)_cgperf.counters, (int)(intptr_t)&_cgperf.frame_head, (int)CGPerfChannel::FRAME_CAP, (int)CGPerfChannel::FRAME_STRIDE, CGPERF_COUNTER_NAMES_JOINED, CGPERF_FRAME_SCHEMA_JOINED);
+		g.__cgPerf = ch; }, (int)(intptr_t)_cgperf.frames, (int)(intptr_t)_cgperf.counters, (int)(intptr_t)&_cgperf.frame_head, (int)CGPerfChannel::FRAME_CAP, (int)CGPerfChannel::FRAME_STRIDE, CGPERF_COUNTER_NAMES_JOINED, CGPERF_FRAME_SCHEMA_JOINED, (int)CGPerfChannel::EVENT_CAP);
+}
+
+// Push one record onto window.__cgPerf.compiles. Not on the per-frame path: a
+// pipeline or module creation is the ms-scale thing being measured, so one
+// EM_ASM beside it is free relative to it. ⚠ What this measures is the
+// wgpuDevice*Create* call's RETURN, i.e. the synchronous render-thread cost —
+// which is exactly what an inline PipelineHashMapRD compile spends inside the
+// frame — and NOT the GPU-side compile, which Dawn defers to first draw. A 0.3 ms
+// 'render' record does not mean pipeline creation is free.
+//
+// `p_t0` is the timestamp the creation call STARTED, not the one it returned at,
+// so a consumer can line a record up against the beginning of the frame gap it
+// caused rather than against its end.
+static void _cgperf_push_compile(const char *p_kind, const char *p_label, double p_t0, double p_ms, bool p_baked, uint32_t p_frame) {
+	MAIN_THREAD_EM_ASM({
+		var g = (typeof window != 'undefined') ? window : globalThis;
+		if (!g.__cgPerf) {
+			return;
+		}
+		var r = {};
+		r.t = $0;
+		r.frame = $1;
+		r.kind = UTF8ToString($2);
+		r.label = UTF8ToString($3);
+		r.ms = $4;
+		r.baked = ($5 != 0);
+		var a = g.__cgPerf.compiles;
+		a.push(r);
+		while (a.length > $6) {
+			a.shift();
+		} }, p_t0, (int)p_frame, p_kind, p_label, p_ms, (int)p_baked, (int)CGPerfChannel::COMPILE_CAP);
+}
+
+// Push one record onto window.__cgPerf.events, from C++. The two JS-side event
+// sources (device lost, uncaptured error) go through ch._event instead — they
+// fire inside listener closures that never reach C++.
+//
+// ⚠ Every site that calls this ALSO keeps its existing WARN_PRINT_ONCE /
+// ERR_PRINT_ONCE. Those are the only signal a session without the in-page
+// harness gets; the ring is what makes the second and thousandth occurrence
+// countable, which is precisely what *_PRINT_ONCE threw away.
+static void _cgperf_push_event(const char *p_type, const char *p_detail, uint32_t p_frame) {
+	MAIN_THREAD_EM_ASM({
+		var g = (typeof window != 'undefined') ? window : globalThis;
+		if (!g.__cgPerf) {
+			return;
+		}
+		g.__cgPerf._event(UTF8ToString($0), UTF8ToString($1), $2); }, p_type, p_detail, (int)p_frame);
 }
 
 // Forward declaration for timestamp readback callback (defined below command_timestamp_query_pool_reset).
@@ -195,6 +295,11 @@ static void _fence_work_done_callback(WGPUQueueWorkDoneStatus p_status, WGPUStri
 	}
 
 	fence->work_done_pending = false;
+
+	// ⚠ Stamped BEFORE the freed check, which deletes the fence and returns. This
+	// is the only moment the driver ever learns that the GPU genuinely finished
+	// the submission rather than the CPU giving up on it (see fence_wait).
+	fence->signal_time_ms = _cgperf_now_ms();
 
 	// Fence was freed while this callback was in flight — clean up.
 	if (fence->freed) {
@@ -1214,9 +1319,16 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 				g.__cgPerf._bump(i);
 			}
 		}
+		function record(type, detail) {
+			var g = (typeof window != 'undefined') ? window : globalThis;
+			if (g.__cgPerf && g.__cgPerf._event) {
+				g.__cgPerf._event(type, detail);
+			}
+		}
 		if (d && !d._uncapturedPatched) {
 			d.addEventListener('uncapturederror', function(e) {
 				bump(cUncaptured);
+				record('uncaptured_error', e.error.constructor.name + ' | ' + e.error.message);
 				console.error('[Godot-WebGPU] uncaptured error: ' + e.error.constructor.name + ' | ' + e.error.message);
 			});
 			d._uncapturedPatched = true;
@@ -1224,6 +1336,7 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 		if (d && d.lost && !d._lostPatched) {
 			d.lost.then(function(info) {
 				bump(cLost);
+				record('device_lost', info.reason + ' | ' + info.message);
 				console.error('[Godot-WebGPU] DEVICE LOST: reason=' + info.reason + ' | ' + info.message);
 			});
 			d._lostPatched = true;
@@ -3448,6 +3561,24 @@ Error RenderingDeviceDriverWebGPU::fence_wait(FenceID p_fence) {
 	// above. If it hasn't fired yet, we force-signal to avoid deadlock —
 	// the engine calls fence_wait at frame start for the *previous* frame's
 	// fence, so the GPU has had a full frame duration to finish.
+	//
+	// ⚠ The force-signal is the single strongest suspect for "120 fps that feels
+	// bad": it means the driver reports GPU completion it never observed, so the
+	// CPU can run arbitrarily far ahead of the GPU with nothing recording by how
+	// much. Measuring that is in scope here; changing it is NOT — the branch
+	// below is byte-identical in behavior, and the only additions are two loads
+	// and a store into the frame's fence_lag slot.
+	//
+	// Sign convention (see CGPerfChannel::F_FENCE_LAG): positive is a real
+	// GPU-completion measurement, negative is how far past the submit the CPU had
+	// already run when it gave up waiting.
+	if (fence->submit_time_ms > 0.0) {
+		if (fence->signaled) {
+			cgperf_frame_fence_lag = fence->signal_time_ms - fence->submit_time_ms;
+		} else {
+			cgperf_frame_fence_lag = -(_cgperf_now_ms() - fence->submit_time_ms);
+		}
+	}
 	if (!fence->signaled) {
 		fence->signaled = true;
 	}
@@ -3538,6 +3669,10 @@ Error RenderingDeviceDriverWebGPU::command_queue_execute_and_present(CommandQueu
 		WGFence *fence = (WGFence *)(p_cmd_fence.id);
 		if (fence) {
 			fence->signaled = false;
+			// Paired with signal_time_ms in _fence_work_done_callback; consumed by
+			// fence_wait to produce the signed fence_lag column.
+			fence->submit_time_ms = _cgperf_now_ms();
+			fence->signal_time_ms = 0.0;
 			fence->work_done_pending = true;
 			WGPUQueueWorkDoneCallbackInfo cb = {};
 			cb.mode = WGPUCallbackMode_AllowSpontaneous;
@@ -3769,8 +3904,11 @@ Error RenderingDeviceDriverWebGPU::swap_chain_resize(CommandQueueID p_cmd_queue,
 	if (width == 0 || height == 0) {
 		// ⚠ The one frame-drop path with no diagnostic of any kind: RenderingDevice
 		// has already run _flush_and_stall_for_all_frames() to get here, and the
-		// frame is then discarded silently. The counter is the only trace.
+		// frame is then discarded silently. The counter and the event are the only
+		// trace. 0x0 is the only reachable cause — both dimensions come straight
+		// from the canvas.
 		_cgperf.count(CGPerfChannel::C_RESIZE_SKIP);
+		_cgperf_push_event("resize_skip", "0x0", frames_drawn);
 		return ERR_SKIP; // Canvas not yet sized.
 	}
 
@@ -3832,6 +3970,15 @@ Error RenderingDeviceDriverWebGPU::swap_chain_resize(CommandQueueID p_cmd_queue,
 	sc->height = height;
 	sc->configured = true;
 	_cgperf.count(CGPerfChannel::C_RECONFIGURE);
+	// The detail carries the format too, because an HDR flip reconfigures with an
+	// identical w×h and would otherwise be indistinguishable from a no-op resize.
+	{
+		const String reconfigure_detail = vformat("%dx%d fmt=%d hdr=%d",
+				(int)width, (int)height, (int)sc->format,
+				sc->format == WGPUTextureFormat_RGBA16Float ? 1 : 0);
+		const CharString reconfigure_detail_utf8 = reconfigure_detail.utf8();
+		_cgperf_push_event("reconfigure", reconfigure_detail_utf8.get_data(), frames_drawn);
+	}
 	// Clear the needs_resize flag so swap_chain_acquire_framebuffer doesn't
 	context_driver->surface_set_needs_resize(sc->surface_id, false);
 	return OK;
@@ -3879,6 +4026,7 @@ RDD::FramebufferID RenderingDeviceDriverWebGPU::swap_chain_acquire_framebuffer(C
 	// canvas content on screen. The counter is what makes the run countable.
 	if (surface_texture.status == WGPUSurfaceGetCurrentTextureStatus_Lost) {
 		_cgperf.count(CGPerfChannel::C_ACQUIRE_FAIL);
+		_cgperf_push_event("acquire_fail", "lost", frames_drawn);
 		ERR_PRINT_ONCE("WebGPU: surface lost — device or surface is no longer usable.");
 		return FramebufferID();
 	}
@@ -3886,12 +4034,22 @@ RDD::FramebufferID RenderingDeviceDriverWebGPU::swap_chain_acquire_framebuffer(C
 	if (surface_texture.status == WGPUSurfaceGetCurrentTextureStatus_SuccessSuboptimal ||
 			surface_texture.status == WGPUSurfaceGetCurrentTextureStatus_Outdated) {
 		_cgperf.count(CGPerfChannel::C_ACQUIRE_FAIL);
+		{
+			const String suboptimal_detail = vformat("suboptimal:%d", (int)surface_texture.status);
+			const CharString suboptimal_detail_utf8 = suboptimal_detail.utf8();
+			_cgperf_push_event("acquire_fail", suboptimal_detail_utf8.get_data(), frames_drawn);
+		}
 		WARN_PRINT_ONCE(vformat("WebGPU: wgpuSurfaceGetCurrentTexture: resize-needed status=%d", (int)surface_texture.status));
 		r_resize_required = true;
 		return FramebufferID();
 	}
 	if (surface_texture.status != WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal) {
 		_cgperf.count(CGPerfChannel::C_ACQUIRE_FAIL);
+		{
+			const String status_detail = vformat("status:%d", (int)surface_texture.status);
+			const CharString status_detail_utf8 = status_detail.utf8();
+			_cgperf_push_event("acquire_fail", status_detail_utf8.get_data(), frames_drawn);
+		}
 		WARN_PRINT_ONCE(vformat("WebGPU: wgpuSurfaceGetCurrentTexture: unexpected status=%d", (int)surface_texture.status));
 		return FramebufferID();
 	}
@@ -4401,6 +4559,9 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 			print_verbose(vformat("WebGPU: shader '%s' using baked WGSL (%d stages).", shader->name, (int)stage_shaders.size()));
 		}
 	}
+	// Carried onto the shader so every pipeline built from it can report which
+	// side of the baked/unbaked A/B its compile record belongs to.
+	shader->used_baked_wgsl = use_baked_wgsl;
 
 	// --- Create one WGPUShaderModule per stage ---
 	bool detected_override_declarations = false;
@@ -4929,8 +5090,10 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 		CharString _mod_label_cs = _mod_label.utf8();
 		mod_desc.label = { _mod_label_cs.get_data(), WGPU_STRLEN };
 
+		const double _mod_t0 = _cgperf_now_ms();
 		WGPUShaderModule mod = wgpuDeviceCreateShaderModule(device, &mod_desc);
 		_cgperf.count(CGPerfChannel::C_SHADER_MODULES_CREATED);
+		_cgperf_push_compile("module", _mod_label_cs.get_data(), _mod_t0, _cgperf_now_ms() - _mod_t0, use_baked_wgsl, frames_drawn);
 
 		// Scan WGSL for texture dimension declarations so the BGL uses the right viewDimension.
 		// Tint format: "@group(G) @binding(B) var NAME: texture_TYPE<...>;"
@@ -8812,8 +8975,13 @@ WGPUShaderModule RenderingDeviceDriverWebGPU::_create_module_with_spec_constants
 	CharString _spec_label_cs = _spec_label.utf8();
 	desc.label = { _spec_label_cs.get_data(), WGPU_STRLEN };
 
+	const double _spec_t0 = _cgperf_now_ms();
 	WGPUShaderModule mod = wgpuDeviceCreateShaderModule(device, &desc);
 	_cgperf.count(CGPerfChannel::C_SHADER_MODULES_CREATED);
+	// baked=false is a fact, not a default: specialization re-translates from the
+	// container's SPIR-V through Tint, so a baked WGSL blob can never serve this
+	// path however well the project was baked.
+	_cgperf_push_compile("module", _spec_label_cs.get_data(), _spec_t0, _cgperf_now_ms() - _spec_t0, false, frames_drawn);
 	free(wgsl_str);
 
 	return mod;
@@ -9316,8 +9484,10 @@ RDD::PipelineID RenderingDeviceDriverWebGPU::render_pipeline_create(
 	CharString _pipeline_label_cs = _pipeline_label_str.utf8();
 	desc.label = { _pipeline_label_cs.get_data(), WGPU_STRLEN };
 
+	const double _pipe_t0 = _cgperf_now_ms();
 	WGPURenderPipeline pipeline = wgpuDeviceCreateRenderPipeline(device, &desc);
 	_cgperf.count(CGPerfChannel::C_RENDER_PIPELINES_CREATED);
+	_cgperf_push_compile("render", _pipeline_label_cs.get_data(), _pipe_t0, _cgperf_now_ms() - _pipe_t0, shader->used_baked_wgsl, frames_drawn);
 	if (!pipeline) {
 		if (specialized_vertex) {
 			wgpuShaderModuleRelease(specialized_vertex);
@@ -9340,8 +9510,15 @@ RDD::PipelineID RenderingDeviceDriverWebGPU::render_pipeline_create(
 		// Create a Uint16 variant — WebGPU bakes stripIndexFormat into the pipeline,
 		// but Godot only knows the index format at bind time.
 		desc.primitive.stripIndexFormat = WGPUIndexFormat_Uint16;
+		// Recorded separately, with a ":u16" label suffix: a strip primitive really
+		// does pay two pipeline creations, and folding them into one record would
+		// halve the apparent cost of every strip material.
+		const String _pipeline_u16_label = _pipeline_label_str + ":u16";
+		const CharString _pipeline_u16_label_cs = _pipeline_u16_label.utf8();
+		const double _pipe_u16_t0 = _cgperf_now_ms();
 		pw->render_handle_u16 = wgpuDeviceCreateRenderPipeline(device, &desc);
 		_cgperf.count(CGPerfChannel::C_RENDER_PIPELINES_CREATED);
+		_cgperf_push_compile("render", _pipeline_u16_label_cs.get_data(), _pipe_u16_t0, _cgperf_now_ms() - _pipe_u16_t0, shader->used_baked_wgsl, frames_drawn);
 		// Non-fatal if this fails — Uint32 variant still works for the common case.
 		if (!pw->render_handle_u16) {
 			WARN_PRINT_ONCE("WebGPU: failed to create Uint16 strip pipeline variant.");
@@ -9529,8 +9706,19 @@ RDD::PipelineID RenderingDeviceDriverWebGPU::compute_pipeline_create(ShaderID p_
 		desc.compute.constants = compute_constants.ptr();
 	}
 
+	// Label the compute pipeline the same way render pipelines are labeled — it
+	// had none, which left Dawn's validation messages and every compile record
+	// for a compute pipeline anonymous.
+	static int _cpcreate_id = 0;
+	const int _cpid = _cpcreate_id++;
+	const String _cpipe_label_str = "cpipe#" + itos(_cpid) + ":" + shader->name;
+	const CharString _cpipe_label_cs = _cpipe_label_str.utf8();
+	desc.label = { _cpipe_label_cs.get_data(), WGPU_STRLEN };
+
+	const double _cpipe_t0 = _cgperf_now_ms();
 	WGPUComputePipeline pipeline = wgpuDeviceCreateComputePipeline(device, &desc);
 	_cgperf.count(CGPerfChannel::C_COMPUTE_PIPELINES_CREATED);
+	_cgperf_push_compile("compute", _cpipe_label_cs.get_data(), _cpipe_t0, _cgperf_now_ms() - _cpipe_t0, shader->used_baked_wgsl, frames_drawn);
 	if (!pipeline) {
 		if (specialized_compute) {
 			wgpuShaderModuleRelease(specialized_compute);
@@ -9815,14 +10003,16 @@ void RenderingDeviceDriverWebGPU::begin_segment(uint32_t p_frame_index, uint32_t
 		row[CGPerfChannel::F_BINDGROUP_SETS] = (double)(perf.set_bind_group_calls - cgperf_prev_set_bind_group_calls);
 		row[CGPerfChannel::F_ENCODER_SPLITS] = _cgperf.counters[CGPerfChannel::C_ENCODER_SPLITS] - cgperf_prev_counters[CGPerfChannel::C_ENCODER_SPLITS];
 		row[CGPerfChannel::F_SUBMIT_MS] = cgperf_frame_submit_ms;
-		// fence_lag is chunk 2 (the WGFence submit/signal observable); until then
-		// the column is a truthful zero rather than a fabricated number.
-		row[CGPerfChannel::F_FENCE_LAG] = 0.0;
+		// Signed; 0.0 means no fence was waited on during that frame. See
+		// fence_wait() for the sign convention and why the force-signal it
+		// measures is deliberately left alone.
+		row[CGPerfChannel::F_FENCE_LAG] = cgperf_frame_fence_lag;
 	} else {
 		cgperf_first_begin_ms = now;
 	}
 	cgperf_prev_begin_ms = now;
 	cgperf_frame_submit_ms = 0.0;
+	cgperf_frame_fence_lag = 0.0;
 
 	frame_index = p_frame_index;
 	frames_drawn = p_frames_drawn;

@@ -187,7 +187,9 @@ __cgPerf.build          { engine_commit, pipeline_id, threads, adapter{vendor,ar
 __cgPerf.counters       live getter over the heap; 15 monotonic doubles (see the header's Counter enum)
 __cgPerf.frames         live getter → { head, cap: 3600, stride: 13, count, buf: Float64Array }
 __cgPerf.frames_schema  13 names, fixed order, index == column
-__cgPerf.compiles/.events/.ts   present and empty at chunk 1
+__cgPerf.compiles       plain array, cap 512, { t, frame, kind: render|compute|module, label, ms, baked }
+__cgPerf.events         plain array, cap 256, { t, frame, type, detail, count, t_last, frame_last }
+__cgPerf.ts             { supported, requested, degraded_frames } — still off; chunk 3 owns it
 ```
 Oldest→newest row `i`, field `f`: `buf[((head - count + i) % cap) * stride + f]`.
 
@@ -222,6 +224,35 @@ name list ever drifts from its enum.
 builds by `drivers/webgpu/SCsub` from the same input list and builder as the editor's copy, so the two
 agree by construction. Comparing it against the editor's stamp is what detects a template that
 translates differently from the pck it was fed.
+
+### Reading `compiles`, `events` and `fence_lag` (added 2026-08-30, chunk 2)
+
+- ⚠ **A `compiles` record times the `wgpuDevice*Create*` call's RETURN, not the GPU's compile.** Dawn
+  defers real backend compilation to first draw — a fully baked project measured ≈0 s of JS-visible
+  GPU compile while the stall reappeared at first draw. What the number *is* worth: it is the
+  **synchronous render-thread** cost, which is exactly what `pipeline_hash_map_rd.h`'s inline compile
+  spends inside the frame. Do not read a 0.3 ms `'render'` record as "pipeline creation is free".
+- Five creation sites, all recorded: the main-path and specialization `createShaderModule`, the base
+  and Uint16-strip `createRenderPipeline` (a strip primitive genuinely pays two), and
+  `createComputePipeline`. `baked` on a pipeline record comes from `WGShader::used_baked_wgsl`; on a
+  specialization module it is always `false`, because specialization re-translates from SPIR-V and a
+  bake can never serve that path.
+- ⚠ **Consecutive identical `events` records coalesce** into `count` / `t_last` / `frame_last` instead
+  of pushing. `acquire_fail` and `resize_skip` can fire every frame of a bad run, and 256 identical
+  records would evict every other event in the session — destroying the context that makes the run
+  diagnosable. The `counters` carry the true totals regardless. Every event site also keeps its
+  original `WARN_PRINT_ONCE` / `ERR_PRINT_ONCE` / `console.error`: those are the only signal a session
+  without the in-page harness gets.
+- **`fence_lag` is signed, and the sign is the whole point.** `fence_wait()` force-signals a fence the
+  GPU has not reported on, to avoid deadlocking the single-threaded browser main loop — so the driver
+  reports completions it never observed and the CPU can run arbitrarily far ahead. Positive = a real
+  `signal - submit` measurement from the work-done callback. Negative = the callback had not fired,
+  and the magnitude is how far past the submit the CPU had already run. Zero = no fence waited that
+  frame. ⚠ The force-signal itself is deliberately **unchanged** — measuring it is in scope, fixing it
+  is not. ⚠ `WGFence::signal_time_ms` is stamped **before** the `freed` check in
+  `_fence_work_done_callback`, which deletes the fence and returns.
+
+
 
 ## Build and selection
 

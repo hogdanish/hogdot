@@ -75,6 +75,12 @@ struct CGPerfChannel {
 		F_BINDGROUP_SETS,
 		F_ENCODER_SPLITS,
 		F_SUBMIT_MS,
+		// Signed. POSITIVE is a real GPU-completion measurement: the work-done
+		// callback fired, and this is signal - submit in ms. NEGATIVE means the
+		// callback had NOT fired by the time the driver force-signalled the fence
+		// to avoid a deadlock, and the magnitude is how far the CPU had already
+		// run past the submit — the CPU-ahead-of-GPU depth signal, which is the
+		// point of the field. Zero means no fence was waited on that frame.
 		F_FENCE_LAG,
 		FRAME_STRIDE, // Must stay last.
 	};
@@ -102,6 +108,14 @@ struct CGPerfChannel {
 	// 3600 rows == 30 s at 120 Hz (contract §1). 3600 * 13 * 8 B ≈ 375 KB of
 	// .bss, noise against the 256 MiB initial heap of a release web build.
 	static constexpr uint32_t FRAME_CAP = 3600;
+
+	// Caps for the two JS-side rings (contract §1). Neither can live in the flat
+	// heap block: both records carry a string, which a Float64Array cannot hold,
+	// so they are plain JS arrays pushed at the moment of the event and trimmed
+	// with shift(). Both are rare — hundreds per session, never once per frame in
+	// steady state — so the push is not on the per-frame budget.
+	static constexpr uint32_t COMPILE_CAP = 512;
+	static constexpr uint32_t EVENT_CAP = 256;
 
 	double frames[FRAME_CAP * FRAME_STRIDE] = {};
 	double counters[COUNTER_COUNT] = {};

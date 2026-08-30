@@ -88,6 +88,14 @@ class RenderingDeviceDriverWebGPU : public RenderingDeviceDriver {
 	// scalar: no allocation, no EM_ASM, on the per-frame path.
 	double cgperf_prev_begin_ms = 0.0;
 	double cgperf_frame_submit_ms = 0.0;
+	// Written by fence_wait, consumed and cleared by the next begin_segment.
+	// ⚠ Last-write-wins is deliberate and correct for the frame fence:
+	// RenderingDevice::_begin_frame runs _stall_for_frame() (the frame fence's
+	// fence_wait) immediately before begin_segment, so the frame fence is always
+	// the last writer of the frame it is attributed to. A transfer-worker
+	// fence_wait mid-frame can be the only writer in a frame where the frame
+	// fence was already signaled — that is a load-time path, not steady state.
+	double cgperf_frame_fence_lag = 0.0;
 	uint32_t cgperf_prev_render_passes = 0;
 	uint32_t cgperf_prev_draw_calls = 0;
 	uint32_t cgperf_prev_set_bind_group_calls = 0;
