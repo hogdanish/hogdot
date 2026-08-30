@@ -98,8 +98,39 @@ godot --headless --path . --export-release "WebGPU" export/index.html
 npx playwright test smoke_test.mjs
 ```
 
+### Driver microbenches (`[CGBENCH]`)
+
+Three scenes measure what the WebGPU driver *costs*, as opposed to whether it is correct. They read
+`window.__cgPerf` — the driver's always-on telemetry channel — and print one `[CGBENCH] …` line per
+step. They are reached through the same `?scene=` dispatcher as the gates.
+
+```bash
+node smoke_test.mjs ./export --scene=benchcompile  --expect-prefix='[CGBENCH]'
+node smoke_test.mjs ./export --scene=benchdraws    --expect-prefix='[CGBENCH]'
+node smoke_test.mjs ./export --scene=benchsubmits  --expect-prefix='[CGBENCH]'
+
+# the baked/unbaked A/B, for free — same scene, the other checked-in export
+node smoke_test.mjs ./export-unbaked --scene=benchcompile --expect-prefix='[CGBENCH]'
+```
+
+| key | measures |
+| --- | --- |
+| `benchcompile` | first-use pipeline/shader-module cost, by shader class, attributed **by time window** |
+| `benchdraws` | draw throughput against a ramped instance count (64 → 8192) |
+| `benchsubmits` | encoder splits and `submit_ms` against a ramped SubViewport count |
+
+- ⚠ **These measure the driver, not a game.** Anything gameplay-shaped belongs in CommonGrounds'
+  own `/bench`.
+- ⚠ **A field printed as `na` was not measured** — never treat it as zero. Every bench runs natively
+  too, where there is no `__cgPerf` channel and the driver-only columns are all `na`.
+- ⚠ **Keep the window frontmost on a native run, and the tab foreground on web.** An occluded
+  window stops being asked for frames: the counters freeze and the ramp goes perfectly flat, which
+  reads as "draw calls are free". `benchdraws` and `benchsubmits` detect that themselves and
+  **fail** the run with `stale=1` on the affected steps rather than reporting the flat curve.
+
 ## Pass criteria
 
 - All frames render without `[SHADER]` errors in console
 - No device-lost events
 - GDScript reports `PASS` in output
+- For a `[CGBENCH]` run: `PASS` and no `stale=1` on any line

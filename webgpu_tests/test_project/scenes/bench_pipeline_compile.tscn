@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3 uid="uid://iotwedlpykq5i"]
+
+[ext_resource type="Script" path="res://scripts/bench_pipeline_compile.gd" id="1"]
+
+[node name="BenchPipelineCompile" type="Node3D"]
+script = ExtResource("1")

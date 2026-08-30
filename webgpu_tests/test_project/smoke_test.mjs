@@ -8,8 +8,22 @@
  * 4. Engine runs for the configured frame count and exits cleanly
  *
  * Usage:
- *   node smoke_test.mjs [export-dir]
+ *   node smoke_test.mjs [export-dir] [options]
  *   node smoke_test.mjs ./export/
+ *   node smoke_test.mjs ./export --scene=benchcompile --expect-prefix='[CGBENCH]'
+ *
+ * Options:
+ *   --scene=<key>          gate/bench scene key, appended as ?scene=<key>
+ *   --query=<raw>          extra query string, e.g. 'cgperf_ts' or 'hold'
+ *   --expect-prefix=<p>    console prefix that carries the lifecycle lines
+ *                          (default '[ShaderCoverage]'); the harness waits for
+ *                          '<p> Starting' then '<p> PASS' / '<p> FAIL'
+ *   --timeout=<seconds>    override the 120 s ceiling
+ *
+ * ⚠ The lifecycle prefix is a parameter and not a constant because the bench
+ * scenes report measurements under '[CGBENCH]', not verdicts under
+ * '[ShaderCoverage]'. Hardcoding one prefix is what made this harness
+ * gate-only.
  *
  * Exit codes:
  *   0 = all shaders compiled, no errors
@@ -25,8 +39,31 @@ import { dirname } from 'path';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-const EXPORT_DIR = process.argv[2] || join(__dirname, 'export');
-const TIMEOUT_MS = 120000; // 2 minutes max
+const argv = process.argv.slice(2);
+const flags = new Map(
+    argv
+        .filter((a) => a.startsWith('--'))
+        .map((a) => {
+            const eq = a.indexOf('=');
+            return eq === -1 ? [a.slice(2), ''] : [a.slice(2, eq), a.slice(eq + 1)];
+        })
+);
+const positional = argv.filter((a) => !a.startsWith('--'));
+
+const EXPORT_DIR = positional[0] || join(__dirname, 'export');
+const TIMEOUT_MS = (Number(flags.get('timeout')) || 120) * 1000;
+const EXPECT_PREFIX = flags.get('expect-prefix') || '[ShaderCoverage]';
+
+// The scene dispatcher in shader_coverage.gd reads ?scene=<key>; --query carries anything else
+// (?hold, ?cgperf_ts) through unchanged.
+const QUERY_PARTS = [];
+if (flags.has('scene')) {
+    QUERY_PARTS.push(`scene=${encodeURIComponent(flags.get('scene'))}`);
+}
+if (flags.get('query')) {
+    QUERY_PARTS.push(flags.get('query'));
+}
+const QUERY = QUERY_PARTS.length ? `?${QUERY_PARTS.join('&')}` : '';
 
 const MIME_TYPES = {
     '.html': 'text/html',
@@ -121,6 +158,7 @@ async function main() {
     // Collect errors
     const consoleErrors = [];
     const shaderErrors = [];
+    const resultLines = [];
     let deviceLost = false;
     let engineStarted = false;
     let engineFinished = false;
@@ -140,18 +178,25 @@ async function main() {
             console.error(`  [DEVICE LOST] ${text}`);
         }
 
-        // Track engine lifecycle
-        if (text.includes('[ShaderCoverage] Starting')) {
+        // Track engine lifecycle, under whichever prefix this run reports with.
+        if (text.includes(`${EXPECT_PREFIX} Starting`)) {
             engineStarted = true;
             console.log('  Engine started.');
         }
-        if (text.includes('[ShaderCoverage] PASS')) {
+        if (text.includes(`${EXPECT_PREFIX} PASS`)) {
             engineFinished = true;
             console.log('  Engine reports PASS.');
         }
-        if (text.includes('[ShaderCoverage] FAIL')) {
+        if (text.includes(`${EXPECT_PREFIX} FAIL`)) {
             engineFinished = true;
             console.error('  Engine reports FAIL.');
+        }
+
+        // Measurement lines are the whole point of a bench run, so echo them even without
+        // VERBOSE — a bench whose numbers only appear behind a debug flag is not a bench.
+        if (text.startsWith('[CGBENCH] ') || text.startsWith('[CGPERF] ')) {
+            resultLines.push(text);
+            console.log(`  ${text}`);
         }
 
         // Log significant messages
@@ -171,8 +216,9 @@ async function main() {
     });
 
     // Navigate and wait
-    console.log(`\nNavigating to ${url}...`);
-    await page.goto(url);
+    console.log(`\nNavigating to ${url}${QUERY}...`);
+    console.log(`Lifecycle prefix: ${EXPECT_PREFIX}`);
+    await page.goto(`${url}${QUERY}`);
 
     // Wait for engine to finish or timeout
     const startTime = Date.now();
@@ -218,6 +264,10 @@ async function main() {
 
     if (exitCode === 0) {
         console.log('  PASS: All shaders compiled successfully, no errors detected.');
+    }
+
+    if (resultLines.length > 0) {
+        console.log(`\n  Measurement lines: ${resultLines.length}`);
     }
 
     console.log(`\n  Console errors: ${consoleErrors.length}`);

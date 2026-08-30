@@ -279,6 +279,42 @@ Settings dialog** — write the line into `project.godot` by hand.
   bumped by a plain `double` store from C++ on a path that can run every frame, so an `EM_ASM` there
   would put a JS crossing on the per-frame path in exactly the state where the driver is struggling.
 
+## Microbench gates — `[CGBENCH]` (added 2026-08-30, chunk 3)
+
+`webgpu_tests/test_project/` carries three driver microbenches beside the correctness gates, reached
+by the same `?scene=<key>` dispatcher (`scripts/shader_coverage.gd`): **`benchcompile`**
+(first-use compile cost by shader class), **`benchdraws`** (draw-call throughput vs. ramped instance
+count) and **`benchsubmits`** (encoder splits + `submit_ms` vs. ramped SubViewport count). Shared
+plumbing is `scripts/bench_common.gd`.
+
+- They emit `[CGBENCH] …` lines only. `smoke_test.mjs` takes `--expect-prefix=<p>`, `--scene=<key>`
+  and `--query=<raw>` so one harness drives a bench: e.g.
+  `node smoke_test.mjs ./export --scene=benchcompile --expect-prefix='[CGBENCH]'`.
+- ⚠ **These measure the driver, not the game.** They answer "what does a draw call / a pipeline
+  create cost here", never "why is CommonGrounds slow". Anything gameplay-shaped belongs in that
+  repo's `/bench`.
+- ⚠ `benchcompile` attributes compiles **by time window**, not by label — Godot's engine shaders share
+  one name across material feature classes, so a label prefix cannot separate unshaded from
+  screen-reading. Each class is added in its own phase and the `__cgPerf.compiles` slice that appears
+  during that phase is the class's cost.
+- The baked/unbaked A/B falls out of the checked-in `export-unbaked/` directory for free: run the same
+  scene against both exports and diff `baked_hit`/`baked_miss`.
+- The baked/unbaked A/B key is `baked_wgsl_hit` / `baked_wgsl_miss` on the per-phase line.
+- ⚠ Without `__cgPerf` (a native run, or an OpenGL web build) every bench still runs and reports the
+  engine-visible half, marking the driver-only fields `na`. A row of `na` means *not measured*, never
+  zero.
+- ⚠ **An occluded window measures nothing, and it looks healthy.** Measured here 2026-08-30: a native
+  run whose window lost the foreground reported `eng_draws` frozen at the first step's value and
+  `cpu_ms` pinned at ~6.9 ms from 64 instances to 8192 — a perfectly flat, plausible ramp, because
+  the compositor had stopped asking for frames. A hidden browser tab does the same thing via
+  `requestAnimationFrame`. `benchdraws` and `benchsubmits` cross-check the renderer's own draw and
+  object counts against what they spawned and **fail the run** with `stale=1`; keep the window
+  frontmost and the tab foreground anyway.
+- ⚠ On web `cpu_frame_ms` is clamped by the display: the engine tick IS `requestAnimationFrame`, so
+  a step under the refresh budget always reports the refresh interval and the ramp only becomes a
+  cost curve once it overruns. `submit_ms` from the ring is the per-frame driver cost that is not
+  clamped that way — read it first.
+
 ## Build and selection
 
 ```bash

@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3 uid="uid://mqsskxgncpc4j"]
+
+[ext_resource type="Script" path="res://scripts/bench_draws_per_sec.gd" id="1"]
+
+[node name="BenchDrawsPerSec" type="Node3D"]
+script = ExtResource("1")

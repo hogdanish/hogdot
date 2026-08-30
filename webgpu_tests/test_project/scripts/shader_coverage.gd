@@ -15,6 +15,11 @@ const REPORT_PATH := "user://shader_coverage_report.json"
 ## Gate scenes reachable without a second export preset: `?scene=<key>` in the
 ## URL on web, `-- --scene=<key>` natively. The full coverage scene stays the
 ## default when no key is given.
+##
+## ⚠ The `bench*` keys are driver MICROBENCHES, not correctness gates: they print
+## `[CGBENCH] …` lines and always "pass", because their output is a measurement
+## rather than a verdict. Drive them with
+## `node smoke_test.mjs ./export --scene=<key> --expect-prefix='[CGBENCH]'`.
 const GATE_SCENES := {
 	"discardable": "res://scenes/discardable_msaa_gate.tscn",
 	"lightculling": "res://scenes/light_culling_stress.tscn",
@@ -23,6 +28,9 @@ const GATE_SCENES := {
 	"drawableblit": "res://scenes/drawable_blit_gate.tscn",
 	"hdr": "res://scenes/hdr_output_gate.tscn",
 	"badshader": "res://scenes/bad_shader_gate.tscn",
+	"benchcompile": "res://scenes/bench_pipeline_compile.tscn",
+	"benchdraws": "res://scenes/bench_draws_per_sec.tscn",
+	"benchsubmits": "res://scenes/bench_submits_per_sec.tscn",
 }
 
 var frame_count := 0
