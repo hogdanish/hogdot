@@ -193,16 +193,35 @@ __cgPerf.ts             live getter → { supported, requested, degraded_frames 
 ```
 Oldest→newest row `i`, field `f`: `buf[((head - count + i) % cap) * stride + f]`.
 
-Five rules, each of which cost something to learn:
+Six rules, each of which cost something to learn:
 
 - ⚠ **Never cache a typed-array view over the wasm heap.** `-sALLOW_MEMORY_GROWTH=1` detaches it, and
   the heap grows during world load — exactly when the interesting stalls happen. Both getters
   re-derive from `Module['HEAPF64']` / `Module['HEAPU32']` on every read.
-- ⚠ **One clock.** `emscripten_get_now()` is `performance.timeOrigin + performance.now()`, an absolute
-  epoch value; every published timestamp is that minus the **window's** `timeOrigin`, captured once
-  with `MAIN_THREAD_EM_ASM_DOUBLE`, so it equals the page's `performance.now()` from any thread. The
-  one-time install and boot blob are `MAIN_THREAD_EM_ASM` so the object lands on the page's `window`
-  and not a worker's global — `proxy_to_pthread` is off by default but is one linker flag away.
+- ⚠ **One clock, and the offset is MEASURED, never assumed.** `emscripten_get_now()` has two
+  definitions in one toolchain and the build picks one silently — verified in the generated JS of
+  both templates built from this tree (emcc 6.0.8-git, 2026-08-30):
+
+  | build | `_emscripten_get_now` |
+  | --- | --- |
+  | `threads=yes` | `() => performance.timeOrigin + performance.now()` |
+  | `threads=no` | `() => performance.now()` |
+
+  So the install brackets a `MAIN_THREAD_EM_ASM_DOUBLE` read of `performance.now()` between two
+  `emscripten_get_now()` reads and stores the midpoint difference as `time_origin_ms`. That is
+  correct under both definitions and on a worker, whose own performance origin differs from the
+  window's (`proxy_to_pthread` is off by default but is one linker flag away). The one-time install
+  and boot blob are `MAIN_THREAD_EM_ASM` so the object lands on the page's `window`, not a worker's
+  global.
+  ⚠ **This was shipped wrong and the failure was total and silent** (found 2026-08-30 by running the
+  gate, not by reading it): hard-coding the `threads=yes` form made every timestamp on a nothreads
+  template ≈ `-1.79e12`, and `begin_segment`'s `if (cgperf_prev_begin_ms > 0.0)` guard then never
+  fired, so the frame ring — the centrepiece — stayed empty for the entire session with no error
+  anywhere. Hence the second rule below.
+- ⚠ **Never gate state on the sign of a clock reading.** `cgperf_have_prev_begin`,
+  `cgperf_have_first_begin` and `WGFence::submit_stamped` are explicit flags for exactly this reason:
+  a `> 0.0` test conflates "not yet stamped" with "stamped on a clock whose zero is not page load",
+  and the second case disables the instrument rather than reporting anything.
 - ⚠ **`EM_JS_DEPS` is mandatory** for a JS-library helper used only inside an `EM_ASM` body
   (`UTF8ToString` here). Emscripten does not scan those bodies; miss it and the template links clean
   and dies in the browser.
@@ -290,6 +309,20 @@ plumbing is `scripts/bench_common.gd`.
 - They emit `[CGBENCH] …` lines only. `smoke_test.mjs` takes `--expect-prefix=<p>`, `--scene=<key>`
   and `--query=<raw>` so one harness drives a bench: e.g.
   `node smoke_test.mjs ./export --scene=benchcompile --expect-prefix='[CGBENCH]'`.
+- `--dump-cgperf[=<path>]` reads `window.__cgPerf` out of the live page just before the browser
+  closes and writes it as JSON (build blob, counters, `ts`, per-column frame-ring stats, the newest
+  24 rows decoded by name, the compile tail, every event). It is also the **channel gate**: absent
+  channel, missing `build.engine_commit`, or an empty frame ring fails the run. That last check
+  exists because an empty ring beside a live channel is the exact shape of the clock bug of
+  2026-08-30, which nothing else noticed.
+- ⚠ **The Chrome launch flags decide whether a GPU takes part at all, and getting it wrong is
+  silent.** `--use-angle=vulkan --enable-features=Vulkan,UseSkiaRenderer` is what a Linux CI box
+  needs; on macOS the same flags push Chrome off Metal onto **SwiftShader**. Measured 2026-08-30,
+  same machine, same page: with those flags `navigator.gpu.requestAdapter().info` is
+  `google/swiftshader`, without them `apple/metal-3`. Every browser number this harness produced on
+  macOS before that date was software-rendered. `smoke_test.mjs` now picks its args per
+  `process.platform`, prints them, prints the adapter the run actually got, and warns loudly on a
+  software adapter; `--gpu-args='<flags>'` overrides when a specific backend is the point.
 - ⚠ **These measure the driver, not the game.** They answer "what does a draw call / a pipeline
   create cost here", never "why is CommonGrounds slow". Anything gameplay-shaped belongs in that
   repo's `/bench`.

@@ -119,10 +119,17 @@ scons platform=web target=template_release import_env_vars=HOME,EM_CACHE
 #   Tint/SPIRV-Tools sources. See "Parallelism" above.
 # `glslangValidator` is NOT required to build this target (the precompile step
 #   that needed it was deleted in 28a9960) — only for the offline shader_corpus tooling.
+#   ⚠ The two `*_compiler_launcher=ccache` options were MISSING from this recipe until
+#   2026-08-30, so every web build ran cold-compiler while appearing to be cached
+#   (`ccache -s` never moved). Adding them is right, but it changes the compile action
+#   string, so the FIRST build after adopting them is a full rebuild of that variant —
+#   measured 8m57s for template_debug/nothreads, against 42s for a warm relink after a
+#   one-TU driver edit. Budget that once per variant, not per build.
 export EM_CACHE="$HOME/.cache/emscripten" CCACHE_DIR="$HOME/.cache/ccache" \
        CCACHE_CONFIGPATH="$HOME/.config/ccache/ccache.conf"
 nice -n 10 scons platform=web target=template_debug webgpu=yes opengl3=no threads=no \
-     num_jobs=4 import_env_vars=HOME,CCACHE_DIR,CCACHE_CONFIGPATH,EM_CACHE
+     num_jobs=4 cpp_compiler_launcher=ccache c_compiler_launcher=ccache \
+     import_env_vars=HOME,CCACHE_DIR,CCACHE_CONFIGPATH,EM_CACHE
 
 # the eventual release template (adds dlink_enabled; spend LTO only here, via production=yes)
 scons platform=web target=template_release dlink_enabled=yes webgpu=yes opengl3=no threads=no
@@ -306,7 +313,23 @@ from the runtime too (~7.6 s of a 16.95 s measured cold start; glslang was ~4.4 
 runs `tint_convert_cli --pipeline-id` and refuses WGSL baking (warning, SPIR-V-only bake) when
 the stamp differs from the editor's build-time copy. Rebuild it with
 `drivers/webgpu/tint_cli/build.sh` after touching anything in
-`drivers/webgpu/tint_cli/pipeline_id_inputs.txt`. Only `createShaderModule` +
+`drivers/webgpu/tint_cli/pipeline_id_inputs.txt`.
+
+⚠ **Check the stamp rather than trusting the binary's date.** Measured 2026-08-30 at `d0b909c192`:
+`bin/tint_convert_cli` (dated Aug 11) answered `0093378c6126fc53` while both generated headers said
+`cff62efc3cb732f6`, so every WGSL bake would have degraded to SPIR-V-only. The rebuild that fixed it
+took **3 s** — its `.build` objects were already current and only the stamp and link were stale, so
+there is no reason to skip it. The one-line check, run before any export whose numbers matter:
+
+```bash
+diff <(bin/tint_convert_cli --pipeline-id) \
+     <(sed -n 's/.*TINT_BAKE_PIPELINE_ID "\(.*\)"/\1/p' editor/shader/shader_baker/tint_pipeline_id.gen.h)
+```
+
+⚠ **`--headless` can never bake.** `editor/export/shader_baker_export_plugin.cpp:69` warns
+*"Shader baking was requested but no RenderingDevice renderer is running"* and exports unbaked —
+which every `godot --headless … --export-release` recipe in `webgpu_tests/` therefore does. The
+`__cgPerf` counters say so out loud (`baked_wgsl_hit=0`), and that is the fastest way to notice. Only `createShaderModule` +
 `createRenderPipeline` remain at runtime for baked shaders; runtime-generated materials
 (procedural `ShaderMaterial`s) still pay the full path — only shaders visible at export time
 can bake. Verification and numbers: `feature-shader-baker.md`.

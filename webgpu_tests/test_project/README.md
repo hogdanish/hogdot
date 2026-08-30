@@ -111,6 +111,10 @@ node smoke_test.mjs ./export --scene=benchsubmits  --expect-prefix='[CGBENCH]'
 
 # the baked/unbaked A/B, for free — same scene, the other checked-in export
 node smoke_test.mjs ./export-unbaked --scene=benchcompile --expect-prefix='[CGBENCH]'
+
+# dump the driver's telemetry channel out of the live page (also a pass/fail gate)
+node smoke_test.mjs ./export --scene=benchdraws --expect-prefix='[CGBENCH]' \
+     --dump-cgperf=/tmp/cgperf.json
 ```
 
 | key | measures |
@@ -123,6 +127,12 @@ node smoke_test.mjs ./export-unbaked --scene=benchcompile --expect-prefix='[CGBE
   own `/bench`.
 - ⚠ **A field printed as `na` was not measured** — never treat it as zero. Every bench runs natively
   too, where there is no `__cgPerf` channel and the driver-only columns are all `na`.
+- ⚠ **Check the adapter line before believing a number.** `smoke_test.mjs` prints
+  `adapter=<vendor>/<architecture>` from the driver's own boot blob and warns when it is a software
+  rasteriser. On macOS the Linux-CI Chrome flags (`--use-angle=vulkan`) silently force SwiftShader,
+  so the harness now chooses its flags per platform; `--gpu-args='<flags>'` overrides.
+- ⚠ **`--headless` exports are never baked** (the engine warns and carries on), so a bench run
+  against one reports `baked_wgsl_hit=0`. That is the unbaked arm of the A/B, not a bug.
 - ⚠ **Keep the window frontmost on a native run, and the tab foreground on web.** An occluded
   window stops being asked for frames: the counters freeze and the ramp goes perfectly flat, which
   reads as "draw calls are free". `benchdraws` and `benchsubmits` detect that themselves and

@@ -86,6 +86,14 @@ class RenderingDeviceDriverWebGPU : public RenderingDeviceDriver {
 	// byte-compatible; the ring needs PER-FRAME deltas, so it keeps its own
 	// previous-frame snapshot and rings the difference. Everything here is
 	// scalar: no allocation, no EM_ASM, on the per-frame path.
+	//
+	// ⚠ `cgperf_have_prev_begin` is a flag and not `cgperf_prev_begin_ms > 0.0`.
+	// A clock whose zero is not page load makes every timestamp negative, and a
+	// sign test then disables the whole ring with no error anywhere — which is
+	// exactly what happened on every nothreads template until the clock offset
+	// was measured instead of assumed (see _cgperf_install). A state flag cannot
+	// be turned off by the value of the thing it is tracking.
+	bool cgperf_have_prev_begin = false;
 	double cgperf_prev_begin_ms = 0.0;
 	double cgperf_frame_submit_ms = 0.0;
 	// Written by fence_wait, consumed and cleared by the next begin_segment.
@@ -101,7 +109,9 @@ class RenderingDeviceDriverWebGPU : public RenderingDeviceDriver {
 	uint32_t cgperf_prev_set_bind_group_calls = 0;
 	double cgperf_prev_counters[CGPerfChannel::COUNTER_COUNT] = {};
 	// Deviation D-1: the second [CGPERF] line, emitted once after the boot
-	// shader load has settled so `baked=` reports a real ratio.
+	// shader load has settled so `baked=` reports a real ratio. Same flag rule as
+	// cgperf_have_prev_begin above — never gate on the sign of a clock reading.
+	bool cgperf_have_first_begin = false;
 	double cgperf_first_begin_ms = 0.0;
 	bool cgperf_baked_line_emitted = false;
 

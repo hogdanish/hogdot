@@ -89,7 +89,9 @@ EM_JS_DEPS(godot_webgpu_cgperf_deps, "$UTF8ToString");
 
 static CGPerfChannel _cgperf;
 
-// performance.now(), not emscripten_get_now(). See CGPerfChannel::time_origin_ms.
+// The page's performance.now(), not emscripten_get_now() — the two differ by
+// performance.timeOrigin on some build configurations and not others, so the
+// offset is measured once at install. See CGPerfChannel::time_origin_ms.
 static double _cgperf_now_ms() {
 	return emscripten_get_now() - _cgperf.time_origin_ms;
 }
@@ -112,15 +114,28 @@ static void _cgperf_install() {
 	if (_cgperf.installed) {
 		return;
 	}
-	// ⚠ MAIN_THREAD_*, and the window's timeOrigin specifically. timeOrigin is
-	// epoch-based and per-context: a worker's is its own creation time, so on a
-	// proxy_to_pthread build (off by default here, but one linker flag away) the
-	// ring would silently sit at a constant offset from the page's timeline —
-	// and the in-page harness stamps its records with the WINDOW's
-	// performance.now(). emscripten_get_now() is timeOrigin + now(), i.e. the
-	// same absolute value in every context, so subtracting the window's origin
-	// yields the window's performance.now() from wherever the driver runs.
-	_cgperf.time_origin_ms = MAIN_THREAD_EM_ASM_DOUBLE({ return performance.timeOrigin; });
+	// The clock offset is MEASURED, never assumed.
+	//
+	// ⚠ emscripten_get_now() has two different definitions in the same toolchain
+	// and the build picks one silently (verified in the generated JS of both
+	// templates built from this tree, emcc 6.0.8-git, 2026-08-30):
+	//     threads=yes   _emscripten_get_now = () => performance.timeOrigin + performance.now()
+	//     threads=no    _emscripten_get_now = () => performance.now()
+	// Hard-coding either one is wrong on the other target, and wrong by
+	// ~performance.timeOrigin — about 1.79e12 ms. That is not a skew, it is a
+	// sign flip: every published timestamp goes hugely negative, and any code
+	// that guards on one being positive stops running. This measured form is
+	// correct under both definitions AND on a worker, whose own performance
+	// origin differs from the window's (proxy_to_pthread is off by default here
+	// but is one linker flag away).
+	//
+	// Bracketing the JS read with two C reads charges the boundary-crossing cost
+	// to neither side: the midpoint is the C clock's reading at the instant the
+	// JS clock was read, to within half a call.
+	const double clock_c0 = emscripten_get_now();
+	const double clock_js = MAIN_THREAD_EM_ASM_DOUBLE({ return performance.now(); });
+	const double clock_c1 = emscripten_get_now();
+	_cgperf.time_origin_ms = ((clock_c0 + clock_c1) * 0.5) - clock_js;
 	_cgperf.installed = true;
 
 	MAIN_THREAD_EM_ASM({
@@ -3652,7 +3667,7 @@ Error RenderingDeviceDriverWebGPU::fence_wait(FenceID p_fence) {
 	// Sign convention (see CGPerfChannel::F_FENCE_LAG): positive is a real
 	// GPU-completion measurement, negative is how far past the submit the CPU had
 	// already run when it gave up waiting.
-	if (fence->submit_time_ms > 0.0) {
+	if (fence->submit_stamped) {
 		if (fence->signaled) {
 			cgperf_frame_fence_lag = fence->signal_time_ms - fence->submit_time_ms;
 		} else {
@@ -3752,6 +3767,7 @@ Error RenderingDeviceDriverWebGPU::command_queue_execute_and_present(CommandQueu
 			// Paired with signal_time_ms in _fence_work_done_callback; consumed by
 			// fence_wait to produce the signed fence_lag column.
 			fence->submit_time_ms = _cgperf_now_ms();
+			fence->submit_stamped = true;
 			fence->signal_time_ms = 0.0;
 			fence->work_done_pending = true;
 			WGPUQueueWorkDoneCallbackInfo cb = {};
@@ -10079,7 +10095,7 @@ void RenderingDeviceDriverWebGPU::begin_segment(uint32_t p_frame_index, uint32_t
 	// Close out the frame that just ENDED. Everything measured here — the wall
 	// time, the counter deltas — describes the frame whose index is still in the
 	// `frames_drawn` member, so the row is written before the member is updated.
-	if (cgperf_prev_begin_ms > 0.0) {
+	if (cgperf_have_prev_begin) {
 		double *row = _cgperf.frame_row_advance();
 		row[CGPerfChannel::F_FRAME_IDX] = (double)frames_drawn;
 		row[CGPerfChannel::F_CPU_FRAME_MS] = now - cgperf_prev_begin_ms;
@@ -10099,8 +10115,10 @@ void RenderingDeviceDriverWebGPU::begin_segment(uint32_t p_frame_index, uint32_t
 		row[CGPerfChannel::F_FENCE_LAG] = cgperf_frame_fence_lag;
 	} else {
 		cgperf_first_begin_ms = now;
+		cgperf_have_first_begin = true;
 	}
 	cgperf_prev_begin_ms = now;
+	cgperf_have_prev_begin = true;
 	cgperf_frame_submit_ms = 0.0;
 	cgperf_frame_fence_lag = 0.0;
 
@@ -10139,7 +10157,7 @@ void RenderingDeviceDriverWebGPU::begin_segment(uint32_t p_frame_index, uint32_t
 	// Deviation D-1: the boot line's `baked=` is structurally 0/0 (no shader has
 	// loaded at driver init), so the real ratio goes out once, after boot shader
 	// loading has settled. Same `[CGPERF] ` prefix, so one grep finds both.
-	if (!cgperf_baked_line_emitted && cgperf_first_begin_ms > 0.0 && (now - cgperf_first_begin_ms) >= 3000.0) {
+	if (!cgperf_baked_line_emitted && cgperf_have_first_begin && (now - cgperf_first_begin_ms) >= 3000.0) {
 		cgperf_baked_line_emitted = true;
 		const uint32_t baked_hit = (uint32_t)_cgperf.counters[CGPerfChannel::C_BAKED_WGSL_HIT];
 		const uint32_t baked_miss = (uint32_t)_cgperf.counters[CGPerfChannel::C_BAKED_WGSL_MISS];

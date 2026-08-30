@@ -488,7 +488,13 @@ struct WGFence {
 	// submit_time_ms is written beside `signaled = false` in
 	// command_queue_execute_and_present, signal_time_ms in the work-done callback
 	// beside `signaled = true`. Both are performance.now() (see
-	// CGPerfChannel::time_origin_ms). 0.0 means "never stamped".
+	// CGPerfChannel::time_origin_ms).
+	//
+	// ⚠ `submit_stamped` is a flag rather than a `submit_time_ms > 0.0` test.
+	// A clock reading is not a validity bit: the same sign test on the frame
+	// ring silently disabled it outright on every nothreads template, because
+	// emscripten_get_now()'s zero is not page load there.
+	bool submit_stamped = false;
 	double submit_time_ms = 0.0;
 	double signal_time_ms = 0.0;
 };

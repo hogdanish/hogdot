@@ -5,5 +5,8 @@ export-threads/
 export-unbaked/
 *.import
 
+# smoke_test.mjs --dump-cgperf output
+cgperf-dump*.json
+
 # OS files
 .DS_Store
