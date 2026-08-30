@@ -34,10 +34,13 @@
 
 #include "core/templates/hash_map.h"
 #include "core/templates/hashfuncs.h"
+#include "core/version.h"
+#include "drivers/webgpu/cgperf_channel.h"
 #include "drivers/webgpu/pixel_formats_webgpu.h"
 #include "drivers/webgpu/rendering_context_driver_webgpu.h"
 #include "drivers/webgpu/rendering_shader_container_webgpu.h"
 #include "drivers/webgpu/spirv_preprocess.h"
+#include "drivers/webgpu/tint_pipeline_id.gen.h"
 #include "drivers/webgpu/tint_wrapper.h"
 
 #include "platform/web/godot_js.h"
@@ -61,6 +64,125 @@
 #define WEBGPU_DIAG(...) ((void)0)
 #define WEBGPU_DIAG_INT(...) 0
 #endif
+
+// =============================================================================
+// window.__cgPerf — always-on driver telemetry channel
+// =============================================================================
+//
+// Storage and layout live in cgperf_channel.h; everything below is the JS
+// boundary. Design constraints, all load-bearing:
+//
+//  * Zero EM_ASM calls on the per-frame path. The only per-frame JS crossings
+//    are emscripten_get_now() imports, one of which replaces the EM_ASM_DOUBLE
+//    that begin_segment already paid. Budget: < 0.05 ms/frame.
+//  * Zero allocation per frame. The ring is static .bss; JS reads it through
+//    getters that build their object once per *read*, not once per frame.
+//  * Release-safe. Nothing here is behind WEBGPU_VERBOSE, and nothing changes a
+//    rendering, pacing or compile decision — these are instruments only.
+//
+// ⚠ Emscripten does not scan EM_ASM bodies for JS library symbols, so a runtime
+// helper used only from one gets dead-stripped and fails at run time, not at
+// link time (the same trap rendering_context_driver_webgpu.cpp documents at its
+// EM_JS_DEPS). UTF8ToString is only ever called from an EM_ASM body here.
+EM_JS_DEPS(godot_webgpu_cgperf_deps, "$UTF8ToString");
+
+static CGPerfChannel _cgperf;
+
+// performance.now(), not emscripten_get_now(). See CGPerfChannel::time_origin_ms.
+static double _cgperf_now_ms() {
+	return emscripten_get_now() - _cgperf.time_origin_ms;
+}
+
+// Publish the channel object. Called as the very first thing in initialize() so
+// that the always-on device-lost / uncaptured-error listeners installed further
+// down can find it — those also resolve it lazily, because a device lost during
+// a partially-initialized channel is exactly the record worth having.
+//
+// ⚠ Two formatting traps constrain the JS style below, and both are silent:
+//  1. EM_ASM is a preprocessor macro, so its body is split on every top-level
+//     comma — parentheses protect one, square brackets and braces do not.
+//  2. clang-format formats the body as C++. A JS object literal's `key : value`
+//     reads as a label or bitfield and desynchronises its brace tracking, which
+//     cascades into reindenting the entire file. (`!==` is worse: it is not a
+//     C++ token, so it gets rewritten to `!= =` and the JS stops parsing.)
+// Both are avoided by building every object with property assignments instead
+// of a literal, which is also why there is not a single `:` below.
+static void _cgperf_install() {
+	if (_cgperf.installed) {
+		return;
+	}
+	// ⚠ MAIN_THREAD_*, and the window's timeOrigin specifically. timeOrigin is
+	// epoch-based and per-context: a worker's is its own creation time, so on a
+	// proxy_to_pthread build (off by default here, but one linker flag away) the
+	// ring would silently sit at a constant offset from the page's timeline —
+	// and the in-page harness stamps its records with the WINDOW's
+	// performance.now(). emscripten_get_now() is timeOrigin + now(), i.e. the
+	// same absolute value in every context, so subtracting the window's origin
+	// yields the window's performance.now() from wherever the driver runs.
+	_cgperf.time_origin_ms = MAIN_THREAD_EM_ASM_DOUBLE({ return performance.timeOrigin; });
+	_cgperf.installed = true;
+
+	MAIN_THREAD_EM_ASM({
+		var g = (typeof window != 'undefined') ? window : globalThis;
+		var framesPtr = $0;
+		var countersPtr = $1;
+		var headPtr = $2;
+		var cap = $3;
+		var stride = $4;
+		var counterNames = UTF8ToString($5).split('\n');
+		// Function DECLARATIONS, not `x = function(){}` expressions: clang-format
+		// strips the semicolon off an assigned function expression, leaving the JS
+		// dependent on automatic semicolon insertion.
+		// The JS-side counter write path, for the device listeners installed in
+		// initialize() — they fire in JS and never reach C++. `i` is a
+		// CGPerfChannel::Counter.
+		function cgperfBump(i) { Module['HEAPF64'][(countersPtr >> 3) + i] += 1; }
+		function cgperfReadCounters() {
+			var v = Module['HEAPF64'].subarray(countersPtr >> 3, (countersPtr >> 3) + counterNames.length);
+			var o = {};
+			for (var i = 0; i < counterNames.length; i++) {
+				o[counterNames[i]] = v[i];
+			}
+			return o;
+		}
+		function cgperfReadFrames() {
+			var head = Module['HEAPU32'][headPtr >> 2];
+			var n = (head < cap) ? head : cap;
+			var f = {};
+			f.head = head;
+			f.cap = cap;
+			f.stride = stride;
+			f.count = n;
+			f.buf = Module['HEAPF64'].subarray(framesPtr >> 3, (framesPtr >> 3) + cap * stride);
+			return f;
+		}
+		var ch = {};
+		ch.version = 1;
+		ch.build = null;
+		ch.frames_schema = UTF8ToString($6).split('\n');
+		ch.frames_schema_note = 'slots 2..6 are driver-local creation counts, not the five PIPELINE_COMPILATIONS monitors (deviation D-3)';
+		ch.compiles = [];
+		ch.events = [];
+		ch.ts = {};
+		ch.ts.supported = false;
+		ch.ts.requested = false;
+		ch.ts.degraded_frames = 0;
+		ch._bump = cgperfBump;
+		// ⚠ Getters, not cached typed-array views: -sALLOW_MEMORY_GROWTH=1
+		// detaches any view over the wasm heap when the heap grows, which on a
+		// real game happens during world load — i.e. exactly when the interesting
+		// stalls happen. Both getters re-derive from Module on every read, and
+		// each builds its object once per READ, never per frame.
+		var countersDesc = {};
+		countersDesc.enumerable = true;
+		countersDesc.get = cgperfReadCounters;
+		Object.defineProperty(ch, 'counters', countersDesc);
+		var framesDesc = {};
+		framesDesc.enumerable = true;
+		framesDesc.get = cgperfReadFrames;
+		Object.defineProperty(ch, 'frames', framesDesc);
+		g.__cgPerf = ch; }, (int)(intptr_t)_cgperf.frames, (int)(intptr_t)_cgperf.counters, (int)(intptr_t)&_cgperf.frame_head, (int)CGPerfChannel::FRAME_CAP, (int)CGPerfChannel::FRAME_STRIDE, CGPERF_COUNTER_NAMES_JOINED, CGPERF_FRAME_SCHEMA_JOINED);
+}
 
 // Forward declaration for timestamp readback callback (defined below command_timestamp_query_pool_reset).
 static void _timestamp_readback_callback(WGPUMapAsyncStatus p_status, WGPUStringView p_message, void *p_userdata1, void *p_userdata2);
@@ -499,6 +621,7 @@ static char *_spv_to_wgsl_cached(const uint8_t *p_spv_ptr, int p_spv_size) {
 	const String *cached = _spv_to_wgsl_cache.getptr(spv_hash);
 	if (cached) {
 		_spv_to_wgsl_cache_hits++;
+		_cgperf.count(CGPerfChannel::C_SPV_WGSL_CACHE_HIT);
 		CharString cs = cached->utf8();
 		size_t len = (size_t)cs.length() + 1;
 		char *out = (char *)malloc(len);
@@ -511,6 +634,7 @@ static char *_spv_to_wgsl_cached(const uint8_t *p_spv_ptr, int p_spv_size) {
 
 	// 2. Translate with Tint.
 	_spv_to_wgsl_cache_misses++;
+	_cgperf.count(CGPerfChannel::C_SPV_WGSL_CACHE_MISS);
 
 	char *wgsl_str = _translate_spirv_to_wgsl(p_spv_ptr, p_spv_size);
 
@@ -825,7 +949,64 @@ RenderingDeviceDriverWebGPU::~RenderingDeviceDriverWebGPU() {
 // GENERIC
 // =============================================================================
 
+// Fill window.__cgPerf.build and emit the greppable boot line. Called from
+// initialize() once the adapter identity and the device listeners are up.
+void RenderingDeviceDriverWebGPU::_cgperf_publish_build() {
+	const String engine_commit = String(GODOT_VERSION_HASH);
+	const String pipeline_id = String(TINT_BAKE_PIPELINE_ID);
+#ifdef THREADS_ENABLED
+	const int threads = 1;
+#else
+	const int threads = 0;
+#endif
+	RenderingContextDriverWebGPU::AdapterIdentity ident;
+	if (context_driver != nullptr) {
+		ident = context_driver->get_adapter_identity();
+	}
+
+	// ⚠ Newline-joined into one string: EM_ASM is a macro whose body splits on
+	// every top-level comma, and one boundary crossing beats six.
+	const String joined = engine_commit + "\n" + pipeline_id + "\n" + ident.vendor + "\n" + ident.architecture + "\n" + ident.device + "\n" + ident.description;
+	const CharString joined_utf8 = joined.utf8();
+	MAIN_THREAD_EM_ASM({
+		var g = (typeof window != 'undefined') ? window : globalThis;
+		if (!g.__cgPerf) {
+			return;
+		}
+		var f = UTF8ToString($0).split('\n');
+		var b = {};
+		b.engine_commit = f[0];
+		b.pipeline_id = f[1];
+		b.threads = ($1 != 0);
+		b.adapter = {};
+		b.adapter.vendor = f[2];
+		b.adapter.architecture = f[3];
+		b.adapter.device = f[4];
+		b.adapter.description = f[5];
+		g.__cgPerf.build = b; }, joined_utf8.get_data(), threads);
+
+	// The boot line (contract §1). ⚠ Deviation D-1: `baked=` can only be 0/0 here —
+	// no shader has loaded at driver init — so a second [CGPERF] line carries the
+	// real ratio once boot shader loading has settled (see begin_segment). The
+	// build-currency assertion keys on `[CGPERF] build engine=`, which has to exist
+	// immediately so a stale template is refused early and so a device lost during
+	// boot still leaves provenance behind.
+	const String boot_line = vformat("[CGPERF] build engine=%s pipeline_id=%s baked=0/0 threads=%d adapter=%s/%s",
+			engine_commit.left(12),
+			pipeline_id,
+			threads,
+			ident.vendor.is_empty() ? String("unknown") : ident.vendor,
+			ident.device.is_empty() ? String("unknown") : ident.device);
+	const CharString boot_line_utf8 = boot_line.utf8();
+	EM_ASM({ console.log(UTF8ToString($0)); }, boot_line_utf8.get_data());
+}
+
 Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t p_frame_count) {
+	// Publish window.__cgPerf before anything else can want to record on it —
+	// in particular the always-on device-lost and uncaptured-error listeners
+	// installed further down, and the bind-group-layout creations just below.
+	_cgperf_install();
+
 	// Initialize Tint shader compiler (SPIR-V → WGSL).
 	tint_wrapper_initialize();
 
@@ -866,6 +1047,7 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 		layout_desc.entryCount = 1;
 		layout_desc.entries = &pc_entry;
 		push_constant_bind_group_layout = wgpuDeviceCreateBindGroupLayout(device, &layout_desc);
+		_cgperf.count(CGPerfChannel::C_BINDGROUP_LAYOUTS_CREATED);
 		ERR_FAIL_COND_V(push_constant_bind_group_layout == nullptr, ERR_CANT_CREATE);
 
 		// Create the bind group (backed by the ring buffer).
@@ -881,6 +1063,7 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 		bg_desc.entryCount = 1;
 		bg_desc.entries = &bg_entry;
 		push_constant_bind_group = wgpuDeviceCreateBindGroup(device, &bg_desc);
+		_cgperf.count(CGPerfChannel::C_BINDGROUPS_CREATED);
 		ERR_FAIL_COND_V(push_constant_bind_group == nullptr, ERR_CANT_CREATE);
 	}
 
@@ -891,12 +1074,14 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 		WGPUBindGroupLayoutDescriptor empty_desc = {};
 		empty_desc.entryCount = 0;
 		empty_bind_group_layout = wgpuDeviceCreateBindGroupLayout(device, &empty_desc);
+		_cgperf.count(CGPerfChannel::C_BINDGROUP_LAYOUTS_CREATED);
 		ERR_FAIL_COND_V(empty_bind_group_layout == nullptr, ERR_CANT_CREATE);
 
 		WGPUBindGroupDescriptor bg_desc = {};
 		bg_desc.layout = empty_bind_group_layout;
 		bg_desc.entryCount = 0;
 		empty_bind_group = wgpuDeviceCreateBindGroup(device, &bg_desc);
+		_cgperf.count(CGPerfChannel::C_BINDGROUPS_CREATED);
 		ERR_FAIL_COND_V(empty_bind_group == nullptr, ERR_CANT_CREATE);
 	}
 
@@ -1013,19 +1198,38 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 
 	// Always-on: uncaptured error listener so WebGPU validation errors appear
 	// in the browser console before any abort(). Lightweight — no extra API calls.
+	//
+	// The two closures also record on window.__cgPerf. ⚠ They resolve the channel
+	// lazily rather than capturing it: a device lost while the channel is only
+	// half-installed is exactly the record worth keeping, and the console.error
+	// lines stay untouched because they are the only signal a session without the
+	// in-page harness gets. $0/$1 are CGPerfChannel::Counter indices.
 	MAIN_THREAD_EM_ASM({
 		var d = Module['preinitializedWebGPUDevice'];
+		var cUncaptured = $0;
+		var cLost = $1;
+		function bump(i) {
+			var g = (typeof window != 'undefined') ? window : globalThis;
+			if (g.__cgPerf) {
+				g.__cgPerf._bump(i);
+			}
+		}
 		if (d && !d._uncapturedPatched) {
-			d.addEventListener('uncapturederror', function(e) { console.error('[Godot-WebGPU] uncaptured error: ' + e.error.constructor.name + ' | ' + e.error.message); });
+			d.addEventListener('uncapturederror', function(e) {
+				bump(cUncaptured);
+				console.error('[Godot-WebGPU] uncaptured error: ' + e.error.constructor.name + ' | ' + e.error.message);
+			});
 			d._uncapturedPatched = true;
 		}
 		if (d && d.lost && !d._lostPatched) {
 			d.lost.then(function(info) {
+				bump(cLost);
 				console.error('[Godot-WebGPU] DEVICE LOST: reason=' + info.reason + ' | ' + info.message);
 			});
 			d._lostPatched = true;
-		}
-	});
+		} }, (int)CGPerfChannel::C_UNCAPTURED_ERROR, (int)CGPerfChannel::C_DEVICE_LOST);
+
+	_cgperf_publish_build();
 
 	// Install main-thread JS diagnostic patches early — as soon as the device is
 	// ready, before any pipelines are created. This ensures we intercept EVERY
@@ -3314,7 +3518,11 @@ Error RenderingDeviceDriverWebGPU::command_queue_execute_and_present(CommandQueu
 			push_constant_shadow_dirty_end = 0;
 		}
 
+		// submit_ms: the synchronous cost of handing this frame's command buffers
+		// to the browser. Two wasm→JS imports per frame, no EM_ASM.
+		const double submit_t0 = _cgperf_now_ms();
 		wgpuQueueSubmit(queue, wgpu_cmd_buffers.size(), wgpu_cmd_buffers.ptr());
+		cgperf_frame_submit_ms += _cgperf_now_ms() - submit_t0;
 		// Diagnostic: log submit count for the first few frames.
 #ifdef WEBGPU_VERBOSE
 		static int _submit_log = 0;
@@ -3559,6 +3767,10 @@ Error RenderingDeviceDriverWebGPU::swap_chain_resize(CommandQueueID p_cmd_queue,
 	uint32_t width = context_driver->surface_get_width(sc->surface_id);
 	uint32_t height = context_driver->surface_get_height(sc->surface_id);
 	if (width == 0 || height == 0) {
+		// ⚠ The one frame-drop path with no diagnostic of any kind: RenderingDevice
+		// has already run _flush_and_stall_for_all_frames() to get here, and the
+		// frame is then discarded silently. The counter is the only trace.
+		_cgperf.count(CGPerfChannel::C_RESIZE_SKIP);
 		return ERR_SKIP; // Canvas not yet sized.
 	}
 
@@ -3619,6 +3831,7 @@ Error RenderingDeviceDriverWebGPU::swap_chain_resize(CommandQueueID p_cmd_queue,
 	sc->width = width;
 	sc->height = height;
 	sc->configured = true;
+	_cgperf.count(CGPerfChannel::C_RECONFIGURE);
 	// Clear the needs_resize flag so swap_chain_acquire_framebuffer doesn't
 	context_driver->surface_set_needs_resize(sc->surface_id, false);
 	return OK;
@@ -3661,18 +3874,24 @@ RDD::FramebufferID RenderingDeviceDriverWebGPU::swap_chain_acquire_framebuffer(C
 		_st_log++;
 	}
 
+	// ⚠ All three failure branches print ONCE, so a run of them after the first is
+	// completely silent — and a run of frames that acquire nothing leaves stale
+	// canvas content on screen. The counter is what makes the run countable.
 	if (surface_texture.status == WGPUSurfaceGetCurrentTextureStatus_Lost) {
+		_cgperf.count(CGPerfChannel::C_ACQUIRE_FAIL);
 		ERR_PRINT_ONCE("WebGPU: surface lost — device or surface is no longer usable.");
 		return FramebufferID();
 	}
 
 	if (surface_texture.status == WGPUSurfaceGetCurrentTextureStatus_SuccessSuboptimal ||
 			surface_texture.status == WGPUSurfaceGetCurrentTextureStatus_Outdated) {
+		_cgperf.count(CGPerfChannel::C_ACQUIRE_FAIL);
 		WARN_PRINT_ONCE(vformat("WebGPU: wgpuSurfaceGetCurrentTexture: resize-needed status=%d", (int)surface_texture.status));
 		r_resize_required = true;
 		return FramebufferID();
 	}
 	if (surface_texture.status != WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal) {
+		_cgperf.count(CGPerfChannel::C_ACQUIRE_FAIL);
 		WARN_PRINT_ONCE(vformat("WebGPU: wgpuSurfaceGetCurrentTexture: unexpected status=%d", (int)surface_texture.status));
 		return FramebufferID();
 	}
@@ -4152,6 +4371,10 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 	Vector<RenderingShaderContainer::Shader> &stage_shaders = p_shader_container->shaders;
 	LocalVector<char *> baked_wgsl;
 	bool use_baked_wgsl = wg_container->has_baked_wgsl();
+	if (!use_baked_wgsl) {
+		// Counted once per SHADER, matching the print_verbose evidence line below.
+		_cgperf.count(CGPerfChannel::C_BAKED_WGSL_MISS);
+	}
 	if (use_baked_wgsl) {
 		baked_wgsl.resize(stage_shaders.size());
 		for (int i = 0; i < stage_shaders.size(); i++) {
@@ -4161,6 +4384,9 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 			}
 		}
 		if (!use_baked_wgsl) {
+			// The decompress-failure downgrade: the flag was set, the bake is not
+			// usable, and the runtime pays Tint anyway. Counted as a miss.
+			_cgperf.count(CGPerfChannel::C_BAKED_WGSL_MISS);
 			WARN_PRINT(vformat("WebGPU: shader '%s' has a baked WGSL flag but a stage failed to decompress; translating live instead.", shader->name));
 			for (uint32_t i = 0; i < baked_wgsl.size(); i++) {
 				free(baked_wgsl[i]);
@@ -4168,7 +4394,10 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 			}
 		} else {
 			// Countable evidence line for the bake gate: a fully baked project
-			// must log one of these per shader and zero tint_translations.
+			// must log one of these per shader and zero tint_translations. The
+			// counter is the release-visible form of the same evidence —
+			// print_verbose only reaches a --verbose run.
+			_cgperf.count(CGPerfChannel::C_BAKED_WGSL_HIT);
 			print_verbose(vformat("WebGPU: shader '%s' using baked WGSL (%d stages).", shader->name, (int)stage_shaders.size()));
 		}
 	}
@@ -4701,6 +4930,7 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 		mod_desc.label = { _mod_label_cs.get_data(), WGPU_STRLEN };
 
 		WGPUShaderModule mod = wgpuDeviceCreateShaderModule(device, &mod_desc);
+		_cgperf.count(CGPerfChannel::C_SHADER_MODULES_CREATED);
 
 		// Scan WGSL for texture dimension declarations so the BGL uses the right viewDimension.
 		// Tint format: "@group(G) @binding(B) var NAME: texture_TYPE<...>;"
@@ -5488,6 +5718,7 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 			layout_desc.label = { _bgl_label_cs.get_data(), WGPU_STRLEN };
 
 			shader->bind_group_layouts[set] = wgpuDeviceCreateBindGroupLayout(device, &layout_desc);
+			_cgperf.count(CGPerfChannel::C_BINDGROUP_LAYOUTS_CREATED);
 			if (shader->bind_group_layouts[set] == nullptr) {
 				error_text = "WebGPU: wgpuDeviceCreateBindGroupLayout failed.";
 				goto cleanup;
@@ -5602,6 +5833,7 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 					merged_desc.entryCount = merged_entries.size();
 					merged_desc.entries = merged_entries.ptr();
 					shader->merged_pc_group_layout = wgpuDeviceCreateBindGroupLayout(device, &merged_desc);
+					_cgperf.count(CGPerfChannel::C_BINDGROUP_LAYOUTS_CREATED);
 					if (!shader->merged_pc_group_layout) {
 						error_text = "WebGPU: failed to create merged PC+material bind group layout.";
 						goto cleanup;
@@ -6178,6 +6410,7 @@ RDD::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_create(VectorView<Bou
 	bg_desc.entries = entries.size() > 0 ? entries.ptr() : nullptr;
 
 	WGPUBindGroup bg = wgpuDeviceCreateBindGroup(device, &bg_desc);
+	_cgperf.count(CGPerfChannel::C_BINDGROUPS_CREATED);
 	if (bg == nullptr) {
 		delete us;
 		ERR_FAIL_V_MSG(UniformSetID(), "WebGPU: wgpuDeviceCreateBindGroup failed.");
@@ -6387,6 +6620,7 @@ WGPUBindGroup RenderingDeviceDriverWebGPU::_get_compatible_bind_group(WGUniformS
 	desc.entryCount = filtered.size();
 	desc.entries = filtered.size() > 0 ? filtered.ptr() : nullptr;
 	WGPUBindGroup bg = wgpuDeviceCreateBindGroup(device, &desc);
+	_cgperf.count(CGPerfChannel::C_BINDGROUPS_CREATED);
 	if (!bg) {
 		WARN_PRINT(vformat("WebGPU: bind group rebind failed for set=%d src=%s tgt=%s entries=%d",
 				(int)p_set_idx,
@@ -7646,9 +7880,14 @@ void RenderingDeviceDriverWebGPU::command_begin_render_pass(CommandBufferID p_cm
 				push_constant_shadow_dirty_end = 0;
 			}
 			// Split: submit everything so far, start a fresh encoder.
+			// Counted and timed: mid-frame submits were invisible outside
+			// WEBGPU_VERBOSE's [DIAG-SUBMIT], and they are a frame-pacing suspect.
+			_cgperf.count(CGPerfChannel::C_ENCODER_SPLITS);
 			WGPUCommandBuffer finished = wgpuCommandEncoderFinish(cmd->encoder, nullptr);
 			if (finished) {
+				const double split_submit_t0 = _cgperf_now_ms();
 				wgpuQueueSubmit(queue, 1, &finished);
+				cgperf_frame_submit_ms += _cgperf_now_ms() - split_submit_t0;
 				wgpuCommandBufferRelease(finished);
 			}
 			wgpuCommandEncoderRelease(cmd->encoder);
@@ -8574,6 +8813,7 @@ WGPUShaderModule RenderingDeviceDriverWebGPU::_create_module_with_spec_constants
 	desc.label = { _spec_label_cs.get_data(), WGPU_STRLEN };
 
 	WGPUShaderModule mod = wgpuDeviceCreateShaderModule(device, &desc);
+	_cgperf.count(CGPerfChannel::C_SHADER_MODULES_CREATED);
 	free(wgsl_str);
 
 	return mod;
@@ -9077,6 +9317,7 @@ RDD::PipelineID RenderingDeviceDriverWebGPU::render_pipeline_create(
 	desc.label = { _pipeline_label_cs.get_data(), WGPU_STRLEN };
 
 	WGPURenderPipeline pipeline = wgpuDeviceCreateRenderPipeline(device, &desc);
+	_cgperf.count(CGPerfChannel::C_RENDER_PIPELINES_CREATED);
 	if (!pipeline) {
 		if (specialized_vertex) {
 			wgpuShaderModuleRelease(specialized_vertex);
@@ -9100,6 +9341,7 @@ RDD::PipelineID RenderingDeviceDriverWebGPU::render_pipeline_create(
 		// but Godot only knows the index format at bind time.
 		desc.primitive.stripIndexFormat = WGPUIndexFormat_Uint16;
 		pw->render_handle_u16 = wgpuDeviceCreateRenderPipeline(device, &desc);
+		_cgperf.count(CGPerfChannel::C_RENDER_PIPELINES_CREATED);
 		// Non-fatal if this fails — Uint32 variant still works for the common case.
 		if (!pw->render_handle_u16) {
 			WARN_PRINT_ONCE("WebGPU: failed to create Uint16 strip pipeline variant.");
@@ -9288,6 +9530,7 @@ RDD::PipelineID RenderingDeviceDriverWebGPU::compute_pipeline_create(ShaderID p_
 	}
 
 	WGPUComputePipeline pipeline = wgpuDeviceCreateComputePipeline(device, &desc);
+	_cgperf.count(CGPerfChannel::C_COMPUTE_PIPELINES_CREATED);
 	if (!pipeline) {
 		if (specialized_compute) {
 			wgpuShaderModuleRelease(specialized_compute);
@@ -9547,12 +9790,45 @@ void RenderingDeviceDriverWebGPU::command_insert_breadcrumb(CommandBufferID p_cm
 // =============================================================================
 
 void RenderingDeviceDriverWebGPU::begin_segment(uint32_t p_frame_index, uint32_t p_frames_drawn) {
+	// ⚠ `now` is performance.now(), same as the EM_ASM_DOUBLE this replaces, but
+	// through a direct wasm import instead of a JS eval — cheaper, and it makes
+	// the per-frame path free of EM_ASM entirely. emscripten_get_now() is
+	// `performance.timeOrigin + performance.now()`, so the origin is subtracted
+	// back off; see CGPerfChannel::time_origin_ms for why that matters.
+	double now = _cgperf_now_ms();
+
+	// --- window.__cgPerf frame ring -----------------------------------------
+	// Close out the frame that just ENDED. Everything measured here — the wall
+	// time, the counter deltas — describes the frame whose index is still in the
+	// `frames_drawn` member, so the row is written before the member is updated.
+	if (cgperf_prev_begin_ms > 0.0) {
+		double *row = _cgperf.frame_row_advance();
+		row[CGPerfChannel::F_FRAME_IDX] = (double)frames_drawn;
+		row[CGPerfChannel::F_CPU_FRAME_MS] = now - cgperf_prev_begin_ms;
+		row[CGPerfChannel::F_RENDER_PIPELINES_CREATED] = _cgperf.counters[CGPerfChannel::C_RENDER_PIPELINES_CREATED] - cgperf_prev_counters[CGPerfChannel::C_RENDER_PIPELINES_CREATED];
+		row[CGPerfChannel::F_COMPUTE_PIPELINES_CREATED] = _cgperf.counters[CGPerfChannel::C_COMPUTE_PIPELINES_CREATED] - cgperf_prev_counters[CGPerfChannel::C_COMPUTE_PIPELINES_CREATED];
+		row[CGPerfChannel::F_SHADER_MODULES_CREATED] = _cgperf.counters[CGPerfChannel::C_SHADER_MODULES_CREATED] - cgperf_prev_counters[CGPerfChannel::C_SHADER_MODULES_CREATED];
+		row[CGPerfChannel::F_BINDGROUP_LAYOUTS_CREATED] = _cgperf.counters[CGPerfChannel::C_BINDGROUP_LAYOUTS_CREATED] - cgperf_prev_counters[CGPerfChannel::C_BINDGROUP_LAYOUTS_CREATED];
+		row[CGPerfChannel::F_BINDGROUPS_CREATED] = _cgperf.counters[CGPerfChannel::C_BINDGROUPS_CREATED] - cgperf_prev_counters[CGPerfChannel::C_BINDGROUPS_CREATED];
+		row[CGPerfChannel::F_RENDER_PASSES] = (double)(perf.render_passes - cgperf_prev_render_passes);
+		row[CGPerfChannel::F_DRAW_CALLS] = (double)(perf.draw_calls - cgperf_prev_draw_calls);
+		row[CGPerfChannel::F_BINDGROUP_SETS] = (double)(perf.set_bind_group_calls - cgperf_prev_set_bind_group_calls);
+		row[CGPerfChannel::F_ENCODER_SPLITS] = _cgperf.counters[CGPerfChannel::C_ENCODER_SPLITS] - cgperf_prev_counters[CGPerfChannel::C_ENCODER_SPLITS];
+		row[CGPerfChannel::F_SUBMIT_MS] = cgperf_frame_submit_ms;
+		// fence_lag is chunk 2 (the WGFence submit/signal observable); until then
+		// the column is a truthful zero rather than a fabricated number.
+		row[CGPerfChannel::F_FENCE_LAG] = 0.0;
+	} else {
+		cgperf_first_begin_ms = now;
+	}
+	cgperf_prev_begin_ms = now;
+	cgperf_frame_submit_ms = 0.0;
+
 	frame_index = p_frame_index;
 	frames_drawn = p_frames_drawn;
 
 	// Performance counter tracking (always-on, 1 log/sec is negligible overhead).
 	perf.frames_since_log++;
-	double now = EM_ASM_DOUBLE({ return performance.now(); });
 	if (perf.last_log_time == 0) {
 		perf.last_log_time = now;
 	} else if (now - perf.last_log_time >= 1000.0) {
@@ -9570,6 +9846,30 @@ void RenderingDeviceDriverWebGPU::begin_segment(uint32_t p_frame_index, uint32_t
 		perf.reset();
 		perf.frames_since_log = 0;
 		perf.last_log_time = now;
+	}
+
+	// ⚠ Snapshot AFTER the 1 Hz block, because perf.reset() may have just zeroed
+	// these — the delta for the next frame is then measured from zero, which is
+	// exactly right.
+	cgperf_prev_render_passes = perf.render_passes;
+	cgperf_prev_draw_calls = perf.draw_calls;
+	cgperf_prev_set_bind_group_calls = perf.set_bind_group_calls;
+	memcpy(cgperf_prev_counters, _cgperf.counters, sizeof(cgperf_prev_counters));
+
+	// Deviation D-1: the boot line's `baked=` is structurally 0/0 (no shader has
+	// loaded at driver init), so the real ratio goes out once, after boot shader
+	// loading has settled. Same `[CGPERF] ` prefix, so one grep finds both.
+	if (!cgperf_baked_line_emitted && cgperf_first_begin_ms > 0.0 && (now - cgperf_first_begin_ms) >= 3000.0) {
+		cgperf_baked_line_emitted = true;
+		const uint32_t baked_hit = (uint32_t)_cgperf.counters[CGPerfChannel::C_BAKED_WGSL_HIT];
+		const uint32_t baked_miss = (uint32_t)_cgperf.counters[CGPerfChannel::C_BAKED_WGSL_MISS];
+		const uint32_t spv_hit = (uint32_t)_cgperf.counters[CGPerfChannel::C_SPV_WGSL_CACHE_HIT];
+		const uint32_t spv_miss = (uint32_t)_cgperf.counters[CGPerfChannel::C_SPV_WGSL_CACHE_MISS];
+		const String baked_line = vformat("[CGPERF] baked=%d/%d spv_wgsl=%d/%d engine=%s",
+				baked_hit, baked_hit + baked_miss, spv_hit, spv_hit + spv_miss,
+				String(GODOT_VERSION_HASH).left(12));
+		const CharString baked_line_utf8 = baked_line.utf8();
+		EM_ASM({ console.log(UTF8ToString($0)); }, baked_line_utf8.get_data());
 	}
 
 	// Reset push constant ring buffer offset and shadow buffer tracking at the start of each segment.

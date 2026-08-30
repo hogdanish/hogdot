@@ -33,6 +33,7 @@
 #ifdef WEBGPU_ENABLED
 
 #include "core/templates/hash_map.h"
+#include "drivers/webgpu/cgperf_channel.h"
 #include "drivers/webgpu/webgpu_objects.h"
 #include "servers/rendering/rendering_device_driver.h"
 
@@ -79,6 +80,22 @@ class RenderingDeviceDriverWebGPU : public RenderingDeviceDriver {
 			ring_overflows = 0;
 		}
 	} perf;
+
+	// --- window.__cgPerf per-frame ring state (drivers/webgpu/cgperf_channel.h) ---
+	// `perf` above resets once per second so the [PERF] text line stays
+	// byte-compatible; the ring needs PER-FRAME deltas, so it keeps its own
+	// previous-frame snapshot and rings the difference. Everything here is
+	// scalar: no allocation, no EM_ASM, on the per-frame path.
+	double cgperf_prev_begin_ms = 0.0;
+	double cgperf_frame_submit_ms = 0.0;
+	uint32_t cgperf_prev_render_passes = 0;
+	uint32_t cgperf_prev_draw_calls = 0;
+	uint32_t cgperf_prev_set_bind_group_calls = 0;
+	double cgperf_prev_counters[CGPerfChannel::COUNTER_COUNT] = {};
+	// Deviation D-1: the second [CGPERF] line, emitted once after the boot
+	// shader load has settled so `baked=` reports a real ratio.
+	double cgperf_first_begin_ms = 0.0;
+	bool cgperf_baked_line_emitted = false;
 
 	Capabilities capabilities;
 	MultiviewCapabilities multiview_capabilities;
@@ -176,6 +193,7 @@ class RenderingDeviceDriverWebGPU : public RenderingDeviceDriver {
 
 	// --- Internal Helpers ---
 	void _check_capabilities();
+	void _cgperf_publish_build();
 	WGPUTextureFormat _data_format_to_wgpu(DataFormat p_format) const;
 	DataFormat _wgpu_to_data_format(WGPUTextureFormat p_format) const;
 	static WGPUVertexFormat _data_format_to_wgpu_vertex(DataFormat p_format);

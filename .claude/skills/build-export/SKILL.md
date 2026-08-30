@@ -136,6 +136,20 @@ scons platform=web target=template_release dlink_enabled=yes webgpu=yes opengl3=
 nice -n 10 scons platform=web target=template_debug webgpu=yes opengl3=no threads=yes \
      num_jobs=4 import_env_vars=HOME,CCACHE_DIR,CCACHE_CONFIGPATH,EM_CACHE
 
+# ⚠ single-TU gate — the cheapest real proof for a driver-only change. Measured
+#   2026-08-30: ~1.2-1.6 s of scons time per variant, so there is no excuse for an
+#   uncompiled `drivers/webgpu/` edit. Name the `bin/obj/…` object, NOT the
+#   identically-named stale `.o` sitting in drivers/webgpu/ — that one has no builder
+#   attached, so scons prints `Nothing to be done` and EXITS 0, which reads exactly
+#   like a passing gate. Confirm the output says `Compiling drivers/webgpu/… ...`.
+nice -n 10 scons platform=web target=template_debug webgpu=yes opengl3=no threads=no \
+     num_jobs=4 import_env_vars=HOME,CCACHE_DIR,CCACHE_CONFIGPATH,EM_CACHE \
+     bin/obj/drivers/webgpu/rendering_device_driver_webgpu.web.template_debug.wasm32.nothreads.o
+#   ⚠ A driver change is only proven across all four shipped variants when it is built
+#   in all four: target=template_{debug,release} × threads={no,yes}. The object suffix
+#   is `.nothreads` for threads=no and empty for threads=yes — the same naming trap as
+#   the zips. `#ifdef THREADS_ENABLED` code exists only in the threads=yes objects.
+
 # ⚠ configure-only smoke test — seconds, compiles nothing. Godot runs platform
 #   detection and every module config.py before printing help, so this catches an
 #   undeclared option, a config.py KeyError or a broken SConscript for free.

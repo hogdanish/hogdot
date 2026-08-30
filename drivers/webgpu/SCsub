@@ -735,3 +735,38 @@ env.drivers_sources += tint_obj
 # host tool it needed, drivers/webgpu/tint_cli/, is still built on demand by
 # drivers/webgpu/tint_cli/build.sh — it is the tint_convert_cli used for
 # SPIR-V→WGSL bisection when debugging a translation failure.
+
+# =============================================================================
+# Tint translation-pipeline stamp — the template's own copy
+# =============================================================================
+#
+# window.__cgPerf.build.pipeline_id reports the stamp of the SPIR-V→WGSL
+# translation inputs THIS BINARY was built from, so a consumer can compare it
+# against the stamp the editor's baker recorded in the pck and catch a template
+# that translates differently from the pck it is being fed. Nothing detected
+# that skew before: TINT_BAKE_PIPELINE_ID existed only on the editor-only path
+# in editor/shader/shader_baker/SCsub, so a web template had no such symbol.
+#
+# Same builder and the same input list as the editor's copy, so the two headers
+# agree by construction. The target path differs, so SCons sees no duplicate
+# builder even on a `webgpu=yes` editor build that registers both.
+import sys
+
+shader_baker_dir = Dir("#editor/shader/shader_baker").abspath
+if shader_baker_dir not in sys.path:
+    sys.path.append(shader_baker_dir)
+
+import shader_baker_builders
+
+pipeline_id_inputs = File("#drivers/webgpu/tint_cli/pipeline_id_inputs.txt")
+pipeline_id_deps = [pipeline_id_inputs]
+with open(pipeline_id_inputs.abspath, encoding="utf-8") as inputs_file:
+    for input_line in inputs_file:
+        input_line = input_line.strip()
+        if input_line and not input_line.startswith("#"):
+            pipeline_id_deps.append(File("#" + input_line))
+env_webgpu.CommandNoCache(
+    "tint_pipeline_id.gen.h",
+    pipeline_id_deps,
+    env_webgpu.Run(shader_baker_builders.make_tint_pipeline_id_header),
+)

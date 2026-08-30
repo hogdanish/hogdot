@@ -44,6 +44,23 @@ class RenderingContextDriverWebGPU : public RenderingContextDriver {
 
 	Device device_info; // Single device description.
 
+public:
+	// The browser's raw GPUAdapterInfo fields, kept verbatim beside the cooked
+	// `device_info.name`. The boot blob the driver publishes on window.__cgPerf
+	// reports vendor/architecture/device/description separately, and the cooked
+	// name is a lossy " - "-joined subset of them. All four are usually empty
+	// outside a browser developer flag; the measured Chrome 151 ceiling on an
+	// Apple M5 is vendor "apple", architecture "metal-3" (WA-10-c).
+	struct AdapterIdentity {
+		String vendor;
+		String architecture;
+		String device;
+		String description;
+	};
+
+private:
+	AdapterIdentity adapter_identity;
+
 	struct Surface {
 		WGPUSurface handle = nullptr;
 		uint32_t width = 0;
@@ -107,6 +124,7 @@ public:
 
 	WGPUDevice get_device() const { return device; }
 	WGPUQueue get_queue() const { return queue; }
+	const AdapterIdentity &get_adapter_identity() const { return adapter_identity; }
 	WGPUInstance get_instance() const { return instance; }
 	WGPUSurface surface_get_handle(SurfaceID p_surface) const;
 };

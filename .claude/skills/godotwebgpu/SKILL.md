@@ -174,6 +174,55 @@ build time**. That campaign took web from 3.25× slower than native to roughly p
 `references/site/PERFORMANCE_AND_OPTIMIZATION.md` before any perf work, and never micro-optimize a
 call that could be removed.
 
+## Driver telemetry — `window.__cgPerf` (added 2026-08-30)
+
+The driver publishes an **always-on, release-safe** telemetry channel at `window.__cgPerf`, plus a
+greppable `[CGPERF]` boot line. Storage and layout: `drivers/webgpu/cgperf_channel.h`; the JS boundary
+is `_cgperf_install()` / `_cgperf_publish_build()` in the driver `.cpp`. The 1 Hz `[PERF]` text line is
+unchanged and byte-compatible.
+
+```
+__cgPerf.version        1
+__cgPerf.build          { engine_commit, pipeline_id, threads, adapter{vendor,architecture,device,description} }
+__cgPerf.counters       live getter over the heap; 15 monotonic doubles (see the header's Counter enum)
+__cgPerf.frames         live getter → { head, cap: 3600, stride: 13, count, buf: Float64Array }
+__cgPerf.frames_schema  13 names, fixed order, index == column
+__cgPerf.compiles/.events/.ts   present and empty at chunk 1
+```
+Oldest→newest row `i`, field `f`: `buf[((head - count + i) % cap) * stride + f]`.
+
+Five rules, each of which cost something to learn:
+
+- ⚠ **Never cache a typed-array view over the wasm heap.** `-sALLOW_MEMORY_GROWTH=1` detaches it, and
+  the heap grows during world load — exactly when the interesting stalls happen. Both getters
+  re-derive from `Module['HEAPF64']` / `Module['HEAPU32']` on every read.
+- ⚠ **One clock.** `emscripten_get_now()` is `performance.timeOrigin + performance.now()`, an absolute
+  epoch value; every published timestamp is that minus the **window's** `timeOrigin`, captured once
+  with `MAIN_THREAD_EM_ASM_DOUBLE`, so it equals the page's `performance.now()` from any thread. The
+  one-time install and boot blob are `MAIN_THREAD_EM_ASM` so the object lands on the page's `window`
+  and not a worker's global — `proxy_to_pthread` is off by default but is one linker flag away.
+- ⚠ **`EM_JS_DEPS` is mandatory** for a JS-library helper used only inside an `EM_ASM` body
+  (`UTF8ToString` here). Emscripten does not scan those bodies; miss it and the template links clean
+  and dies in the browser.
+- ⚠ **clang-format formats `EM_ASM` bodies as C++, and this repo is clang-format green.** A JS object
+  literal's `key : value` desynchronises its brace tracking and it reindents the whole file; `!==` is
+  not a C++ token and gets rewritten to `!= =`, which silently breaks the JS. Build every object with
+  property assignments, use function *declarations* rather than assigned function expressions (the
+  semicolon gets stripped), and never write `:` or `!==` in an `EM_ASM` body. ⚠ The pre-existing
+  `WEBGPU_VERBOSE` diagnostic block already carries two `== =` from this trap and does not parse.
+- ⚠ **`EM_ASM` is a macro** — its body splits on every top-level comma; parentheses protect one,
+  brackets and braces do not. Field-name lists cross the boundary newline-joined, once.
+
+Per-frame cost is bounded structurally, not by discipline: the ring is static `.bss` (≈366 KB), and
+the only per-frame JS crossings are two-to-three `emscripten_get_now()` imports, one of which replaces
+the `EM_ASM_DOUBLE` `begin_segment` already paid. A `static_assert` in the header fails the build if a
+name list ever drifts from its enum.
+
+`build.pipeline_id` is the **template's** Tint translation stamp, newly generated for `webgpu=yes`
+builds by `drivers/webgpu/SCsub` from the same input list and builder as the editor's copy, so the two
+agree by construction. Comparing it against the editor's stamp is what detects a template that
+translates differently from the pck it was fed.
+
 ## Build and selection
 
 ```bash

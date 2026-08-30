@@ -123,6 +123,13 @@ Error RenderingContextDriverWebGPU::initialize() {
 		const String device_str = fields.size() > 2 ? fields[2].strip_edges() : String();
 		const String description_str = fields.size() > 3 ? fields[3].strip_edges() : String();
 
+		// Keep the raw four for the window.__cgPerf boot blob; device_info.name
+		// below is a lossy join of the same data.
+		adapter_identity.vendor = vendor_str;
+		adapter_identity.architecture = arch_str;
+		adapter_identity.device = device_str;
+		adapter_identity.description = description_str;
+
 		// Prefer the specific names when the browser gives them, and fall back to the
 		// vendor/architecture pair, which it almost always does.
 		Vector<String> parts;
