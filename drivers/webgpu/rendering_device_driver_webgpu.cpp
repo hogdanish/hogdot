@@ -380,6 +380,55 @@ static bool _cgperf_timestamps_requested() {
 	return GLOBAL_DEF("rendering/rendering_device/webgpu_timestamps", false);
 }
 
+// Is the runtime override-preservation path requested for this session?
+//
+// When OFF (the default, and today's shipped behavior) every runtime SPIR-V→WGSL
+// translation runs `freeze_spec_constant_ops` first, which converts OpSpecConstant*
+// to plain constants and STRIPS the SpecId decorations. Tint can then never emit
+// `@id(N) override`, `has_override_declarations` is false for every
+// runtime-translated shader, and each specialization variant costs a full SPIR-V
+// patch plus a Tint translation, per stage — measured at 58% of every shader module
+// the driver creates.
+//
+// When ON, the freeze is skipped, Tint emits overrides, and specialization becomes
+// WGPUConstantEntry values at pipeline creation — the entire
+// `_create_module_with_spec_constants` fan-out stops existing for those shaders.
+//
+// ⚠ This is exactly what the shader baker has done in production since 2026-08-11:
+// `tint_convert_cli --overrides` skips this ONE pass and runs the identical
+// remaining twelve and the identical `tint_wrapper_spirv_to_wgsl`. So "does Tint
+// accept live spec constants" is not a question — every WGSL blob in a baked pck
+// is the answer. What is genuinely unproven is the runtime path taking it for
+// shaders the baker never saw, which is why this ships OFF and behind a flag.
+//
+// Same two gates as the timestamp flag, and for the same reason: the URL flag needs
+// no re-export, which is the only thing that makes an A/B on ONE template cheap.
+// ⚠ The project setting is registered from a web-only driver, so it never appears in
+// the editor's Project Settings dialog — write it into project.godot by hand.
+static bool _webgpu_runtime_overrides_requested() {
+	const int from_url = MAIN_THREAD_EM_ASM_INT({
+		var g = (typeof window != 'undefined') ? window : globalThis;
+		if (!g.location || !g.location.search) {
+			return 0;
+		}
+		var p = new URLSearchParams(g.location.search);
+		if (p.has('webgpu_overrides')) {
+			return 1;
+		}
+		return 0;
+	});
+	if (from_url != 0) {
+		return true;
+	}
+	return GLOBAL_DEF("rendering/rendering_device/webgpu_runtime_overrides", false);
+}
+
+// Session-wide answer to the above, resolved once in initialize(). File scope
+// because the two translation helpers below are file-scope statistics, like _cgperf.
+// ⚠ Default false: with the flag never set, every path below is byte-identical to
+// what shipped before this existed.
+static bool _runtime_overrides_enabled = false;
+
 // Forward declaration for timestamp readback callback (defined below command_timestamp_query_pool_reset).
 static void _timestamp_readback_callback(WGPUMapAsyncStatus p_status, WGPUStringView p_message, void *p_userdata1, void *p_userdata2);
 
@@ -757,7 +806,11 @@ static HashMap<uint64_t, String> _spv_to_wgsl_cache;
 
 // Run SPIR-V preprocessing passes and translate to WGSL via Tint.
 // Returns a malloc'd null-terminated WGSL string, or nullptr on failure.
-static char *_translate_spirv_to_wgsl(const uint8_t *p_spv_ptr, int p_spv_size) {
+// ⚠ p_keep_overrides skips freeze_spec_constant_ops and NOTHING else. The pass list
+// below is duplicated in drivers/webgpu/tint_cli/main.cpp, whose --overrides mode
+// makes the identical single-pass omission; the two must stay in lockstep or a baked
+// blob and a runtime translation of the same SPIR-V stop agreeing (RL-027).
+static char *_translate_spirv_to_wgsl(const uint8_t *p_spv_ptr, int p_spv_size, bool p_keep_overrides) {
 	if (p_spv_size < 20 || (p_spv_size % 4) != 0) {
 		return nullptr;
 	}
@@ -768,7 +821,12 @@ static char *_translate_spirv_to_wgsl(const uint8_t *p_spv_ptr, int p_spv_size) 
 	memcpy(spv.ptrw(), p_spv_ptr, p_spv_size);
 
 	// SPIR-V preprocessing pipeline:
-	spv = spirv_preprocess::freeze_spec_constant_ops(spv);
+	// ⚠ The freeze is the ONLY conditional pass, and it stays in the tree whatever
+	// the flag says: it is the fallback when an overrides translation fails, and it
+	// is a hashed input of the tint_convert_cli pipeline id.
+	if (!p_keep_overrides) {
+		spv = spirv_preprocess::freeze_spec_constant_ops(spv);
+	}
 	spv = spirv_preprocess::rewrite_copy_logical(spv);
 	spv = spirv_preprocess::rewrite_terminate_invocation(spv);
 	spv = spirv_preprocess::convert_push_constants_to_uniforms(spv);
@@ -811,12 +869,24 @@ static char *_translate_spirv_to_wgsl(const uint8_t *p_spv_ptr, int p_spv_size) 
 	return out;
 }
 
+// Distinguishes the two translation modes inside the cache key. XOR of a fixed
+// constant is bijective, so it partitions the key space without adding any
+// collision risk the two murmur passes did not already have.
+// ⚠ The mode MUST be part of the key. The same SPIR-V translates to two different
+// WGSL texts under the two modes — one with `@id(N) override` declarations and one
+// with them frozen away — and a shared key would serve whichever ran first to
+// whoever asked second, silently.
+static constexpr uint64_t SPV_WGSL_OVERRIDES_KEY_SALT = 0x9E3779B97F4A7C15ULL;
+
 // Returns a malloc'd null-terminated WGSL string (caller must free), or nullptr on
 // failure. Checks: (1) in-memory cache, (2) Tint translation.
-static char *_spv_to_wgsl_cached(const uint8_t *p_spv_ptr, int p_spv_size) {
+static char *_spv_to_wgsl_cached(const uint8_t *p_spv_ptr, int p_spv_size, bool p_keep_overrides) {
 	uint32_t hash_lo = hash_murmur3_buffer(p_spv_ptr, p_spv_size);
 	uint32_t hash_hi = hash_murmur3_buffer(p_spv_ptr, p_spv_size, 0x9E3779B9);
 	uint64_t spv_hash = ((uint64_t)hash_hi << 32) | hash_lo;
+	if (p_keep_overrides) {
+		spv_hash ^= SPV_WGSL_OVERRIDES_KEY_SALT;
+	}
 
 	// 1. Check in-memory cache (hits on repeated calls within same session).
 	const String *cached = _spv_to_wgsl_cache.getptr(spv_hash);
@@ -837,7 +907,23 @@ static char *_spv_to_wgsl_cached(const uint8_t *p_spv_ptr, int p_spv_size) {
 	_spv_to_wgsl_cache_misses++;
 	_cgperf.count(CGPerfChannel::C_SPV_WGSL_CACHE_MISS);
 
-	char *wgsl_str = _translate_spirv_to_wgsl(p_spv_ptr, p_spv_size);
+	char *wgsl_str = _translate_spirv_to_wgsl(p_spv_ptr, p_spv_size, p_keep_overrides);
+
+	// ⚠ Frozen retry. Preserving spec constants is the newer, less-exercised of the
+	// two modes, so a shader Tint cannot translate with overrides must still reach
+	// the GPU rather than taking the material down — it falls back to exactly the
+	// translation this driver has always produced. The result is cached under the
+	// OVERRIDES key so the failure is paid once per shader, not once per creation;
+	// the counter is how a session says out loud that it silently degraded, because
+	// the fallback is otherwise invisible and the shader simply reverts to the
+	// per-variant specialization fan-out the flag exists to delete.
+	if (!wgsl_str && p_keep_overrides) {
+		wgsl_str = _translate_spirv_to_wgsl(p_spv_ptr, p_spv_size, false);
+		if (wgsl_str) {
+			_cgperf.count(CGPerfChannel::C_OVERRIDE_TRANSLATE_FALLBACK);
+			WARN_PRINT_ONCE("WebGPU: an override-preserving SPIR-V translation failed and fell back to the frozen path. See __cgPerf counters.override_translate_fallback for how many.");
+		}
+	}
 
 	if (wgsl_str) {
 		_spv_to_wgsl_cache[spv_hash] = String(wgsl_str);
@@ -1578,6 +1664,16 @@ void RenderingDeviceDriverWebGPU::_check_capabilities() {
 	capabilities.device_family = DEVICE_UNKNOWN;
 	capabilities.version_major = 1;
 	capabilities.version_minor = 0;
+
+	// Resolve the runtime override-preservation flag once, before any shader can be
+	// created. ⚠ It must be answered exactly once per session: the mode is part of
+	// the SPIR-V→WGSL cache key, so a value that changed mid-session would partition
+	// one shader's translations across two keys and make `has_override_declarations`
+	// depend on creation order.
+	_runtime_overrides_enabled = _webgpu_runtime_overrides_requested();
+	if (_runtime_overrides_enabled) {
+		print_line("WebGPU: runtime override preservation ENABLED — spec constants stay as @id(N) overrides instead of being frozen. Check __cgPerf counters.override_translate_fallback for shaders that had to degrade.");
+	}
 
 	// Query actual device limits.
 	device_limits = WGPU_LIMITS_INIT;
@@ -4758,7 +4854,7 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 			wgsl_str = baked_wgsl[i];
 			baked_wgsl[i] = nullptr; // Ownership moves to the malloc'd-string pipeline below.
 		} else {
-			wgsl_str = _spv_to_wgsl_cached(spv_bytes.ptr(), (int)spv_bytes.size());
+			wgsl_str = _spv_to_wgsl_cached(spv_bytes.ptr(), (int)spv_bytes.size(), _runtime_overrides_enabled);
 		}
 
 		if (wgsl_str == nullptr) {
@@ -9264,7 +9360,11 @@ WGPUShaderModule RenderingDeviceDriverWebGPU::_create_module_with_spec_constants
 	PackedByteArray patched = _patch_spirv_spec_constants(p_spirv, p_constants);
 
 	// Cached SPIR-V → WGSL via Tint (see _spv_to_wgsl_cached above).
-	char *wgsl_str = _spv_to_wgsl_cached(patched.ptr(), (int)patched.size());
+	// ⚠ Always frozen, whatever the flag says, and not a bug: _patch_spirv_spec_constants
+	// has already burned this variant's concrete values into the SPIR-V, so there is no
+	// specialization left to preserve. With the flag ON this function should not be
+	// reached at all for a shader whose WGSL carries overrides — that is the win.
+	char *wgsl_str = _spv_to_wgsl_cached(patched.ptr(), (int)patched.size(), false);
 
 	if (!wgsl_str) {
 		// A failed translation still spent the time. It produces no compile

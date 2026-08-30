@@ -382,6 +382,19 @@ the stamp differs from the editor's build-time copy. Rebuild it with
 `drivers/webgpu/tint_cli/build.sh` after touching anything in
 `drivers/webgpu/tint_cli/pipeline_id_inputs.txt`.
 
+⚠ **`drivers/webgpu/rendering_device_driver_webgpu.cpp` is a pipeline-id input as of 2026-08-30**,
+because the driver defines translation too — the pass order, the conditional freeze behind the
+runtime-overrides flag, and the WGSL rewrites that run *after* Tint. The cost is real and
+deliberate: **every edit to the driver now moves the pipeline id**, so `tint_convert_cli` must be
+rebuilt (3 s) and the project re-exported before any bake-dependent number is quoted.
+⚠ Listing it exposed a latent trap in both SCsubs: the driver `.cpp` **includes** the generated
+stamp header (it publishes the id on `__cgPerf`), so declaring the hash inputs as `File()` nodes
+made SCons scan them, find that include and abort with `Found dependency cycle(s):
+tint_pipeline_id.gen.h -> tint_pipeline_id.gen.h`. There is no cycle in time — the header is
+generated from the file's *content*, not its object — so both SCsubs now depend on an
+`env.Value()` of the inputs' digest (`tint_pipeline_id_builders.pipeline_id_dependency`), which
+expresses exactly that and cannot be defeated by a future input that also includes the header.
+
 ⚠ **Check the stamp rather than trusting the binary's date.** Measured 2026-08-30 at `d0b909c192`:
 `bin/tint_convert_cli` (dated Aug 11) answered `0093378c6126fc53` while both generated headers said
 `cff62efc3cb732f6`, so every WGSL bake would have degraded to SPIR-V-only. The rebuild that fixed it

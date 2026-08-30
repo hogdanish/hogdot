@@ -119,6 +119,13 @@ struct CGPerfChannel {
 		// means some geometry rendered with a stale binding; the paired
 		// `bindgroup_rebind_fail` event names the set index and both shaders.
 		C_BINDGROUP_REBIND_FAIL,
+		// An override-preserving SPIR-V translation failed and fell back to the
+		// frozen path (the runtime-overrides flag only). Nonzero means the flag is
+		// on but did NOT take for that many shaders: each one silently reverts to
+		// the per-variant, per-stage specialization fan-out the flag exists to
+		// delete, so an A/B whose win looks small should read this first. Zero with
+		// the flag on is what "the prototype held" looks like.
+		C_OVERRIDE_TRANSLATE_FALLBACK,
 		COUNTER_COUNT, // Must stay last.
 	};
 
@@ -212,7 +219,7 @@ struct CGPerfChannel {
 	"device_lost\nuncaptured_error\nrender_pipelines_created\n" \
 	"compute_pipelines_created\nshader_modules_created\n" \
 	"bindgroup_layouts_created\nbindgroups_created\nencoder_splits\n" \
-	"translate_ms\nbindgroup_rebind_fail"
+	"translate_ms\nbindgroup_rebind_fail\noverride_translate_fallback"
 
 // Drift guard. The JS side sizes its heap views from `names.length`, so a name
 // list that disagrees with its enum reads short (missing counters) or past the

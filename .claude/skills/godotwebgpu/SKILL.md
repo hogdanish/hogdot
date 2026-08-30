@@ -44,6 +44,26 @@ numbers, counts and API signatures must be re-derived. `./hogdot/port-surface.sh
   rewrite push-constant blocks to the binding-120 storage buffer, depth-image flags, position-Y negation,
   point-size stripping) → **Tint** emits WGSL. `wgsl_precompile.py` moves the translation to build time
   using WGSL `override` constants for Godot's specialization constants.
+  ⚠ **`freeze_spec_constant_ops` is CONDITIONAL as of 2026-08-30** — the runtime-overrides
+  prototype. Default OFF, so every runtime translation freezes exactly as it always has. Turn it on
+  per session with **`?webgpu_overrides`** in the URL or the project setting
+  **`rendering/rendering_device/webgpu_runtime_overrides`** (web-only driver ⇒ never in the editor's
+  Project Settings dialog; write the line into `project.godot` by hand). With it on the freeze is
+  skipped, Tint emits `@id(N) override`, `has_override_declarations` goes true for
+  runtime-translated shaders, and `_create_module_with_spec_constants`'s per-variant-per-stage
+  fan-out — **58% of every shader module the driver creates** — stops existing for them.
+  ⚠ **"Does Tint accept live spec constants" was never an open question**: `tint_convert_cli
+  --overrides` has skipped this one pass and run the identical remaining twelve passes and the
+  identical `tint_wrapper_spirv_to_wgsl` since the WGSL bake shipped, so every WGSL blob in a baked
+  pck is the evidence. What is unproven is the *runtime* taking that path for shaders the baker
+  never saw — hence the flag.
+  ⚠ **The mode is part of the `_spv_to_wgsl_cached` key** (a fixed XOR salt). The same SPIR-V
+  translates to two different WGSL texts under the two modes; a shared key would serve whichever
+  ran first to whoever asked second, silently. An overrides translation that fails **retries
+  frozen** and caches the result under the overrides key, bumping
+  `counters.override_translate_fallback` — nonzero means the flag did not take for that many
+  shaders and each reverted to the fan-out, which is the first number to read when an A/B win looks
+  small.
   ⚠ A Tint internal error (`TINT_ASSERT`/`TINT_ICE`, e.g. a `.gdshader` switch fallthrough) used to
   abort the wasm module and kill the tab. Since RL-053 it is contained: vendored patch 0008 adds a
   global ICE handler and `tint_wrapper.cpp` longjmps back, so it reports as an ordinary translation
@@ -219,7 +239,7 @@ unchanged and byte-compatible.
 ```
 __cgPerf.version        1
 __cgPerf.build          { engine_commit, pipeline_id, threads, adapter{vendor,architecture,device,description} }
-__cgPerf.counters       live getter over the heap; 17 monotonic doubles (see the header's Counter enum)
+__cgPerf.counters       live getter over the heap; 18 monotonic doubles (see the header's Counter enum)
 __cgPerf.frames         live getter → { head, cap: 3600, stride: 13, count, buf: Float64Array }
 __cgPerf.frames_schema  13 names, fixed order, index == column
 __cgPerf.compiles       plain array, cap 512, { t, frame, kind: render|compute|module, label, ms, translate_ms, baked }

@@ -11,6 +11,16 @@
 #   a new line here; the vendored trees themselves are deliberately not hashed.
 drivers/webgpu/spirv_preprocess.h
 drivers/webgpu/spirv_preprocess.cpp
+# The driver itself defines translation too: it owns the pass ORDER, the
+# conditional freeze behind the runtime-overrides flag, and the WGSL rewrites
+# (_apply_common_wgsl_passes, _rewrite_depth_texture_samples) that run after Tint
+# and change the emitted text. Without it listed, a runtime-vs-bake divergence
+# introduced here is invisible to the stale-CLI guard — which is the one check
+# standing between a mismatched WGSL blob and a silent wrong render.
+# ⚠ The cost is real and deliberate: every edit to this file now moves the
+# pipeline id, so tint_convert_cli must be rebuilt (3 s) and the project
+# re-exported before any bake-dependent number is quoted.
+drivers/webgpu/rendering_device_driver_webgpu.cpp
 drivers/webgpu/tint_wrapper.h
 drivers/webgpu/tint_wrapper.cpp
 drivers/webgpu/tint_cli/main.cpp

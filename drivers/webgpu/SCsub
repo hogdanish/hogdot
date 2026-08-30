@@ -762,12 +762,7 @@ env.drivers_sources += tint_obj
 import tint_pipeline_id_builders
 
 pipeline_id_inputs = File("#drivers/webgpu/tint_cli/pipeline_id_inputs.txt")
-pipeline_id_deps = [pipeline_id_inputs]
-with open(pipeline_id_inputs.abspath, encoding="utf-8") as inputs_file:
-    for input_line in inputs_file:
-        input_line = input_line.strip()
-        if input_line and not input_line.startswith("#"):
-            pipeline_id_deps.append(File("#" + input_line))
+pipeline_id_deps = tint_pipeline_id_builders.pipeline_id_dependency(env_webgpu, pipeline_id_inputs)
 env_webgpu.CommandNoCache(
     "tint_pipeline_id.gen.h",
     pipeline_id_deps,
