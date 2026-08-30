@@ -39,7 +39,23 @@
 
 #include <emscripten.h>
 
+// Emscripten does not scan EM_ASM bodies for JS library symbols. Keep the
+// conversion helper used by the sample-registration telemetry alive in builds
+// where the WebGPU driver is not linked.
+EM_JS_DEPS(godot_web_audio_cgperf_deps, "$UTF8ToString");
+
 AudioDriverWeb::AudioContext AudioDriverWeb::audio_context;
+
+static void _record_sample_registration(const String &p_stream_identifier, double p_stream_seconds, int p_decoded_frames, double p_duration_ms) {
+	const String detail = vformat("stream=%s stream_seconds=%.3f decoded_frames=%d duration_ms=%.3f", p_stream_identifier, p_stream_seconds, p_decoded_frames, p_duration_ms);
+	const CharString detail_utf8 = detail.utf8();
+	MAIN_THREAD_EM_ASM({
+		var g = (typeof window != 'undefined') ? window : globalThis;
+		if (!g.__cgPerf || typeof g.__cgPerf._event != 'function') {
+			return;
+		}
+		g.__cgPerf._event('audio_sample_register', UTF8ToString($0)); }, detail_utf8.get_data());
+}
 
 bool AudioDriverWeb::is_available() {
 	return godot_audio_is_available() != 0;
@@ -216,6 +232,15 @@ void AudioDriverWeb::register_sample(const Ref<AudioSample> &p_sample) {
 	ERR_FAIL_COND_MSG(p_sample.is_null(), "Parameter p_sample is null.");
 	ERR_FAIL_COND_MSG(p_sample->stream.is_null(), "Parameter p_sample->stream is null.");
 
+	String stream_identifier = p_sample->stream->get_path();
+	if (stream_identifier.is_empty()) {
+		stream_identifier = "instance:" + itos(p_sample->stream->get_instance_id());
+	}
+	// This brackets the real synchronous registration path: stream decode and
+	// mix, channel deinterleave, and the sync-proxied JS AudioBuffer creation and
+	// copy. A clock difference is valid in both threaded and non-threaded builds.
+	const double registration_begin_ms = emscripten_get_now();
+
 	String loop_mode;
 	switch (p_sample->loop_mode) {
 		case AudioSample::LoopMode::LOOP_DISABLED: {
@@ -262,6 +287,9 @@ void AudioDriverWeb::register_sample(const Ref<AudioSample> &p_sample) {
 			loop_mode.utf8().get_data(),
 			p_sample->loop_begin,
 			p_sample->loop_end);
+
+	const double registration_duration_ms = emscripten_get_now() - registration_begin_ms;
+	_record_sample_registration(stream_identifier, length, frames_total, registration_duration_ms);
 }
 
 void AudioDriverWeb::unregister_sample(const Ref<AudioSample> &p_sample) {
