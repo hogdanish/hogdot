@@ -981,6 +981,22 @@ const LocalVector<int> &ShaderRD::get_group_to_variants(int p_group) const {
 	return group_to_variant_map[p_group];
 }
 
+void ShaderRD::set_group_excluded_from_baking(int p_group, bool p_excluded) {
+	ERR_FAIL_INDEX(p_group, group_enabled.size());
+
+	if (p_excluded) {
+		groups_excluded_from_baking.insert(p_group);
+	} else {
+		// Stated both ways on every bake, so a second export in the same session to a
+		// target that *does* have the feature is not silently starved of the group.
+		groups_excluded_from_baking.erase(p_group);
+	}
+}
+
+bool ShaderRD::is_group_excluded_from_baking(int p_group) const {
+	return groups_excluded_from_baking.has(p_group);
+}
+
 const String &ShaderRD::get_name() const {
 	return name;
 }

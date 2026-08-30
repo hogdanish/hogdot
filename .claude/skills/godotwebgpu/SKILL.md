@@ -67,6 +67,10 @@ fly behind a cache.
 - **Mobile renderer is auto-selected**: Forward+ needs ≥48 sampled textures per stage, most WebGPU
   implementations report 16. This is *why* CommonGrounds is a Mobile-renderer consumer.
 - **Timestamp queries are optional** — gated on the `timestamp-query` feature, with dummy fallback.
+- **No `shader-f16`** — `has_feature(SUPPORTS_HALF_FLOAT)` is false unconditionally, so forward-mobile
+  runs the FP32 shader group and the export baker skips the FP16 one
+  (`ShaderBakerExportPluginPlatformWebGPU::supports_half_float()`; ⚠ the two flip together, and that
+  second copy was 40.3 MB of CommonGrounds' baked shaders — **`build-export`**).
 
 ## Binding a depth texture (all measured against Dawn in Chrome 151, 2026-08-11)
 

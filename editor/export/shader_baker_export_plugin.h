@@ -45,6 +45,14 @@ class ShaderBakerExportPluginPlatform : public RefCounted {
 public:
 	virtual RenderingShaderContainerFormat *create_shader_container_format(const Ref<EditorExportPlatform> &p_platform, const Ref<EditorExportPreset> &p_preset) = 0;
 	virtual bool matches_driver(const String &p_driver) = 0;
+
+	// Whether this export target's rendering driver can ever report
+	// RD::SUPPORTS_HALF_FLOAT. Answered by the platform rather than compared against a
+	// driver name at the call site, so the baker's view and the driver's own
+	// has_feature() cannot drift apart. True for every driver but one, hence the
+	// default — see ShaderBakerExportPluginPlatformWebGPU.
+	virtual bool supports_half_float() const { return true; }
+
 	virtual ~ShaderBakerExportPluginPlatform() {}
 };
 
@@ -75,11 +83,22 @@ protected:
 	String shader_cache_renderer_name;
 	String shader_cache_export_path;
 	RBSet<String> shader_paths_processed;
+	// The `<shader name>/<group sha256>` directories of every group skipped this export.
+	// ⚠ Skipping the bake is not enough on its own: `file_cache` is an append-only
+	// ledger of everything ever baked into this export path, and _end_customize_resources()
+	// re-packs any listed file it did not bake this run straight off disk — so a group
+	// dropped here would keep shipping from the previous export's leftovers forever.
+	// Matching on the group directory (not the per-version file) also covers versions
+	// that existed in an earlier export and no longer do.
+	RBSet<String> shader_group_dirs_excluded;
 	HashMap<String, WorkResult> shader_work_results;
 	Mutex shader_work_results_mutex;
 	LocalVector<ShaderGroupItem> shader_group_items;
 	RenderingShaderContainerFormat *shader_container_format = nullptr;
 	String shader_container_driver;
+	// The matched platform's answer, captured in _initialize_container_format() because
+	// the feature block that reads it runs later in _begin_customize_resources().
+	bool shader_container_half_float = true;
 	Vector<Ref<ShaderBakerExportPluginPlatform>> platforms;
 	uint64_t customization_configuration_hash = 0;
 	uint32_t tasks_processed = 0;
@@ -92,6 +111,7 @@ protected:
 	virtual bool _is_active(const Vector<String> &p_features) const;
 	virtual bool _initialize_container_format(const Ref<EditorExportPlatform> &p_platform, const Ref<EditorExportPreset> &p_preset);
 	String _get_registered_platform_drivers() const;
+	bool _is_shader_path_excluded(const String &p_cache_path) const;
 	virtual void _cleanup_container_format();
 	virtual bool _initialize_cache_directory();
 	virtual bool _begin_customize_resources(const Ref<EditorExportPlatform> &p_platform, const Vector<String> &p_features) override;

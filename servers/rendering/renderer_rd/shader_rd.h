@@ -64,6 +64,13 @@ private:
 	Vector<uint32_t> variant_to_group;
 	HashMap<int, LocalVector<int>> group_to_variant_map;
 	Vector<bool> group_enabled;
+	// Bake-time only, and never read by the rendering path. A group's *enablement* is
+	// decided from the rendering device the engine is running on right now (see the
+	// VariantDefine default_enabled flags), which says nothing about the device an
+	// export will run on — so the shader baker needs a second, export-target-shaped
+	// answer that cannot disturb the editor's own rendering by disabling a group it is
+	// still drawing with. See set_group_excluded_from_baking().
+	HashSet<int> groups_excluded_from_baking;
 
 	Vector<RD::PipelineImmutableSampler> immutable_samplers;
 	Vector<uint64_t> dynamic_buffers;
@@ -242,6 +249,13 @@ public:
 	bool is_group_enabled(int p_group) const;
 	int64_t get_group_count() const;
 	const LocalVector<int> &get_group_to_variants(int p_group) const;
+
+	// Groups the shader baker must skip, stated per export target by the renderer from
+	// the feature bits the baker asked for. Purely additive to the bake: it changes
+	// neither which groups this engine compiles nor which variants it selects, so it is
+	// safe to set while the editor is rendering.
+	void set_group_excluded_from_baking(int p_group, bool p_excluded);
+	bool is_group_excluded_from_baking(int p_group) const;
 
 	const String &get_name() const;
 

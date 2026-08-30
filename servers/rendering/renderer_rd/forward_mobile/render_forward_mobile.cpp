@@ -424,7 +424,14 @@ void RenderForwardMobile::enable_features(BitField<FeatureBits> p_feature_bits) 
 		scene_shader.enable_fp32_shader_group();
 	}
 
-	if (p_feature_bits.has_flag(FEATURE_FP16_BIT)) {
+	// Enabling is only half the answer: state the FP16 verdict both ways, because a
+	// group the *editor's* rendering device enabled by default is otherwise baked into
+	// an export whose target can never select it. Excluding it from the bake leaves the
+	// editor's own rendering untouched — see ShaderRD::set_group_excluded_from_baking().
+	const bool bake_fp16 = p_feature_bits.has_flag(FEATURE_FP16_BIT);
+	scene_shader.set_fp16_shader_groups_baked(bake_fp16);
+
+	if (bake_fp16) {
 		scene_shader.enable_fp16_shader_group();
 	}
 

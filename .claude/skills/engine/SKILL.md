@@ -118,6 +118,15 @@ FILL: the subpass structure proper. What the port established (2026-08-06, slice
 - ⚠ **`VIEWPORT_RENDER_INFO_DRAW_CALLS_IN_FRAME` is not draw calls on forward-mobile** — the
   renderer fills it with `instances->size()` (`render_forward_mobile.cpp:965`). Batching is
   invisible to it; nothing script-visible counts real draws.
+- **The scene shader is four groups, and which one is *enabled* is a property of the machine, not
+  the project.** `SHADER_GROUP_{FP32,FP32_MULTIVIEW,FP16,FP16_MULTIVIEW}` are declared in
+  `SceneShaderForwardMobile::init()` with `default_enabled = (use_fp16 == fp16)`, where `use_fp16 =
+  RD::has_feature(SUPPORTS_HALF_FLOAT)` — so a Metal or Vulkan editor boots with FP16 on and FP32
+  *off*, and a WebGPU runtime the reverse. ⚠ **Anything reasoning about "which shaders exist" across
+  a device boundary — the export shader baker above all — must not read the local enablement.**
+  `ShaderRD::enable_group()` deliberately has no counterpart: disabling one mid-session starves every
+  version created afterwards, and the editor creates versions while it exports. hogdot's bake gate is
+  the separate `ShaderRD::set_group_excluded_from_baking()` for exactly that reason — **`build-export`**.
 - **Within a depth bucket the opaque render list runs in reverse creation order** (probe-verified
   2026-08-10 on WebGPU). The batch representative — whose pipeline specialization the whole merged
   draw uses — is whichever eligible instance that ordering lists first.

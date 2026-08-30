@@ -984,6 +984,18 @@ void SceneShaderForwardMobile::enable_fp16_shader_group() {
 	}
 }
 
+void SceneShaderForwardMobile::set_fp16_shader_groups_baked(bool p_baked) {
+	// The FP16 groups carry a whole second copy of the scene shader — on the order of
+	// 38 MiB of baked containers for a real project — and a runtime only ever reads
+	// one of the two: SceneShaderForwardMobile::init() picks between them from
+	// RD::SUPPORTS_HALF_FLOAT on the device it boots on. An export whose target driver
+	// can never report that feature must not ship them, and enable_features() alone
+	// cannot achieve it, because the *editor's* device (Metal, and most Vulkan drivers)
+	// already enabled the FP16 group by default before any export began.
+	shader.set_group_excluded_from_baking(SHADER_GROUP_FP16, !p_baked);
+	shader.set_group_excluded_from_baking(SHADER_GROUP_FP16_MULTIVIEW, !p_baked);
+}
+
 void SceneShaderForwardMobile::enable_multiview_shader_group() {
 	if (shader.is_group_enabled(SHADER_GROUP_FP32)) {
 		shader.enable_group(SHADER_GROUP_FP32_MULTIVIEW);

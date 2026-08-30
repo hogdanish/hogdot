@@ -384,6 +384,7 @@ public:
 	uint32_t get_pipeline_compilations(RSE::PipelineSource p_source);
 	void enable_fp32_shader_group();
 	void enable_fp16_shader_group();
+	void set_fp16_shader_groups_baked(bool p_baked);
 	void enable_multiview_shader_group();
 	bool is_multiview_shader_group_enabled() const;
 };

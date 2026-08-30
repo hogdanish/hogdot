@@ -81,6 +81,7 @@ bool ShaderBakerExportPlugin::_initialize_container_format(const Ref<EditorExpor
 		if (platform->matches_driver(shader_container_driver)) {
 			shader_container_format = platform->create_shader_container_format(p_platform, p_preset);
 			ERR_FAIL_NULL_V_MSG(shader_container_format, false, "Unable to create shader container format for the export platform.");
+			shader_container_half_float = platform->supports_half_float();
 			return true;
 		}
 	}
@@ -114,6 +115,10 @@ String ShaderBakerExportPlugin::_get_registered_platform_drivers() const {
 		}
 	}
 	return matched.is_empty() ? String("(none)") : String(", ").join(matched);
+}
+
+bool ShaderBakerExportPlugin::_is_shader_path_excluded(const String &p_cache_path) const {
+	return shader_group_dirs_excluded.has(p_cache_path.get_base_dir());
 }
 
 void ShaderBakerExportPlugin::_cleanup_container_format() {
@@ -177,9 +182,17 @@ bool ShaderBakerExportPlugin::_begin_customize_resources(const Ref<EditorExportP
 		renderer_features.set_flag(RenderingShaderLibrary::FEATURE_VRS_BIT);
 	}
 
-	// Both FP16 and FP32 variants should be included.
-	renderer_features.set_flag(RenderingShaderLibrary::FEATURE_FP16_BIT);
+	// FP32 always; FP16 only where the export target's driver could ever report
+	// RD::SUPPORTS_HALF_FLOAT. Mainline includes both variants because it cannot know
+	// which the target device will pick, but a target that answers "never" — today only
+	// WebGPU, at RenderingDeviceDriverWebGPU::has_feature(SUPPORTS_HALF_FLOAT) — pays
+	// for a second full copy of the scene shader that its runtime will never read
+	// (measured for CommonGrounds: 40,313,384 bytes of a 86,819,845-byte bake). If f16
+	// is ever enabled for WebGPU, that has_feature() flips and this comes back with it.
 	renderer_features.set_flag(RenderingShaderLibrary::FEATURE_FP32_BIT);
+	if (shader_container_half_float) {
+		renderer_features.set_flag(RenderingShaderLibrary::FEATURE_FP16_BIT);
+	}
 
 	RendererSceneRenderRD::get_singleton()->enable_features(renderer_features);
 
@@ -291,8 +304,10 @@ void ShaderBakerExportPlugin::_end_customize_resources() {
 		if (cache_list_access.is_valid()) {
 			String cache_list_line;
 			while (cache_list_line = cache_list_access->get_line(), !cache_list_line.is_empty()) {
-				// Only add if it wasn't already added.
-				if (!shader_paths_processed.has(cache_list_line)) {
+				// Only add if it wasn't already added, and never re-add a group this
+				// export deliberately skipped — the line stays in the ledger so a later
+				// export to a target that *can* use the group still finds it.
+				if (!shader_paths_processed.has(cache_list_line) && !_is_shader_path_excluded(cache_list_line)) {
 					PackedByteArray cache_file_bytes = FileAccess::get_file_as_bytes(shader_cache_export_path.path_join(cache_list_line));
 					if (!cache_file_bytes.is_empty()) {
 						add_file(shader_cache_user_dir.path_join(cache_list_line), cache_file_bytes, false);
@@ -311,6 +326,7 @@ void ShaderBakerExportPlugin::_end_customize_resources() {
 	}
 
 	shader_paths_processed.clear();
+	shader_group_dirs_excluded.clear();
 	shader_work_results.clear();
 	shader_group_items.clear();
 
@@ -421,6 +437,16 @@ void ShaderBakerExportPlugin::_customize_shader_version(ShaderRD *p_shader, RID 
 
 	RBSet<uint32_t> groups_to_compile;
 	for (int64_t i = 0; i < group_count; i++) {
+		// ⚠ Enablement is not enough on its own. A group is enabled by default from the
+		// device *this editor* is running on, so an editor whose driver has a feature
+		// the export target lacks arrives here with the target's dead group already on;
+		// enable_features() above can only add. The renderer marks those groups when it
+		// is told which features the target has — see RenderForwardMobile::enable_features().
+		if (p_shader->is_group_excluded_from_baking(i)) {
+			shader_group_dirs_excluded.insert(p_shader->version_get_cache_file_relative_path(p_version, i, shader_container_driver).get_base_dir());
+			continue;
+		}
+
 		if (!p_shader->is_group_enabled(i)) {
 			continue;
 		}

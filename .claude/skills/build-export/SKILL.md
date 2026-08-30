@@ -297,6 +297,35 @@ the stamp differs from the editor's build-time copy. Rebuild it with
 (procedural `ShaderMaterial`s) still pay the full path — only shaders visible at export time
 can bake. Verification and numbers: `feature-shader-baker.md`.
 
+### The bake ships only the shader groups the target can select (2026-08-30)
+
+A WebGPU export used to carry **both** copies of `SceneForwardMobileShaderRD` — measured on
+CommonGrounds, **40,313,384 of 86,819,845 baked bytes** (≈10.9 MB of a 75 MB first load once
+zstd'd) that the browser never reads, because
+`RenderingDeviceDriverWebGPU::has_feature(SUPPORTS_HALF_FLOAT)` is false and a WebGPU runtime
+therefore selects the FP32 group. The gate is the platform's own answer, never a driver-name
+comparison: `ShaderBakerExportPluginPlatform::supports_half_float()`, `false` only in the WebGPU
+platform. ⚠ **That override and the driver's `has_feature()` are one decision** — enabling f16
+for WebGPU means flipping both, or the export ships no FP16 shaders for a runtime asking for them.
+
+⚠ **Withholding `FEATURE_FP16_BIT` from `enable_features()` saves nothing on its own.** Group
+enablement comes from the *editor's* device (`default_enabled = (use_fp16 == fp16)` in
+`SceneShaderForwardMobile::init()`), so a Metal editor — or a Vulkan one on any fp16-capable GPU,
+CI's lavapipe included — arrives with FP16 already on and FP32 *off*, and `enable_features()` only
+adds. The renderer states the verdict both ways into `ShaderRD::set_group_excluded_from_baking()`,
+a bake-time-only flag. ⚠ Not a `disable_group()`: the editor mints shader versions *during* the
+export (`_customize_scene` builds Label3D/Sprite3D materials) and would starve them.
+
+⚠ **`file_cache` puts skipped bytes straight back** — `_end_customize_resources()` re-packs every
+listed path it did not bake this run, off disk; that is how incremental exports keep untouched
+shaders. Skipped groups are excluded by their `<shader>/<group sha256>` directory too, or the
+change measures as a no-op. Stale FP16 files stay in `.godot/exported/<id>/shader_baker/…`
+unpacked; delete the directory if the disk matters.
+
+No cache invalidation: `ShaderRD::_initialize_cache()` hashes a group from `base_sha256` +
+`general_defines` + the group id + only *that* group's variant defines + the dynamic buffers, so
+the FP32 sha256 is byte-identical across the change. Full record: `feature-shader-baker.md` § step 3.
+
 ## Linux editor (linuxbsd) — first built 2026-08-27
 
 The first linuxbsd editor build ever attempted (CommonGrounds CI spike 6.A.1) succeeded on

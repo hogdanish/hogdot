@@ -70,4 +70,13 @@ class ShaderBakerExportPluginPlatformWebGPU : public ShaderBakerExportPluginPlat
 public:
 	virtual RenderingShaderContainerFormat *create_shader_container_format(const Ref<EditorExportPlatform> &p_platform, const Ref<EditorExportPreset> &p_preset) override;
 	virtual bool matches_driver(const String &p_driver) override;
+
+	// The one platform that can never take the FP16 shader groups:
+	// RenderingDeviceDriverWebGPU::has_feature(SUPPORTS_HALF_FLOAT) returns false
+	// unconditionally, because WebGPU's shader-f16 extension is not reliably available
+	// and the driver deliberately keeps f16 out of the SPIR-V it generates. ⚠ Enabling
+	// f16 for WebGPU means flipping that has_feature() **and** this override together —
+	// they are one decision, and the export would otherwise ship no FP16 shaders for a
+	// runtime that had started asking for them.
+	virtual bool supports_half_float() const override { return false; }
 };
