@@ -189,7 +189,7 @@ __cgPerf.frames         live getter → { head, cap: 3600, stride: 13, count, bu
 __cgPerf.frames_schema  13 names, fixed order, index == column
 __cgPerf.compiles       plain array, cap 512, { t, frame, kind: render|compute|module, label, ms, baked }
 __cgPerf.events         plain array, cap 256, { t, frame, type, detail, count, t_last, frame_last }
-__cgPerf.ts             { supported, requested, degraded_frames } — still off; chunk 3 owns it
+__cgPerf.ts             live getter → { supported, requested, degraded_frames } — OPT-IN, see below
 ```
 Oldest→newest row `i`, field `f`: `buf[((head - count + i) % cap) * stride + f]`.
 
@@ -252,7 +252,32 @@ translates differently from the pck it was fed.
   is not. ⚠ `WGFence::signal_time_ms` is stamped **before** the `freed` check in
   `_fence_work_done_callback`, which deletes the fence and returns.
 
+### GPU timestamp queries — opt-in, and how to judge the numbers (added 2026-08-30, chunk 3)
 
+Timestamp readback is **off by default and always will be until `degraded_frames` says otherwise.**
+Turn it on for one session with **`?cgperf_ts`** in the URL (no re-export needed — that is the whole
+point of the flag), or with the project setting **`rendering/rendering_device/webgpu_timestamps`**.
+⚠ That setting is registered from the web-only driver, so **it never appears in the editor's Project
+Settings dialog** — write the line into `project.godot` by hand.
+
+- **Why it was off.** The imported driver hard-disabled it: a stuck `mapAsync` on the readback buffer
+  produces `buffer used in submit while mapped` validation errors that corrupt rendering. ⚠ Reading
+  the code says the hazard is **already defended three times over**, all landed in the same import
+  commit (`813189e2c4`): `command_buffer_end` drains → unmaps → drains → re-checks and **skips the
+  resolve entirely** on a still-stuck buffer, so the copy is never encoded;
+  `command_queue_execute_and_present` never issues a second `mapAsync` while one is outstanding; and
+  `_timestamp_readback_callback` discards stale callbacks by generation. **That is a reading, not a
+  result** — none of it has ever been exercised, which is why the flip is opt-in rather than default.
+- ⚠ **`__cgPerf.ts.degraded_frames` is the number that decides whether a GPU timing is real.** It
+  counts every resolve the skip path threw away. While it climbs, rendering stays correct and the
+  timings quietly stop advancing — the failure mode is *stale numbers*, not an error. A nonzero value
+  means the run's GPU times are incomplete and a consumer must say so. A stuck buffer also costs one
+  extra `wgpuInstanceProcessEvents` per pool per frame for the rest of the session; that is the one
+  real cost of the flip, and the counter is how it gets caught.
+- The skip path now also emits a `WARN_PRINT_ONCE`. It was previously silent in every tier.
+- `ts` is a **live getter** over the heap for the same reason `counters` is: `degraded_frames` is
+  bumped by a plain `double` store from C++ on a path that can run every frame, so an `EM_ASM` there
+  would put a JS crossing on the per-frame path in exactly the state where the driver is struggling.
 
 ## Build and selection
 

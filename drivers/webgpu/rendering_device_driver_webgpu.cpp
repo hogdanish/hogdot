@@ -32,6 +32,7 @@
 
 #include "rendering_device_driver_webgpu.h"
 
+#include "core/config/project_settings.h"
 #include "core/templates/hash_map.h"
 #include "core/templates/hashfuncs.h"
 #include "core/version.h"
@@ -131,6 +132,7 @@ static void _cgperf_install() {
 		var stride = $4;
 		var counterNames = UTF8ToString($5).split('\n');
 		var eventCap = $7;
+		var tsPtr = $8;
 		// Function DECLARATIONS, not `x = function(){}` expressions: clang-format
 		// strips the semicolon off an assigned function expression, leaving the JS
 		// dependent on automatic semicolon insertion.
@@ -196,6 +198,19 @@ static void _cgperf_install() {
 			}
 			return o;
 		}
+		// GPU timestamp-query state. A getter for the same reason counters is
+		// one: `degraded_frames` is bumped by a plain double store from C++ on a
+		// path that can run every frame, so nothing may cache what it reads.
+		// ⚠ Indices are literal; CGPerfChannel::TS_STAT_COUNT static_asserts
+		// against them.
+		function cgperfReadTs() {
+			var v = Module['HEAPF64'].subarray(tsPtr >> 3, (tsPtr >> 3) + 3);
+			var o = {};
+			o.supported = (v[0] != 0);
+			o.requested = (v[1] != 0);
+			o.degraded_frames = v[2];
+			return o;
+		}
 		function cgperfReadFrames() {
 			var head = Module['HEAPU32'][headPtr >> 2];
 			var n = (head < cap) ? head : cap;
@@ -214,10 +229,6 @@ static void _cgperf_install() {
 		ch.frames_schema_note = 'slots 2..6 are driver-local creation counts, not the five PIPELINE_COMPILATIONS monitors (deviation D-3)';
 		ch.compiles = [];
 		ch.events = [];
-		ch.ts = {};
-		ch.ts.supported = false;
-		ch.ts.requested = false;
-		ch.ts.degraded_frames = 0;
 		ch._bump = cgperfBump;
 		ch._event = cgperfPushEvent;
 		// ⚠ Getters, not cached typed-array views: -sALLOW_MEMORY_GROWTH=1
@@ -233,7 +244,11 @@ static void _cgperf_install() {
 		framesDesc.enumerable = true;
 		framesDesc.get = cgperfReadFrames;
 		Object.defineProperty(ch, 'frames', framesDesc);
-		g.__cgPerf = ch; }, (int)(intptr_t)_cgperf.frames, (int)(intptr_t)_cgperf.counters, (int)(intptr_t)&_cgperf.frame_head, (int)CGPerfChannel::FRAME_CAP, (int)CGPerfChannel::FRAME_STRIDE, CGPERF_COUNTER_NAMES_JOINED, CGPERF_FRAME_SCHEMA_JOINED, (int)CGPerfChannel::EVENT_CAP);
+		var tsDesc = {};
+		tsDesc.enumerable = true;
+		tsDesc.get = cgperfReadTs;
+		Object.defineProperty(ch, 'ts', tsDesc);
+		g.__cgPerf = ch; }, (int)(intptr_t)_cgperf.frames, (int)(intptr_t)_cgperf.counters, (int)(intptr_t)&_cgperf.frame_head, (int)CGPerfChannel::FRAME_CAP, (int)CGPerfChannel::FRAME_STRIDE, CGPERF_COUNTER_NAMES_JOINED, CGPERF_FRAME_SCHEMA_JOINED, (int)CGPerfChannel::EVENT_CAP, (int)(intptr_t)_cgperf.ts);
 }
 
 // Push one record onto window.__cgPerf.compiles. Not on the per-frame path: a
@@ -282,6 +297,40 @@ static void _cgperf_push_event(const char *p_type, const char *p_detail, uint32_
 			return;
 		}
 		g.__cgPerf._event(UTF8ToString($0), UTF8ToString($1), $2); }, p_type, p_detail, (int)p_frame);
+}
+
+// Is GPU timestamp-query readback requested for this session?
+//
+// ⚠ Deliberately OPT-IN, and that is the whole reason the flip ships as its own
+// commit. Readback was hard-disabled in the imported driver because a stuck
+// mapAsync produces "buffer used in submit while mapped" validation errors that
+// corrupt rendering; see _check_capabilities for why that disable is now
+// believed to be belt-and-braces over a mitigation that was written alongside
+// it. Nothing on that path has ever been exercised, so "the guards work" is a
+// reading and not a result — and an instrument does not change a rendering
+// decision without being asked to.
+//
+// The URL flag is the primary gate on purpose: it needs no re-export to try,
+// which is the only thing that makes trying it cheap. The project setting is
+// the fallback for a run with no query string. ⚠ The setting is registered from
+// a web-only driver, so it never appears in the editor's Project Settings
+// dialog — write the line into project.godot by hand, or use the URL.
+static bool _cgperf_timestamps_requested() {
+	const int from_url = MAIN_THREAD_EM_ASM_INT({
+		var g = (typeof window != 'undefined') ? window : globalThis;
+		if (!g.location || !g.location.search) {
+			return 0;
+		}
+		var p = new URLSearchParams(g.location.search);
+		if (p.has('cgperf_ts')) {
+			return 1;
+		}
+		return 0;
+	});
+	if (from_url != 0) {
+		return true;
+	}
+	return GLOBAL_DEF("rendering/rendering_device/webgpu_timestamps", false);
 }
 
 // Forward declaration for timestamp readback callback (defined below command_timestamp_query_pool_reset).
@@ -1482,17 +1531,48 @@ void RenderingDeviceDriverWebGPU::_check_capabilities() {
 	}
 
 	// Check for timestamp query support.
-	// NOTE: Timestamp query readback is disabled for now. The async mapAsync
-	// on the readback buffer can get permanently stuck in "mapping pending" state
-	// when frames are slow (emdawnwebgpu does not reliably cancel pending maps via
-	// wgpuBufferUnmap). This causes "buffer used in submit while mapped" validation
-	// errors that corrupt rendering. GPU timestamp profiling is sacrificed — the
-	// profiler reports "gpu=N/A" — but rendering correctness is preserved.
-	// TODO: Re-enable once emdawnwebgpu properly implements unmap-cancels-pending-map.
+	//
+	// Timestamp readback used to be hard-disabled here, for this recorded reason:
+	// "the async mapAsync on the readback buffer can get permanently stuck in
+	// 'mapping pending' state when frames are slow (emdawnwebgpu does not reliably
+	// cancel pending maps via wgpuBufferUnmap). This causes 'buffer used in submit
+	// while mapped' validation errors that corrupt rendering."
+	//
+	// That hazard is defended in three independent places, all of which arrived in
+	// the same commit as the disable:
+	//   1. command_buffer_end drains pending callbacks, tries wgpuBufferUnmap,
+	//      drains again, re-checks, and SKIPS this frame's resolve+copy entirely
+	//      on a still-stuck buffer — so the copy is never encoded and the
+	//      validation error cannot be reached;
+	//   2. command_queue_execute_and_present never issues a second mapAsync while
+	//      one is outstanding;
+	//   3. _timestamp_readback_callback discards stale callbacks by generation and
+	//      handles a pool freed while a map was in flight.
+	//
+	// So the disable is belt-and-braces over a mitigation the same author wrote,
+	// not a hazard left unguarded. But none of it has ever been exercised, and a
+	// reading of the code is not a result — so the flip is OPT-IN, per session,
+	// via `?cgperf_ts` in the URL or the project setting. With it off the driver
+	// behaves exactly as it always has and the profiler still reports "gpu=N/A".
+	//
+	// ⚠ With it ON, read window.__cgPerf.ts.degraded_frames before trusting a
+	// single GPU number: it counts the resolves guard 1 had to skip, and while it
+	// is climbing the timings are stale, silently. That counter is the instrument
+	// that decides whether this flag can ever become the default.
 	timestamp_supported = false;
+	const bool ts_requested = _cgperf_timestamps_requested();
+	_cgperf.ts[CGPerfChannel::TS_REQUESTED] = ts_requested ? 1.0 : 0.0;
 	if (wgpuDeviceHasFeature(device, WGPUFeatureName_TimestampQuery)) {
-		print_verbose("WebGPU: Timestamp query feature is available (readback disabled due to buffer mapping issue).");
+		timestamp_supported = ts_requested;
+		if (ts_requested) {
+			print_line("WebGPU: Timestamp query readback ENABLED by request — check __cgPerf.ts.degraded_frames before trusting a GPU time.");
+		} else {
+			print_verbose("WebGPU: Timestamp query feature is available (readback off — pass ?cgperf_ts to enable).");
+		}
+	} else if (ts_requested) {
+		WARN_PRINT("WebGPU: Timestamp queries were requested but this device does not expose the timestamp-query feature.");
 	}
+	_cgperf.ts[CGPerfChannel::TS_SUPPORTED] = timestamp_supported ? 1.0 : 0.0;
 
 	// float32-filterable: required for linear sampling of R32Float / RG32Float / RGBA32Float.
 	// Forward Mobile's HDR post-processing path samples 32F render targets with linear
@@ -3822,6 +3902,16 @@ void RenderingDeviceDriverWebGPU::command_buffer_end(CommandBufferID p_cmd_buffe
 
 			if (map_state != WGPUBufferMapState_Unmapped) {
 				// Buffer is permanently stuck — skip resolve+copy to avoid validation error.
+				//
+				// ⚠ This is the silent-degradation path, and until now it left no
+				// trace at all: rendering stays correct, the run keeps going, and
+				// the GPU timings simply stop advancing. Count it so a consumer can
+				// tell "the GPU was fast" from "the driver stopped measuring", and
+				// say so once — a stuck buffer costs an extra
+				// wgpuInstanceProcessEvents per pool per frame for the rest of the
+				// session, which is the one real cost of the opt-in flip.
+				_cgperf.ts[CGPerfChannel::TS_DEGRADED_FRAMES] += 1.0;
+				WARN_PRINT_ONCE("WebGPU: timestamp readback buffer stuck mapped — resolves are being skipped and GPU timings are incomplete (see __cgPerf.ts.degraded_frames).");
 				pool->readback_pending = false;
 				continue;
 			}

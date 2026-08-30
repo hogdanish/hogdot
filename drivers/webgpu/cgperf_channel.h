@@ -105,6 +105,28 @@ struct CGPerfChannel {
 		COUNTER_COUNT, // Must stay last.
 	};
 
+	// GPU timestamp-query state, published as window.__cgPerf.ts.
+	//
+	// ⚠ Timestamp readback is OPT-IN and off by default. Enabling it changes
+	// rendering behavior on a path with a recorded corruption history (see
+	// _check_capabilities), so it ships behind `?cgperf_ts` in the URL or the
+	// `rendering/rendering_device/webgpu_timestamps` project setting.
+	//
+	// TS_DEGRADED_FRAMES counts every command_buffer_end that had to SKIP a
+	// timestamp resolve because its readback buffer was still mapped and could
+	// not be drained. That skip is the driver's defense against the "buffer used
+	// in submit while mapped" validation error, and it is silent — the run keeps
+	// rendering correctly while the numbers quietly stop updating. A nonzero
+	// value therefore means THE TIMINGS ARE INCOMPLETE and a consumer must say
+	// so. It is also the instrument that decides whether the opt-in flag can
+	// ever become the default.
+	enum TsStat {
+		TS_SUPPORTED = 0, // 0/1 — readback is actually live this session.
+		TS_REQUESTED, // 0/1 — the page or the project asked for it.
+		TS_DEGRADED_FRAMES, // Skipped resolves; nonzero invalidates the timings.
+		TS_STAT_COUNT, // Must stay last.
+	};
+
 	// 3600 rows == 30 s at 120 Hz (contract §1). 3600 * 13 * 8 B ≈ 375 KB of
 	// .bss, noise against the 256 MiB initial heap of a release web build.
 	static constexpr uint32_t FRAME_CAP = 3600;
@@ -119,6 +141,12 @@ struct CGPerfChannel {
 
 	double frames[FRAME_CAP * FRAME_STRIDE] = {};
 	double counters[COUNTER_COUNT] = {};
+
+	// Heap-backed so the degraded-frame bump stays a plain double store. That
+	// path can run once per pool per FRAME once a readback buffer is stuck, so
+	// an EM_ASM there would put a JS boundary crossing on the per-frame path in
+	// exactly the state where the driver is already struggling.
+	double ts[TS_STAT_COUNT] = {};
 
 	// Monotonic count of rows ever written; the live slot is frame_head % FRAME_CAP.
 	// Read by JS as a u32 so a consumer can tell how much of the ring is valid
@@ -181,3 +209,10 @@ static_assert(cgperf_count_joined_fields(CGPERF_FRAME_SCHEMA_JOINED) == CGPerfCh
 		"CGPERF_FRAME_SCHEMA_JOINED must name exactly one field per CGPerfChannel::FrameField.");
 static_assert(cgperf_count_joined_fields(CGPERF_COUNTER_NAMES_JOINED) == CGPerfChannel::COUNTER_COUNT,
 		"CGPERF_COUNTER_NAMES_JOINED must name exactly one counter per CGPerfChannel::Counter.");
+
+// The `ts` getter in the install reads its three slots by literal index rather
+// than from a name list — the first two are published as booleans and the third
+// as a number, so a name loop could not build the object anyway. Adding a fourth
+// TsStat without extending that getter would leave it silently unpublished.
+static_assert(CGPerfChannel::TS_STAT_COUNT == 3,
+		"CGPerfChannel::TsStat grew — extend the cgperfReadTs() getter in the __cgPerf install to match.");
