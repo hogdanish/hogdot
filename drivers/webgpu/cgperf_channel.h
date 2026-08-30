@@ -102,6 +102,14 @@ struct CGPerfChannel {
 		C_BINDGROUP_LAYOUTS_CREATED,
 		C_BINDGROUPS_CREATED,
 		C_ENCODER_SPLITS,
+		// ⚠ NOT a count — a monotonic SUM OF MILLISECONDS. Every SPIR-V→WGSL
+		// translation the driver performs adds its duration here, so the
+		// session total survives the COMPILE_CAP=512 truncation of the
+		// `compiles` ring. The per-record breakdown is compiles[].translate_ms;
+		// this is the only number that is still true after the ring has wrapped.
+		// An accumulator was chosen over a larger ring deliberately: the ring is
+		// .bss, the accumulator is 8 bytes.
+		C_TRANSLATE_MS,
 		COUNTER_COUNT, // Must stay last.
 	};
 
@@ -170,6 +178,11 @@ struct CGPerfChannel {
 	}
 
 	void count(Counter p_counter) { counters[p_counter] += 1.0; }
+
+	// Accumulate a non-unit quantity (milliseconds, bytes) into a counter slot.
+	// Only C_TRANSLATE_MS uses this today; keep the two spellings distinct so a
+	// reader can tell a tally from a sum at the call site.
+	void add(Counter p_counter, double p_amount) { counters[p_counter] += p_amount; }
 };
 
 // Newline-joined field names handed to the JS install. Kept beside the enums so
@@ -189,7 +202,8 @@ struct CGPerfChannel {
 	"spv_wgsl_cache_miss\nacquire_fail\nresize_skip\nreconfigure\n" \
 	"device_lost\nuncaptured_error\nrender_pipelines_created\n" \
 	"compute_pipelines_created\nshader_modules_created\n" \
-	"bindgroup_layouts_created\nbindgroups_created\nencoder_splits"
+	"bindgroup_layouts_created\nbindgroups_created\nencoder_splits\n" \
+	"translate_ms"
 
 // Drift guard. The JS side sizes its heap views from `names.length`, so a name
 // list that disagrees with its enum reads short (missing counters) or past the

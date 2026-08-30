@@ -184,10 +184,10 @@ unchanged and byte-compatible.
 ```
 __cgPerf.version        1
 __cgPerf.build          { engine_commit, pipeline_id, threads, adapter{vendor,architecture,device,description} }
-__cgPerf.counters       live getter over the heap; 15 monotonic doubles (see the header's Counter enum)
+__cgPerf.counters       live getter over the heap; 16 monotonic doubles (see the header's Counter enum)
 __cgPerf.frames         live getter → { head, cap: 3600, stride: 13, count, buf: Float64Array }
 __cgPerf.frames_schema  13 names, fixed order, index == column
-__cgPerf.compiles       plain array, cap 512, { t, frame, kind: render|compute|module, label, ms, baked }
+__cgPerf.compiles       plain array, cap 512, { t, frame, kind: render|compute|module, label, ms, translate_ms, baked }
 __cgPerf.events         plain array, cap 256, { t, frame, type, detail, count, t_last, frame_last }
 __cgPerf.ts             live getter → { supported, requested, degraded_frames } — OPT-IN, see below
 ```
@@ -282,7 +282,7 @@ translates differently from the pck it was fed.
 
 ### Reading `compiles`, `events` and `fence_lag` (added 2026-08-30, chunk 2)
 
-- ⚠ **A `compiles` record times the `wgpuDevice*Create*` call's RETURN, not the GPU's compile.** Dawn
+- ⚠ **`ms` times the `wgpuDevice*Create*` call's RETURN, not the GPU's compile.** Dawn
   defers real backend compilation to first draw — a fully baked project measured ≈0 s of JS-visible
   GPU compile while the stall reappeared at first draw. What the number *is* worth: it is the
   **synchronous render-thread** cost, which is exactly what `pipeline_hash_map_rd.h`'s inline compile
@@ -292,12 +292,30 @@ translates differently from the pck it was fed.
   `createComputePipeline`. `baked` on a pipeline record comes from `WGShader::used_baked_wgsl`; on a
   specialization module it is always `false`, because specialization re-translates from SPIR-V and a
   bake can never serve that path.
-- ⚠ **Consecutive identical `events` records coalesce** into `count` / `t_last` / `frame_last` instead
+- ⚠ **`translate_ms` is the second, separate number, and it is the big one** (added 2026-08-30). `ms`
+  brackets only the create call; `translate_ms` brackets everything before it — the SPIR-V
+  spec-constant patch, Tint, and every WGSL rewrite pass — which was previously not measured at all.
+  Reconciling the 2026-08-30 gauntlet artifacts put the unmeasured half at **23.3x** the measured one
+  (293.9 ms measured vs ≈6.8 s of synchronous in-frame work between consecutive records), so any
+  sizing taken from `ms` alone describes ~4% of the real cost. `ms` is deliberately unchanged so the
+  existing series stays comparable. A `baked` record reports a near-zero — not exactly zero —
+  `translate_ms`: baking skips Tint, not the shared rewrite passes. `render`/`compute` records
+  report `0.0`, because the modules they consume push their own records.
+  ⚠ **`counters.translate_ms` is the monotonic session sum and is the only translate number that
+  survives `COMPILE_CAP = 512`.** Every recorded run truncates to its tail; quote the counter, not
+  a sum over `compiles[]`. It also charges failed translations, which produce no record.
+- **A specialization record names its shader** — `specmod#<n>:<shader>:stg<N>` (added 2026-08-30).
+  The id stays first so a `specmod#` prefix match and the consecutive-pair analysis keep working.
+- ⚠ **Identical `events` records coalesce** into `count` / `t_last` / `frame_last` instead
   of pushing. `acquire_fail` and `resize_skip` can fire every frame of a bad run, and 256 identical
   records would evict every other event in the session — destroying the context that makes the run
   diagnosable. The `counters` carry the true totals regardless. Every event site also keeps its
   original `WARN_PRINT_ONCE` / `ERR_PRINT_ONCE` / `console.error`: those are the only signal a session
-  without the in-page harness gets.
+  without the in-page harness gets. ⚠ The comparison window is the **last 8** records, not the last
+  one: a single-record window is defeated by any interleaving, and the 3310 `uncaptured_error`s of
+  2026-08-30 arrived as a strictly alternating pair that never coalesced, so 256 slots held 128
+  frames of a ~1655-frame burst and evicted every earlier event in the session. Do not widen it
+  further — a large window stops a genuine per-frame storm of *distinct* events from coalescing.
 - **`fence_lag` is signed, and the sign is the whole point.** `fence_wait()` force-signals a fence the
   GPU has not reported on, to avoid deadlocking the single-threaded browser main loop — so the driver
   reports completions it never observed and the CPU can run arbitrarily far ahead. Positive = a real

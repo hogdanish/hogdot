@@ -164,13 +164,24 @@ static void _cgperf_install() {
 		// this body as C++ and `!==` is not a C++ token, so it gets rewritten to
 		// `!= =` and the JS silently stops parsing.
 		//
-		// ⚠ Consecutive identical records COALESCE into one (`count`, `t_last`,
-		// `frame_last`) instead of pushing. Two of the five event types —
-		// acquire_fail and resize_skip — can fire on every frame of a bad run, and
-		// a 256-cap ring of 256 identical records would evict every other event in
-		// the session, i.e. destroy exactly the context that makes the run
-		// diagnosable. It also keeps the push O(1) with no array growth in that
-		// degenerate state. The counters carry the true totals regardless.
+		// ⚠ Identical records COALESCE into one (`count`, `t_last`, `frame_last`)
+		// instead of pushing. Two of the five event types — acquire_fail and
+		// resize_skip — can fire on every frame of a bad run, and a 256-cap ring
+		// of 256 identical records would evict every other event in the session,
+		// i.e. destroy exactly the context that makes the run diagnosable. It also
+		// keeps the push O(1) with no array growth in that degenerate state. The
+		// counters carry the true totals regardless.
+		//
+		// ⚠ The comparison window is the last COALESCE_WINDOW records, not just
+		// the last one. A single-record window is defeated by ANY interleaving:
+		// the 3310 uncaptured_errors of 2026-08-30 arrived as a strictly
+		// alternating A,B,A,B pair (a validation error plus the invalid-submit it
+		// caused), which never coalesced, so 256 slots held 128 frames of a
+		// ~1655-frame burst and every earlier event in the session was evicted.
+		// The window is deliberately SMALL: it must cover an interleaved handful,
+		// not so many that a genuine per-frame storm of distinct events stops
+		// coalescing and starts evicting again. 8 covers the observed pair with
+		// room and is still O(1).
 		function cgperfPushEvent(type, detail, frame) {
 			var fi = -1;
 			if (typeof frame == 'number') {
@@ -183,12 +194,16 @@ static void _cgperf_install() {
 			}
 			var now = performance.now();
 			var a = ch.events;
-			if (a.length > 0) {
-				var last = a[a.length - 1];
-				if (last.type == type && last.detail == detail) {
-					last.count++;
-					last.t_last = now;
-					last.frame_last = fi;
+			var lo = a.length - 8;
+			if (lo < 0) {
+				lo = 0;
+			}
+			for (var wi = a.length - 1; wi >= lo; wi--) {
+				var prev = a[wi];
+				if (prev.type == type && prev.detail == detail) {
+					prev.count++;
+					prev.t_last = now;
+					prev.frame_last = fi;
 					return;
 				}
 			}
@@ -277,7 +292,23 @@ static void _cgperf_install() {
 // `p_t0` is the timestamp the creation call STARTED, not the one it returned at,
 // so a consumer can line a record up against the beginning of the frame gap it
 // caused rather than against its end.
-static void _cgperf_push_compile(const char *p_kind, const char *p_label, double p_t0, double p_ms, bool p_baked, uint32_t p_frame) {
+//
+// ⚠ `p_ms` and `p_translate_ms` are DIFFERENT measurements and neither contains
+// the other. `p_ms` brackets only the wgpuDevice*Create* call, which is what
+// this record has always reported and what every existing series is comparable
+// against — it is deliberately unchanged. `p_translate_ms` is the SPIR-V→WGSL
+// work that runs BEFORE that call and was never measured at all: the SPIR-V
+// spec-constant patch, Tint, and every WGSL rewrite pass. Reconciling digest #36
+// showed the unmeasured half to be ~23x the measured one, so a plan sized off
+// `ms` alone is sized off ~4% of the real synchronous cost. A record whose WGSL
+// came from a bake reports a near-zero translate_ms, which is the whole point of
+// baking and is now visible per record.
+static void _cgperf_push_compile(const char *p_kind, const char *p_label, double p_t0, double p_ms, double p_translate_ms, bool p_baked, uint32_t p_frame) {
+	// The monotonic sum is bumped here, beside the record, so the two can never
+	// disagree about what was counted. It is what survives COMPILE_CAP.
+	if (p_translate_ms > 0.0) {
+		_cgperf.add(CGPerfChannel::C_TRANSLATE_MS, p_translate_ms);
+	}
 	MAIN_THREAD_EM_ASM({
 		var g = (typeof window != 'undefined') ? window : globalThis;
 		if (!g.__cgPerf) {
@@ -289,12 +320,13 @@ static void _cgperf_push_compile(const char *p_kind, const char *p_label, double
 		r.kind = UTF8ToString($2);
 		r.label = UTF8ToString($3);
 		r.ms = $4;
-		r.baked = ($5 != 0);
+		r.translate_ms = $5;
+		r.baked = ($6 != 0);
 		var a = g.__cgPerf.compiles;
 		a.push(r);
-		while (a.length > $6) {
+		while (a.length > $7) {
 			a.shift();
-		} }, p_t0, (int)p_frame, p_kind, p_label, p_ms, (int)p_baked, (int)CGPerfChannel::COMPILE_CAP);
+		} }, p_t0, (int)p_frame, p_kind, p_label, p_ms, p_translate_ms, (int)p_baked, (int)CGPerfChannel::COMPILE_CAP);
 }
 
 // Push one record onto window.__cgPerf.events, from C++. The two JS-side event
@@ -4712,6 +4744,15 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 		// SPIR-V → WGSL at runtime using Tint (C++, linked directly).
 		// Many shader stages share SPIR-V bytes; _spv_to_wgsl_cached looks up a
 		// process-lifetime cache before invoking Tint (see helper definition).
+		//
+		// ⚠ The translation clock starts HERE, not at the createShaderModule call
+		// ~500 lines below. Everything between the two — Tint, the common WGSL
+		// passes, the read_write storage split, the read-storage-to-sampled
+		// rewrite and the depth-sample rewrite — is synchronous render-thread work
+		// that the compile record used to omit entirely. Baked WGSL skips only the
+		// Tint half, so a baked record reports a near-zero (not exactly zero)
+		// translate_ms: the shared rewrites still run over the baked text.
+		const double _translate_t0 = _cgperf_now_ms();
 		char *wgsl_str;
 		if (use_baked_wgsl) {
 			wgsl_str = baked_wgsl[i];
@@ -5193,6 +5234,9 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 
 		_rewrite_depth_texture_samples(&wgsl_str);
 
+		// End of the translation window opened at the top of this stage's block.
+		const double _translate_ms = _cgperf_now_ms() - _translate_t0;
+
 		WGPUShaderSourceWGSL wgsl_source = {};
 		wgsl_source.chain.sType = WGPUSType_ShaderSourceWGSL;
 		wgsl_source.code = WGPUStringView{ wgsl_str, WGPU_STRLEN };
@@ -5208,7 +5252,7 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 		const double _mod_t0 = _cgperf_now_ms();
 		WGPUShaderModule mod = wgpuDeviceCreateShaderModule(device, &mod_desc);
 		_cgperf.count(CGPerfChannel::C_SHADER_MODULES_CREATED);
-		_cgperf_push_compile("module", _mod_label_cs.get_data(), _mod_t0, _cgperf_now_ms() - _mod_t0, use_baked_wgsl, frames_drawn);
+		_cgperf_push_compile("module", _mod_label_cs.get_data(), _mod_t0, _cgperf_now_ms() - _mod_t0, _translate_ms, use_baked_wgsl, frames_drawn);
 
 		// Scan WGSL for texture dimension declarations so the BGL uses the right viewDimension.
 		// Tint format: "@group(G) @binding(B) var NAME: texture_TYPE<...>;"
@@ -9061,13 +9105,24 @@ static PackedByteArray _patch_spirv_spec_constants(const PackedByteArray &p_spir
 WGPUShaderModule RenderingDeviceDriverWebGPU::_create_module_with_spec_constants(
 		const PackedByteArray &p_spirv,
 		VectorView<PipelineSpecializationConstant> p_constants,
-		ShaderStage p_stage) {
+		ShaderStage p_stage,
+		const String &p_shader_name) {
+	// ⚠ The translation clock covers the whole preamble, not just the create.
+	// This path is the expensive one — 58% of every shader module the driver
+	// creates is a specialization module, and each is a full SPIR-V patch plus a
+	// Tint translation that no bake can ever serve. Timing only the create
+	// reported ~0.4 ms for work whose measured p50 gap was 10.2 ms.
+	const double _translate_t0 = _cgperf_now_ms();
 	PackedByteArray patched = _patch_spirv_spec_constants(p_spirv, p_constants);
 
 	// Cached SPIR-V → WGSL via Tint (see _spv_to_wgsl_cached above).
 	char *wgsl_str = _spv_to_wgsl_cached(patched.ptr(), (int)patched.size());
 
 	if (!wgsl_str) {
+		// A failed translation still spent the time. It produces no compile
+		// record, so charge the accumulator directly or the session total
+		// silently under-reports exactly the shaders that cost the most.
+		_cgperf.add(CGPerfChannel::C_TRANSLATE_MS, _cgperf_now_ms() - _translate_t0);
 		ERR_PRINT("WebGPU: SPIR-V→WGSL conversion failed for specialized shader module.");
 		return nullptr;
 	}
@@ -9083,10 +9138,18 @@ WGPUShaderModule RenderingDeviceDriverWebGPU::_create_module_with_spec_constants
 	WGPUShaderModuleDescriptor desc = {};
 	desc.nextInChain = &wgsl_source.chain;
 
+	// End of the translation window opened at the top of this function.
+	const double _translate_ms = _cgperf_now_ms() - _translate_t0;
+
 	// Label the specialized module so the JS-side createShaderModule patch identifies it.
+	// ⚠ The owning shader's name is part of the label. Without it the records read
+	// "specmod#388:stg0" and a specialization cost could not be attributed to any
+	// shader at all — which is exactly what blocked reading the 2026-08-30
+	// artifacts. The monotonic id stays first so the existing `specmod#` prefix
+	// match and the consecutive-pair analysis both keep working.
 	static int _spec_mod_id = 0;
 	int _specid = _spec_mod_id++;
-	String _spec_label = "specmod#" + itos(_specid) + ":stg" + itos((int)p_stage);
+	String _spec_label = "specmod#" + itos(_specid) + ":" + p_shader_name + ":stg" + itos((int)p_stage);
 	CharString _spec_label_cs = _spec_label.utf8();
 	desc.label = { _spec_label_cs.get_data(), WGPU_STRLEN };
 
@@ -9096,7 +9159,7 @@ WGPUShaderModule RenderingDeviceDriverWebGPU::_create_module_with_spec_constants
 	// baked=false is a fact, not a default: specialization re-translates from the
 	// container's SPIR-V through Tint, so a baked WGSL blob can never serve this
 	// path however well the project was baked.
-	_cgperf_push_compile("module", _spec_label_cs.get_data(), _spec_t0, _cgperf_now_ms() - _spec_t0, false, frames_drawn);
+	_cgperf_push_compile("module", _spec_label_cs.get_data(), _spec_t0, _cgperf_now_ms() - _spec_t0, _translate_ms, false, frames_drawn);
 	free(wgsl_str);
 
 	return mod;
@@ -9180,14 +9243,14 @@ RDD::PipelineID RenderingDeviceDriverWebGPU::render_pipeline_create(
 			// Legacy path: patch SPIR-V and create specialized modules via Tint.
 			if (!shader->stage_spirv[SHADER_STAGE_VERTEX].is_empty()) {
 				specialized_vertex = _create_module_with_spec_constants(
-						shader->stage_spirv[SHADER_STAGE_VERTEX], p_specialization_constants, SHADER_STAGE_VERTEX);
+						shader->stage_spirv[SHADER_STAGE_VERTEX], p_specialization_constants, SHADER_STAGE_VERTEX, shader->name);
 				if (specialized_vertex) {
 					vertex_module = specialized_vertex;
 				}
 			}
 			if (!shader->stage_spirv[SHADER_STAGE_FRAGMENT].is_empty()) {
 				specialized_fragment = _create_module_with_spec_constants(
-						shader->stage_spirv[SHADER_STAGE_FRAGMENT], p_specialization_constants, SHADER_STAGE_FRAGMENT);
+						shader->stage_spirv[SHADER_STAGE_FRAGMENT], p_specialization_constants, SHADER_STAGE_FRAGMENT, shader->name);
 				if (specialized_fragment) {
 					fragment_module = specialized_fragment;
 				}
@@ -9602,7 +9665,7 @@ RDD::PipelineID RenderingDeviceDriverWebGPU::render_pipeline_create(
 	const double _pipe_t0 = _cgperf_now_ms();
 	WGPURenderPipeline pipeline = wgpuDeviceCreateRenderPipeline(device, &desc);
 	_cgperf.count(CGPerfChannel::C_RENDER_PIPELINES_CREATED);
-	_cgperf_push_compile("render", _pipeline_label_cs.get_data(), _pipe_t0, _cgperf_now_ms() - _pipe_t0, shader->used_baked_wgsl, frames_drawn);
+	_cgperf_push_compile("render", _pipeline_label_cs.get_data(), _pipe_t0, _cgperf_now_ms() - _pipe_t0, 0.0, shader->used_baked_wgsl, frames_drawn);
 	if (!pipeline) {
 		if (specialized_vertex) {
 			wgpuShaderModuleRelease(specialized_vertex);
@@ -9633,7 +9696,7 @@ RDD::PipelineID RenderingDeviceDriverWebGPU::render_pipeline_create(
 		const double _pipe_u16_t0 = _cgperf_now_ms();
 		pw->render_handle_u16 = wgpuDeviceCreateRenderPipeline(device, &desc);
 		_cgperf.count(CGPerfChannel::C_RENDER_PIPELINES_CREATED);
-		_cgperf_push_compile("render", _pipeline_u16_label_cs.get_data(), _pipe_u16_t0, _cgperf_now_ms() - _pipe_u16_t0, shader->used_baked_wgsl, frames_drawn);
+		_cgperf_push_compile("render", _pipeline_u16_label_cs.get_data(), _pipe_u16_t0, _cgperf_now_ms() - _pipe_u16_t0, 0.0, shader->used_baked_wgsl, frames_drawn);
 		// Non-fatal if this fails — Uint32 variant still works for the common case.
 		if (!pw->render_handle_u16) {
 			WARN_PRINT_ONCE("WebGPU: failed to create Uint16 strip pipeline variant.");
@@ -9805,7 +9868,7 @@ RDD::PipelineID RenderingDeviceDriverWebGPU::compute_pipeline_create(ShaderID p_
 			}
 		} else if (!shader->stage_spirv[SHADER_STAGE_COMPUTE].is_empty()) {
 			specialized_compute = _create_module_with_spec_constants(
-					shader->stage_spirv[SHADER_STAGE_COMPUTE], p_specialization_constants, SHADER_STAGE_COMPUTE);
+					shader->stage_spirv[SHADER_STAGE_COMPUTE], p_specialization_constants, SHADER_STAGE_COMPUTE, shader->name);
 			if (specialized_compute) {
 				compute_module = specialized_compute;
 			}
@@ -9833,7 +9896,7 @@ RDD::PipelineID RenderingDeviceDriverWebGPU::compute_pipeline_create(ShaderID p_
 	const double _cpipe_t0 = _cgperf_now_ms();
 	WGPUComputePipeline pipeline = wgpuDeviceCreateComputePipeline(device, &desc);
 	_cgperf.count(CGPerfChannel::C_COMPUTE_PIPELINES_CREATED);
-	_cgperf_push_compile("compute", _cpipe_label_cs.get_data(), _cpipe_t0, _cgperf_now_ms() - _cpipe_t0, shader->used_baked_wgsl, frames_drawn);
+	_cgperf_push_compile("compute", _cpipe_label_cs.get_data(), _cpipe_t0, _cgperf_now_ms() - _cpipe_t0, 0.0, shader->used_baked_wgsl, frames_drawn);
 	if (!pipeline) {
 		if (specialized_compute) {
 			wgpuShaderModuleRelease(specialized_compute);

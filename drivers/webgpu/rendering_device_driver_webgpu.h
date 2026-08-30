@@ -226,7 +226,10 @@ class RenderingDeviceDriverWebGPU : public RenderingDeviceDriver {
 	WGPUTextureViewDimension _texture_type_to_view_dimension(TextureType p_type) const;
 
 	void _flush_push_constants(WGCommandBuffer *p_cmd_buf, WGShader *p_shader);
-	WGPUShaderModule _create_module_with_spec_constants(const PackedByteArray &p_spirv, VectorView<PipelineSpecializationConstant> p_constants, ShaderStage p_stage);
+	// p_shader_name is threaded through only so the cgperf compile record and the
+	// Dawn label can name the owning shader — a `specmod#N` label alone cannot be
+	// attributed to anything.
+	WGPUShaderModule _create_module_with_spec_constants(const PackedByteArray &p_spirv, VectorView<PipelineSpecializationConstant> p_constants, ShaderStage p_stage, const String &p_shader_name);
 	// The WGSL rewrites that both module-producing paths must apply identically.
 	// ⚠ Add shared passes here, never at a call site — the two paths diverging is
 	// what RL-027 cost a debugging cycle on. Reallocates *r_wgsl in place.
