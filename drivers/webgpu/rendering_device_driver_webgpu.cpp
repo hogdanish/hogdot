@@ -6198,6 +6198,14 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 			goto cleanup;
 		}
 
+		// Register the shader's identity. Every uniform set built against it
+		// records this generation, and _resolve_source_shader refuses to
+		// dereference a back-reference whose generation no longer matches — which
+		// is the only thing that distinguishes "still the same shader" from "a
+		// different shader that the allocator put at the same address".
+		shader->generation = ++shader_generation_counter;
+		live_shader_generations[shader] = shader->generation;
+
 		return ShaderID(shader);
 
 	} // End block scope.
@@ -6236,6 +6244,14 @@ uint32_t RenderingDeviceDriverWebGPU::shader_get_layout_hash(ShaderID p_shader) 
 void RenderingDeviceDriverWebGPU::shader_free(ShaderID p_shader) {
 	WGShader *shader = (WGShader *)(p_shader.id);
 	ERR_FAIL_NULL(shader);
+	// Retire the identity BEFORE the delete, and bump the epoch so every uniform
+	// set holding a weak back-reference to this shader re-validates on its next
+	// use instead of trusting a pointer this function is about to invalidate.
+	// ⚠ Erase by address AND bump: the erase alone would be defeated the moment
+	// `new` returns this address again, which is exactly the case the generation
+	// stored in the map exists to catch.
+	live_shader_generations.erase(shader);
+	shader_free_epoch++;
 	for (int i = 0; i < 6; i++) {
 		if (shader->stage_modules[i]) {
 			wgpuShaderModuleRelease(shader->stage_modules[i]);
@@ -6745,12 +6761,69 @@ RDD::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_create(VectorView<Bou
 		us->cached_entries[i] = entries[i];
 	}
 	us->source_shader = shader;
+	us->source_shader_generation = shader->generation;
+	// Validated by construction at this instant; the stamp is what lets
+	// _resolve_source_shader skip the map lookup until the next shader_free.
+	us->source_shader_checked_epoch = shader_free_epoch;
 	return UniformSetID(us);
 }
 
+WGShader *RenderingDeviceDriverWebGPU::_resolve_source_shader(WGUniformSet *p_us) {
+	if (!p_us->source_shader) {
+		return nullptr;
+	}
+	if (p_us->source_shader_checked_epoch == shader_free_epoch) {
+		// No shader has been freed since this was last proven live.
+		return p_us->source_shader;
+	}
+	HashMap<WGShader *, uint64_t>::ConstIterator it = live_shader_generations.find(p_us->source_shader);
+	if (it == live_shader_generations.end() || it->value != p_us->source_shader_generation) {
+		// The shader is gone — or, worse, a different shader now occupies the
+		// address. Either way this uniform set has no source shader any more.
+		// Forgetting it is correct and total: every consumer below is written to
+		// degrade to "no source information" rather than to guess.
+		p_us->source_shader = nullptr;
+		p_us->source_shader_generation = 0;
+		p_us->source_shader_checked_epoch = shader_free_epoch;
+		return nullptr;
+	}
+	p_us->source_shader_checked_epoch = shader_free_epoch;
+	return p_us->source_shader;
+}
+
+// Returns a bind group valid against p_target_shader's BGL for p_set_idx, or
+// NULLPTR when none can be produced. ⚠ A nullptr return is a contract with the
+// caller: SKIP the set. It must never be turned back into p_us->handle.
+//
+// ⚠ Why there is no "did the create fail" check worth the name. emdawnwebgpu's
+// `wgpuDeviceCreateBindGroup` allocates its wrapper first and only then calls
+// `device.createBindGroup()` (library_webgpu.js), so it returns non-null
+// unconditionally; and WebGPU's contagious-invalidity model means a validation
+// failure yields a live-looking but internally invalid object rather than an
+// error. The `if (!bg)` below is therefore effectively dead and is kept only as
+// belt-and-braces. Error scopes cannot close the gap either: `popErrorScope`
+// resolves through a JS promise, which cannot run while wasm holds the stack
+// (the same constraint that rules out async pipeline creation here), so the
+// answer would arrive frames late — and worse, pushing an error scope would
+// CAPTURE the very validation error the `uncaptured_error` counter is the gate
+// for, turning a regression into a silent pass.
+//
+// So the failure is detected BEFORE the create instead, structurally: WebGPU
+// requires a bind group's entries to correspond exactly to its layout's, so a
+// filtered entry list that does not cover every binding the target layout
+// declares cannot produce a valid bind group. That check is synchronous, exact
+// in the direction that matters, and cannot produce a false positive — it only
+// ever fires where `wgpuDeviceCreateBindGroup` was already going to fail.
 WGPUBindGroup RenderingDeviceDriverWebGPU::_get_compatible_bind_group(WGUniformSet *p_us, WGShader *p_target_shader, uint32_t p_set_idx) {
+	// ⚠ Resolve BEFORE the identity comparison below. Comparing a raw
+	// source_shader against a live target is an ABA test, not an identity test:
+	// a freed shader's address can be reissued to the very shader being compared
+	// against, and the fast path would then hand back a bind group built for a
+	// dead layout.
+	WGShader *source_shader = _resolve_source_shader(p_us);
+
 	// Fast path: same shader or no shader info.
-	if (!p_target_shader || p_us->source_shader == p_target_shader) {
+	if (!p_target_shader || source_shader == p_target_shader) {
 		return p_us->handle;
 	}
 	if (p_set_idx >= (uint32_t)p_target_shader->bind_group_layouts.size()) {
@@ -6765,19 +6838,79 @@ WGPUBindGroup RenderingDeviceDriverWebGPU::_get_compatible_bind_group(WGUniformS
 
 	// If source shader uses the same BGL, no rebind needed.
 	WGPUBindGroupLayout source_layout = nullptr;
-	if (p_us->source_shader && p_set_idx < (uint32_t)p_us->source_shader->bind_group_layouts.size()) {
-		source_layout = p_us->source_shader->bind_group_layouts[p_set_idx];
-		if (p_us->source_shader->merged_pc_group_layout && p_set_idx == p_us->source_shader->push_constant_bind_group) {
-			source_layout = p_us->source_shader->merged_pc_group_layout;
+	if (source_shader && p_set_idx < (uint32_t)source_shader->bind_group_layouts.size()) {
+		source_layout = source_shader->bind_group_layouts[p_set_idx];
+		if (source_shader->merged_pc_group_layout && p_set_idx == source_shader->push_constant_bind_group) {
+			source_layout = source_shader->merged_pc_group_layout;
 		}
 	}
 	if (source_layout == target_layout) {
 		return p_us->handle;
 	}
 
-	// Check rebind cache.
+	// Check rebind cache. ⚠ Only successful rebinds are ever cached, so a hit is
+	// always a usable bind group; and the key holds a reference to its layout, so
+	// the address cannot be recycled under the map.
 	if (p_us->rebind_cache.has(target_layout)) {
 		return p_us->rebind_cache[target_layout];
+	}
+
+	// --- Which bindings the target layout declares -------------------------
+	// Computed before any adaptation work because it is also the pre-flight
+	// check, and a set that cannot be adapted should cost nothing to reject.
+	// The target BGL includes entries from bind_group_infos (reflecting Godot
+	// uniforms) plus rw-storage shadow reads and potentially a push constant
+	// entry — mirror shader_create_from_container's construction exactly.
+	HashSet<uint32_t> target_bindings;
+	if (p_set_idx < (uint32_t)p_target_shader->bind_group_infos.size()) {
+		for (const auto &bge : p_target_shader->bind_group_infos[p_set_idx].entries) {
+			target_bindings.insert(bge.layout_entry.binding);
+			// For SWT, the layout_entry stores the texture binding; the sampler is at binding-1.
+			if (bge.godot_type == RDD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE) {
+				target_bindings.insert(bge.layout_entry.binding - 1); // Sampler binding.
+			}
+		}
+	}
+	// Add rw_storage shadow read bindings.
+	for (const KeyValue<uint32_t, uint32_t> &kv : p_target_shader->rw_storage_splits) {
+		uint32_t split_grp = kv.key >> 16;
+		if (split_grp == p_set_idx) {
+			target_bindings.insert(kv.value);
+		}
+	}
+	// Add push constant ring buffer binding if this is the PC group.
+	if (p_target_shader->merged_pc_group_layout && p_set_idx == p_target_shader->push_constant_bind_group) {
+		target_bindings.insert(PUSH_CONSTANT_RING_BINDING);
+	}
+
+	// --- Pre-flight: can this uniform set cover that layout at all? ---------
+	// Adaptation rewrites resources, never bindings, so the answer is decidable
+	// from the cached entries alone. A binding the layout requires and the set
+	// does not supply is an unconditional createBindGroup failure.
+	{
+		HashSet<uint32_t> supplied;
+		for (const WGPUBindGroupEntry &e : p_us->cached_entries) {
+			if (target_bindings.has(e.binding)) {
+				supplied.insert(e.binding);
+			}
+		}
+		if (supplied.size() != target_bindings.size()) {
+			// ⚠ Deliberately NOT cached, in either direction. Caching the failure
+			// is what turned one bad adaptation into ~1655 consecutive frames whose
+			// command buffers were rejected at submit, because every later frame
+			// took the poisoned hit and rebound the wrong-layout original. The
+			// re-check costs two small hash sets and only runs while the set is
+			// genuinely unusable against this pipeline.
+			_cgperf.count(CGPerfChannel::C_BINDGROUP_REBIND_FAIL);
+			const String _detail = "set=" + itos((int)p_set_idx) +
+					" src=" + (source_shader ? source_shader->name : String("<freed>")) +
+					" tgt=" + p_target_shader->name +
+					" have=" + itos((int)supplied.size()) + "/" + itos((int)target_bindings.size());
+			const CharString _detail_cs = _detail.utf8();
+			_cgperf_push_event("bindgroup_rebind_fail", _detail_cs.get_data(), frames_drawn);
+			WARN_PRINT_ONCE("WebGPU: a uniform set could not be adapted to the bound pipeline's bind group layout; the set is being SKIPPED. See __cgPerf counters.bindgroup_rebind_fail and the bindgroup_rebind_fail events for the shader pair and set index.");
+			return nullptr;
+		}
 	}
 
 	// Build adapted entries: copy cached entries and fix sampler type mismatches.
@@ -6802,8 +6935,8 @@ WGPUBindGroup RenderingDeviceDriverWebGPU::_get_compatible_bind_group(WGUniformS
 				}
 				// Fallback: check source shader for SWT sampler info.
 				if (target_samp_type == WGPUSamplerBindingType_BindingNotUsed &&
-						p_us->source_shader && p_set_idx < (uint32_t)p_us->source_shader->bind_group_infos.size()) {
-					for (const auto &bge : p_us->source_shader->bind_group_infos[p_set_idx].entries) {
+						source_shader && p_set_idx < (uint32_t)source_shader->bind_group_infos.size()) {
+					for (const auto &bge : source_shader->bind_group_infos[p_set_idx].entries) {
 						if (bge.layout_entry.binding == entry.binding &&
 								bge.layout_entry.sampler.type != WGPUSamplerBindingType_BindingNotUsed) {
 							target_samp_type = bge.layout_entry.sampler.type;
@@ -6813,8 +6946,8 @@ WGPUBindGroup RenderingDeviceDriverWebGPU::_get_compatible_bind_group(WGUniformS
 				}
 
 				WGPUSamplerBindingType source_samp_type = WGPUSamplerBindingType_BindingNotUsed;
-				if (p_us->source_shader && p_set_idx < (uint32_t)p_us->source_shader->bind_group_infos.size()) {
-					for (const auto &bge : p_us->source_shader->bind_group_infos[p_set_idx].entries) {
+				if (source_shader && p_set_idx < (uint32_t)source_shader->bind_group_infos.size()) {
+					for (const auto &bge : source_shader->bind_group_infos[p_set_idx].entries) {
 						if (bge.layout_entry.binding == entry.binding &&
 								bge.layout_entry.sampler.type != WGPUSamplerBindingType_BindingNotUsed) {
 							source_samp_type = bge.layout_entry.sampler.type;
@@ -6847,8 +6980,8 @@ WGPUBindGroup RenderingDeviceDriverWebGPU::_get_compatible_bind_group(WGUniformS
 				}
 				// Check source BGL to detect if the texture was originally depth.
 				WGPUTextureSampleType source_tex_sample = WGPUTextureSampleType_BindingNotUsed;
-				if (p_us->source_shader && p_set_idx < (uint32_t)p_us->source_shader->bind_group_infos.size()) {
-					for (const auto &bge : p_us->source_shader->bind_group_infos[p_set_idx].entries) {
+				if (source_shader && p_set_idx < (uint32_t)source_shader->bind_group_infos.size()) {
+					for (const auto &bge : source_shader->bind_group_infos[p_set_idx].entries) {
 						if (bge.layout_entry.binding == entry.binding &&
 								bge.layout_entry.texture.sampleType != WGPUTextureSampleType_BindingNotUsed) {
 							source_tex_sample = bge.layout_entry.texture.sampleType;
@@ -6902,32 +7035,11 @@ WGPUBindGroup RenderingDeviceDriverWebGPU::_get_compatible_bind_group(WGUniformS
 		}
 	}
 
-	// Collect valid binding indices from the target BGL.
-	// The target BGL includes entries from bind_group_infos (reflecting Godot uniforms)
-	// plus depth alias entries and potentially a push constant entry.
-	HashSet<uint32_t> target_bindings;
-	if (p_set_idx < (uint32_t)p_target_shader->bind_group_infos.size()) {
-		for (const auto &bge : p_target_shader->bind_group_infos[p_set_idx].entries) {
-			target_bindings.insert(bge.layout_entry.binding);
-			// For SWT, the layout_entry stores the texture binding; the sampler is at binding-1.
-			if (bge.godot_type == RDD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE) {
-				target_bindings.insert(bge.layout_entry.binding - 1); // Sampler binding.
-			}
-		}
-	}
-	// Add rw_storage shadow read bindings.
-	for (const KeyValue<uint32_t, uint32_t> &kv : p_target_shader->rw_storage_splits) {
-		uint32_t split_grp = kv.key >> 16;
-		if (split_grp == p_set_idx) {
-			target_bindings.insert(kv.value);
-		}
-	}
-	// Add push constant ring buffer binding if this is the PC group.
-	if (p_target_shader->merged_pc_group_layout && p_set_idx == p_target_shader->push_constant_bind_group) {
-		target_bindings.insert(PUSH_CONSTANT_RING_BINDING);
-	}
-
-	// Filter adapted entries: only keep entries whose binding exists in the target BGL.
+	// Filter adapted entries: only keep entries whose binding exists in the target
+	// BGL. `target_bindings` was computed above, before the adaptation work, so it
+	// could double as the pre-flight check — adaptation rewrites resources, never
+	// bindings, so filtering here is guaranteed to yield exactly the bindings the
+	// pre-flight already proved present.
 	LocalVector<WGPUBindGroupEntry> filtered;
 	for (const auto &e : adapted) {
 		if (target_bindings.has(e.binding)) {
@@ -6944,14 +7056,30 @@ WGPUBindGroup RenderingDeviceDriverWebGPU::_get_compatible_bind_group(WGUniformS
 	WGPUBindGroup bg = wgpuDeviceCreateBindGroup(device, &desc);
 	_cgperf.count(CGPerfChannel::C_BINDGROUPS_CREATED);
 	if (!bg) {
-		WARN_PRINT(vformat("WebGPU: bind group rebind failed for set=%d src=%s tgt=%s entries=%d",
+		// ⚠ Effectively unreachable on emdawnwebgpu (see the function header) —
+		// kept so a backend that DOES return null cannot fall through into caching
+		// a null and binding the wrong-layout original, which is what this branch
+		// used to do.
+		_cgperf.count(CGPerfChannel::C_BINDGROUP_REBIND_FAIL);
+		const String _detail = "set=" + itos((int)p_set_idx) +
+				" src=" + (source_shader ? source_shader->name : String("<freed>")) +
+				" tgt=" + p_target_shader->name +
+				" entries=" + itos((int)filtered.size()) + " create=null";
+		const CharString _detail_cs = _detail.utf8();
+		_cgperf_push_event("bindgroup_rebind_fail", _detail_cs.get_data(), frames_drawn);
+		WARN_PRINT_ONCE(vformat("WebGPU: wgpuDeviceCreateBindGroup returned null while rebinding set=%d src=%s tgt=%s; the set is being SKIPPED.",
 				(int)p_set_idx,
-				p_us->source_shader ? p_us->source_shader->name : String("null"),
-				p_target_shader->name,
-				(int)filtered.size()));
+				source_shader ? source_shader->name : String("<freed>"),
+				p_target_shader->name));
+		return nullptr; // ⚠ Never p_us->handle: its layout is the WRONG one.
 	}
-	p_us->rebind_cache[target_layout] = bg; // Cache even if null.
-	return bg ? bg : p_us->handle;
+	// ⚠ Retain the key. The layout belongs to p_target_shader, which can be freed
+	// while this uniform set lives on; without the reference the address can be
+	// recycled and a later lookup returns a bind group built for a dead layout.
+	// Released in uniform_set_free beside the bind group it keys.
+	wgpuBindGroupLayoutAddRef(target_layout);
+	p_us->rebind_cache[target_layout] = bg; // ⚠ Successes only — never a failure.
+	return bg;
 }
 
 void RenderingDeviceDriverWebGPU::uniform_set_free(UniformSetID p_uniform_set) {
@@ -6988,10 +7116,16 @@ void RenderingDeviceDriverWebGPU::uniform_set_free(UniformSetID p_uniform_set) {
 			}
 		}
 	}
-	// Release cached rebind bind groups.
+	// Release cached rebind bind groups AND the layouts they are keyed on — the
+	// key holds a reference taken at insert time so the address could not be
+	// recycled beneath the map. Only successful rebinds are ever cached, so both
+	// halves are non-null; the guards are cheap insurance, not an expectation.
 	for (const KeyValue<WGPUBindGroupLayout, WGPUBindGroup> &kv : us->rebind_cache) {
 		if (kv.value) {
 			wgpuBindGroupRelease(kv.value);
+		}
+		if (kv.key) {
+			wgpuBindGroupLayoutRelease(kv.key);
 		}
 	}
 	if (us->handle) {
@@ -8737,6 +8871,20 @@ void RenderingDeviceDriverWebGPU::command_bind_render_uniform_sets(CommandBuffer
 				set_dyn_offsets[j] = (uint32_t)(frame_idx * (dbuf ? dbuf->per_frame_size : 0));
 			}
 
+			// ⚠ No compatible bind group exists for this pipeline. Skip the set
+			// rather than bind one built for a different layout: that is the
+			// mistake this path used to make, and Dawn answers it by invalidating
+			// the ENTIRE command buffer at submit, so one bad set stops the frame
+			// from rendering at all. Skipping leaves whatever was bound at this
+			// index — also wrong, but locally wrong and diagnosable. The counter
+			// and the bindgroup_rebind_fail event were already pushed inside
+			// _get_compatible_bind_group. ⚠ The dynamic-offset unpack above must
+			// still have run, or every LATER set in this call reads the wrong
+			// 4-bit slot out of the mask.
+			if (!bg_to_bind) {
+				continue;
+			}
+
 			const bool is_pc_merged = (pipeline_shader && pipeline_shader->push_constant_size > 0 &&
 					set_idx == pipeline_shader->push_constant_bind_group &&
 					pipeline_shader->merged_pc_group_layout != nullptr);
@@ -9763,6 +9911,13 @@ void RenderingDeviceDriverWebGPU::command_bind_compute_uniform_sets(CommandBuffe
 				dyn_shift += 4u;
 				const WGBuffer *dbuf = us->dynamic_buffers[j];
 				set_dyn_offsets[j] = (uint32_t)(frame_idx * (dbuf ? dbuf->per_frame_size : 0));
+			}
+
+			// Same contract as the render path: a null return means SKIP, and the
+			// dynamic-offset unpack above must still have consumed this set's
+			// slots. See command_bind_render_uniform_sets for the reasoning.
+			if (!bg_to_bind) {
+				continue;
 			}
 
 			const bool is_pc_merged = (pipeline_shader && pipeline_shader->push_constant_size > 0 &&

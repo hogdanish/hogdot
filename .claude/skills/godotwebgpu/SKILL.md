@@ -56,7 +56,42 @@ numbers, counts and API signatures must be re-derived. `./hogdot/port-surface.sh
 
 Also live: **BGL rebinding** — when a shader's expected bind-group layout doesn't match the uniform set's
 (specialization variants, merged push-constant layouts), the driver builds *adapted* bind groups on the
-fly behind a cache.
+fly behind a cache (`_get_compatible_bind_group`).
+
+⚠ **Three lifetime rules hold that path together** (fixed 2026-08-30; all three were live defects,
+and together they are the best explanation for the 3310 validation errors and ~1655 consecutive
+frames whose `Queue.Submit` was rejected in the `20260830-151615` cold-r2 artifact):
+
+1. **A uniform set's `source_shader` is a weak back-reference and must never be dereferenced
+   directly.** `shader_free` deletes the `WGShader` and clears nothing, and `new` may hand the same
+   address to a different shader — so a raw pointer compare is an ABA test, not an identity test.
+   `WGShader::generation` plus the driver's `live_shader_generations` map make it decidable;
+   `_resolve_source_shader()` is the only legal reader and nulls the field when it is stale. A
+   `shader_free_epoch` compare keeps the common case a single integer test, because that path runs
+   thousands of times per frame.
+2. **`rebind_cache`'s KEY holds a reference.** `wgpuBindGroupLayoutAddRef` on insert,
+   `wgpuBindGroupLayoutRelease` in `uniform_set_free`. The layouts belong to a *target* shader that
+   can be freed while the uniform set lives on; without the retain the address is recycled and a
+   later lookup returns a bind group built for a dead layout.
+3. **A failed rebind is never cached and never falls back to `p_us->handle`.** `p_us->handle` was
+   built with the *source* layout; binding it against a pipeline expecting the target layout is
+   precisely the "bind group layout … does not match" error, and caching the failure made every
+   later frame repeat it forever. The function returns `nullptr` and both call sites SKIP the set —
+   locally wrong instead of contagiously wrong. ⚠ The dynamic-offset unpack must still run for a
+   skipped set or every later set in the same call reads the wrong 4-bit slot of the mask.
+
+⚠ **You cannot detect a failed `wgpuDeviceCreateBindGroup` after the fact.** emdawnwebgpu allocates
+the wrapper and only then calls `device.createBindGroup()` (`library_webgpu.js`), so it returns
+non-null unconditionally; and WebGPU's *contagious invalidity* means a validation failure yields a
+live-looking but internally invalid object. Error scopes do not help either — `popErrorScope`
+resolves through a JS promise, which cannot run while wasm holds the stack, **and** pushing a scope
+would capture the very validation error `counters.uncaptured_error` is the gate for, turning a
+regression into a silent pass. So the failure is detected **before** the create, structurally: WebGPU
+requires a bind group's entries to correspond exactly to its layout's, so a uniform set that does not
+supply every binding the target layout declares cannot produce a valid bind group. That check is
+synchronous and cannot false-positive — it only fires where the create was already going to fail.
+`counters.bindgroup_rebind_fail` and the `bindgroup_rebind_fail` event (set index, both shader
+names, coverage) are the record; **any nonzero value means some geometry drew with a stale binding.**
 
 ## Hard limits you cannot design around
 
@@ -184,7 +219,7 @@ unchanged and byte-compatible.
 ```
 __cgPerf.version        1
 __cgPerf.build          { engine_commit, pipeline_id, threads, adapter{vendor,architecture,device,description} }
-__cgPerf.counters       live getter over the heap; 16 monotonic doubles (see the header's Counter enum)
+__cgPerf.counters       live getter over the heap; 17 monotonic doubles (see the header's Counter enum)
 __cgPerf.frames         live getter → { head, cap: 3600, stride: 13, count, buf: Float64Array }
 __cgPerf.frames_schema  13 names, fixed order, index == column
 __cgPerf.compiles       plain array, cap 512, { t, frame, kind: render|compute|module, label, ms, translate_ms, baked }

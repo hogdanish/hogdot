@@ -204,7 +204,29 @@ class RenderingDeviceDriverWebGPU : public RenderingDeviceDriver {
 	WGPUSampler dummy_comparison_sampler = nullptr;
 
 	// --- BGL Rebinding Helper ---
+	// Returns a bind group valid against p_target_shader's layout for p_set_idx,
+	// or NULLPTR when no valid one can be produced — in which case the caller
+	// MUST skip the set rather than bind anything. Never returns a bind group
+	// built for a different layout: doing that is what invalidates the whole
+	// command buffer at submit.
 	WGPUBindGroup _get_compatible_bind_group(WGUniformSet *p_us, WGShader *p_target_shader, uint32_t p_set_idx);
+
+	// --- Shader liveness (weak back-references from uniform sets) ---
+	// A WGUniformSet remembers the shader it was built against so bind groups can
+	// be adapted between shaders. That reference outlives shader_free, so it is
+	// validated rather than trusted. `live_shader_generations` maps a live
+	// WGShader's address to its WGShader::generation; an address that is absent,
+	// or present with a different generation (the allocator recycled it), means
+	// the remembered shader is gone.
+	HashMap<WGShader *, uint64_t> live_shader_generations;
+	uint64_t shader_generation_counter = 0;
+	// Bumped by every shader_free. A uniform set whose recorded epoch equals this
+	// needs no map lookup at all, which keeps the check a single compare on the
+	// per-draw bind path.
+	uint64_t shader_free_epoch = 0;
+	// Resolves p_us->source_shader to a live shader or nullptr, nulling the field
+	// in place when it has gone stale. The ONLY legal way to read that field.
+	WGShader *_resolve_source_shader(WGUniformSet *p_us);
 
 	// --- Pixel Format Mapping ---
 	// TODO: Move to dedicated pixel_formats_webgpu.h/cpp when ready.

@@ -110,6 +110,15 @@ struct CGPerfChannel {
 		// An accumulator was chosen over a larger ring deliberately: the ring is
 		// .bss, the accumulator is 8 bytes.
 		C_TRANSLATE_MS,
+		// A uniform set could not be adapted to the bound pipeline's bind group
+		// layout, so the set was SKIPPED. Previously a bare WARN_PRINT that
+		// reached neither the counters nor the event ring, while the driver bound
+		// the wrong-layout original anyway and cached the failure forever — the
+		// mechanism behind 3310 validation errors across ~1655 consecutive frames
+		// whose command buffers were rejected at submit. Any nonzero value here
+		// means some geometry rendered with a stale binding; the paired
+		// `bindgroup_rebind_fail` event names the set index and both shaders.
+		C_BINDGROUP_REBIND_FAIL,
 		COUNTER_COUNT, // Must stay last.
 	};
 
@@ -203,7 +212,7 @@ struct CGPerfChannel {
 	"device_lost\nuncaptured_error\nrender_pipelines_created\n" \
 	"compute_pipelines_created\nshader_modules_created\n" \
 	"bindgroup_layouts_created\nbindgroups_created\nencoder_splits\n" \
-	"translate_ms"
+	"translate_ms\nbindgroup_rebind_fail"
 
 // Drift guard. The JS side sizes its heap views from `names.length`, so a name
 // list that disagrees with its enum reads short (missing counters) or past the

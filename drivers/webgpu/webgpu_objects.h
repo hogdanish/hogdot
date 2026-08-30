@@ -216,6 +216,15 @@ struct WGShader {
 	// Used to filter WGPUConstantEntry per stage — WebGPU requires that
 	// every constant key passed to a stage actually exists in that module.
 	HashSet<uint32_t> stage_override_ids[STAGE_SLOTS];
+
+	// Process-unique identity, assigned once at creation from a monotonic
+	// counter and never reused. It exists so a WGUniformSet can remember WHICH
+	// shader it was built against without that memory becoming a dangling
+	// pointer: `shader_free` deletes the WGShader, and `new` is free to hand the
+	// same address straight back, which makes a raw-pointer comparison an ABA
+	// hazard rather than an identity test. The driver holds the address→
+	// generation map; see RenderingDeviceDriverWebGPU::_resolve_source_shader.
+	uint64_t generation = 0;
 };
 
 // =============================================================================
@@ -300,7 +309,30 @@ struct WGUniformSet {
 	// needs to be used with shader B's pipeline (different BGL), we
 	// re-create the bind group with the correct BGL and cache it.
 	LocalVector<WGPUBindGroupEntry> cached_entries;
+
+	// ⚠ NEVER dereference `source_shader` directly. It is a weak back-reference
+	// to a shader this uniform set does not own: `shader_free` deletes the
+	// WGShader and clears nothing here, so between that free and the next
+	// validation the pointer is dangling and the allocator may already have
+	// handed the address to a different, live shader. Go through
+	// RenderingDeviceDriverWebGPU::_resolve_source_shader(), which checks the
+	// address against the recorded generation and nulls the field when it is
+	// stale. A stale source shader means "no source shader" — never a read.
 	WGShader *source_shader = nullptr;
+	uint64_t source_shader_generation = 0; // WGShader::generation of the above.
+	// The shader_free_epoch at which the pair above was last validated. Equal to
+	// the driver's current epoch means no shader has been freed since, so the
+	// pointer is provably live and the check is a single integer compare on a
+	// path that runs thousands of times per frame.
+	uint64_t source_shader_checked_epoch = 0;
+
+	// ⚠ The KEY holds a reference. `wgpuBindGroupLayoutAddRef` is called on
+	// insert and `wgpuBindGroupLayoutRelease` on teardown in uniform_set_free,
+	// because the layouts belong to a target shader that can be freed while this
+	// uniform set lives on. Without the retain, `shader_free` releases the BGL,
+	// the allocator recycles the address, and a later lookup returns a bind group
+	// built for a different, dead layout — which Dawn rejects at submit and which
+	// invalidates the entire command buffer.
 	HashMap<WGPUBindGroupLayout, WGPUBindGroup> rebind_cache;
 
 	// Maps binding index → WGTexture* for texture entries, used during rebind
