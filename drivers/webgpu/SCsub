@@ -750,13 +750,16 @@ env.drivers_sources += tint_obj
 # Same builder and the same input list as the editor's copy, so the two headers
 # agree by construction. The target path differs, so SCons sees no duplicate
 # builder even on a `webgpu=yes` editor build that registers both.
-import sys
-
-shader_baker_dir = Dir("#editor/shader/shader_baker").abspath
-if shader_baker_dir not in sys.path:
-    sys.path.append(shader_baker_dir)
-
-import shader_baker_builders
+#
+# ⚠ The shared builder lives HERE, not beside the editor's SCsub, because
+# .github/actions/godot-build runs `rm -rf editor` before every non-editor
+# target — upstream's guard that no editor code reaches an export template. A
+# template build therefore has no editor/ tree to import from; reaching into it
+# passed on every local build (where editor/ is present, and where an editor
+# build reads editor/SCsub first and leaves the module in sys.modules) and
+# failed only in CI. SCons puts this SConscript's own directory first on
+# sys.path, so this is a plain sibling import with nothing to keep in sync.
+import tint_pipeline_id_builders
 
 pipeline_id_inputs = File("#drivers/webgpu/tint_cli/pipeline_id_inputs.txt")
 pipeline_id_deps = [pipeline_id_inputs]
@@ -768,5 +771,5 @@ with open(pipeline_id_inputs.abspath, encoding="utf-8") as inputs_file:
 env_webgpu.CommandNoCache(
     "tint_pipeline_id.gen.h",
     pipeline_id_deps,
-    env_webgpu.Run(shader_baker_builders.make_tint_pipeline_id_header),
+    env_webgpu.Run(tint_pipeline_id_builders.make_tint_pipeline_id_header),
 )

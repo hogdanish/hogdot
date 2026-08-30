@@ -1,9 +1,27 @@
 #!/usr/bin/env python
 from misc.utility.scons_hints import *
 
-import shader_baker_builders
+import importlib.util
+import sys
 
 Import("env")
+
+# The stamp builder is shared with drivers/webgpu/SCsub, which generates the
+# export template's own copy of this header. It lives over there rather than
+# here because CI deletes the whole editor/ tree before every non-editor target
+# (.github/actions/godot-build), so a template build cannot import from editor/.
+# Loaded by explicit path — drivers/webgpu is not on sys.path while this
+# SConscript is read — and cached under its module name so the editor build,
+# which reads this SConscript before drivers/SCsub, shares one module object
+# with the sibling import over there.
+_BUILDERS = "tint_pipeline_id_builders"
+if _BUILDERS in sys.modules:
+    tint_pipeline_id_builders = sys.modules[_BUILDERS]
+else:
+    _spec = importlib.util.spec_from_file_location(_BUILDERS, File("#drivers/webgpu/{}.py".format(_BUILDERS)).abspath)
+    tint_pipeline_id_builders = importlib.util.module_from_spec(_spec)
+    sys.modules[_BUILDERS] = tint_pipeline_id_builders
+    _spec.loader.exec_module(tint_pipeline_id_builders)
 
 if env["vulkan"]:
     env.add_source_files(env.editor_sources, "shader_baker_export_plugin_platform_vulkan.cpp")
@@ -40,5 +58,5 @@ with open(pipeline_id_inputs.abspath, encoding="utf-8") as inputs_file:
 env.CommandNoCache(
     "tint_pipeline_id.gen.h",
     pipeline_id_deps,
-    env.Run(shader_baker_builders.make_tint_pipeline_id_header),
+    env.Run(tint_pipeline_id_builders.make_tint_pipeline_id_header),
 )

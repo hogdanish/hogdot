@@ -485,6 +485,20 @@ blocks unlisted owners — patterns live in the repo's Actions settings, set 202
 - **No secrets in this repo's Actions, ever** (decision of record) — the release channel uses only
   the ambient `GITHUB_TOKEN`. The game repo is private; anything needing its content is *copied
   into* hogdot (see the build profile below), never checked out from it.
+- ⚠ **CI deletes `editor/` before every non-editor target.** `.github/actions/godot-build`
+  runs `rm -rf editor` when `target != editor` — upstream's guard that no editor code reaches an
+  export template. So **a template build's SConscripts must not read, import from, or `Dir("#editor/…")`
+  into that tree**, and no local build can catch a violation: locally `editor/` is always present,
+  and an *editor* build reads `editor/SCsub` (SConstruct line 1234) **before** `drivers/SCsub`
+  (1235), so a stale `sys.modules` entry hides the breakage a second time. Cost 2026-08-30: the
+  cgperf pipeline-id stamp imported its builder from `editor/shader/shader_baker/`, passed every
+  local gate, and failed both `webgpu=yes` web jobs at SConscript-read time
+  (`ModuleNotFoundError: No module named 'shader_baker_builders'`). The builder now lives at
+  `drivers/webgpu/tint_pipeline_id_builders.py`; the editor SCsub loads it by explicit path.
+  **To reproduce a CI-only SConscript failure locally**: clone clean, `rm -rf editor`, run the
+  template `--dry-run`. Neither the SCons version (CI pins 4.10.1 in `.github/actions/godot-deps`,
+  Homebrew ships 4.11.1) nor Python 3.14 was implicated — both reproduce identically once `editor/`
+  is gone.
 - ⚠ A README.md missing its final newline blocked every fork CI run ever (see lint section).
 
 ## The cg-release channel (`cg_release.yml`, first cut 2026-08-27)

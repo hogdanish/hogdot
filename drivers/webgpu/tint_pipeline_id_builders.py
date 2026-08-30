@@ -1,4 +1,11 @@
-"""Build-time generators for the shader baker."""
+"""Build-time generator for the Tint translation-pipeline stamp.
+
+Lives in drivers/webgpu/ rather than beside its first consumer in
+editor/shader/shader_baker/ because CI deletes the whole editor/ tree before
+every export-template build (.github/actions/godot-build), and the template's
+own copy of the stamp -- drivers/webgpu/SCsub -- has to be generatable without
+it. Both SCsubs share this one module so the two headers agree by construction.
+"""
 
 import hashlib
 import os
