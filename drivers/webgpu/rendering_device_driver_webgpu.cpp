@@ -820,26 +820,12 @@ static char *_translate_spirv_to_wgsl(const uint8_t *p_spv_ptr, int p_spv_size, 
 	spv.resize(p_spv_size);
 	memcpy(spv.ptrw(), p_spv_ptr, p_spv_size);
 
-	// SPIR-V preprocessing pipeline:
-	// ⚠ The freeze is the ONLY conditional pass, and it stays in the tree whatever
-	// the flag says: it is the fallback when an overrides translation fails, and it
-	// is a hashed input of the tint_convert_cli pipeline id.
-	if (!p_keep_overrides) {
-		spv = spirv_preprocess::freeze_spec_constant_ops(spv);
-	}
-	spv = spirv_preprocess::rewrite_copy_logical(spv);
-	spv = spirv_preprocess::rewrite_terminate_invocation(spv);
-	spv = spirv_preprocess::convert_push_constants_to_uniforms(spv);
-	spv = spirv_preprocess::split_combined_samplers(spv);
-	auto depth_result = spirv_preprocess::fix_depth2_images(spv);
-	spv = depth_result.bytes;
-	spv = spirv_preprocess::negate_position_y(spv);
-	spv = spirv_preprocess::strip_restrict_decoration(spv);
-	spv = spirv_preprocess::strip_memory_barrier(spv);
-	spv = spirv_preprocess::fix_nonfinite_literals(spv);
-	spv = spirv_preprocess::flatten_binding_arrays(spv);
-	spv = spirv_preprocess::strip_writeonly_storage(spv);
-	spv = spirv_preprocess::infer_readonly_storage(spv);
+	// SPIR-V preprocessing pipeline. ⚠ The pass ORDER lives in spirv_preprocess so
+	// this path, tint_convert_cli's --overrides path and the Tint worker's wasm
+	// entry point cannot drift apart — their WGSL has to be byte-identical or a
+	// baked blob, a worker translation and a main-thread translation of the same
+	// shader stop agreeing, silently.
+	spv = spirv_preprocess::run_translation_passes(spv, p_keep_overrides);
 
 	// Convert to uint32_t words for Tint.
 	int word_count = spv.size() / 4;

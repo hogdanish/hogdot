@@ -2989,4 +2989,34 @@ Vector<uint8_t> strip_writeonly_storage(const Vector<uint8_t> &p_bytes) {
 	return out;
 }
 
+// ---- run_translation_passes ----
+
+Vector<uint8_t> run_translation_passes(const Vector<uint8_t> &p_bytes, bool p_keep_overrides) {
+	Vector<uint8_t> spv = p_bytes;
+
+	// ⚠ Order is load-bearing and every caller must get the same one. See the
+	// header for why this lives here rather than at three call sites.
+	//
+	// The freeze is the only conditional pass: with p_keep_overrides it is
+	// skipped so OpSpecConstant* and their SpecId decorations survive into Tint,
+	// which then emits `@id(N) override`.
+	if (!p_keep_overrides) {
+		spv = freeze_spec_constant_ops(spv);
+	}
+	spv = rewrite_copy_logical(spv);
+	spv = rewrite_terminate_invocation(spv);
+	spv = convert_push_constants_to_uniforms(spv);
+	spv = split_combined_samplers(spv);
+	spv = fix_depth2_images(spv).bytes;
+	spv = negate_position_y(spv);
+	spv = strip_restrict_decoration(spv);
+	spv = strip_memory_barrier(spv);
+	spv = fix_nonfinite_literals(spv);
+	spv = flatten_binding_arrays(spv);
+	spv = strip_writeonly_storage(spv);
+	spv = infer_readonly_storage(spv);
+
+	return spv;
+}
+
 } // namespace spirv_preprocess

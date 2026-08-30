@@ -101,24 +101,9 @@ static std::string convert_spirv_to_wgsl(const std::vector<uint8_t> &p_spv_bytes
 	spv.resize((int64_t)p_spv_bytes.size());
 	memcpy(spv.ptrw(), p_spv_bytes.data(), p_spv_bytes.size());
 
-	// 13 preprocessing passes (same order as rendering_device_driver_webgpu.cpp),
-	// minus the freeze in overrides mode.
-	if (!g_keep_overrides) {
-		spv = spirv_preprocess::freeze_spec_constant_ops(spv);
-	}
-	spv = spirv_preprocess::rewrite_copy_logical(spv);
-	spv = spirv_preprocess::rewrite_terminate_invocation(spv);
-	spv = spirv_preprocess::convert_push_constants_to_uniforms(spv);
-	spv = spirv_preprocess::split_combined_samplers(spv);
-	auto depth_result = spirv_preprocess::fix_depth2_images(spv);
-	spv = depth_result.bytes;
-	spv = spirv_preprocess::negate_position_y(spv);
-	spv = spirv_preprocess::strip_restrict_decoration(spv);
-	spv = spirv_preprocess::strip_memory_barrier(spv);
-	spv = spirv_preprocess::fix_nonfinite_literals(spv);
-	spv = spirv_preprocess::flatten_binding_arrays(spv);
-	spv = spirv_preprocess::strip_writeonly_storage(spv);
-	spv = spirv_preprocess::infer_readonly_storage(spv);
+	// The preprocessing pipeline, in the one order every consumer shares — the
+	// runtime driver, this CLI and the Tint worker. --overrides skips the freeze.
+	spv = spirv_preprocess::run_translation_passes(spv, g_keep_overrides);
 
 	// Ensure SPIR-V version is at least 1.3 (0x00010300). The preprocessing
 	// passes produce constructs (StorageBuffer storage class) that require 1.3,

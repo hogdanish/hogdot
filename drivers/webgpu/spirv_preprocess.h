@@ -54,6 +54,27 @@ struct DepthImageFixResult {
 // to their non-specialization equivalents and strips SpecId decorations.
 Vector<uint8_t> freeze_spec_constant_ops(const Vector<uint8_t> &p_bytes);
 
+// Run the whole WebGPU SPIR-V preprocessing pipeline, in order, and return the
+// rewritten bytes ready for Tint.
+//
+// ⚠ THE one definition of that order. It used to be written out at each call
+// site — the runtime driver, tint_convert_cli, and (as of the Tint worker) a
+// third copy in the worker's wasm entry point. Three hand-maintained copies of
+// a pass list whose output must be BYTE-IDENTICAL across all three is the
+// RL-027 divergence trap with two extra chances to fall into it: a baked WGSL
+// blob, a worker-translated one and a main-thread one all have to agree, and
+// nothing would report it if they stopped.
+//
+// p_keep_overrides skips freeze_spec_constant_ops and nothing else, so Tint's
+// reader emits `@id(N) override` declarations instead of frozen defaults.
+//
+// ⚠ Deliberately does NOT include tint_convert_cli's bump of the SPIR-V header
+// version to >= 1.3. That bump exists only in the CLI, the runtime driver has
+// never done it, and folding it in here would silently change what the runtime
+// emits. It stays at the CLI call site until someone measures that it is a
+// no-op on real engine SPIR-V.
+Vector<uint8_t> run_translation_passes(const Vector<uint8_t> &p_bytes, bool p_keep_overrides);
+
 // Convert push-constant variables to storage buffer (read-only) at
 // descriptor set 3, binding 120 (the ring-buffer slot used by the
 // WebGPU backend).

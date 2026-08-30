@@ -382,6 +382,53 @@ the stamp differs from the editor's build-time copy. Rebuild it with
 `drivers/webgpu/tint_cli/build.sh` after touching anything in
 `drivers/webgpu/tint_cli/pipeline_id_inputs.txt`.
 
+### `tint_convert.wasm` — the Tint core as a standalone module (added 2026-08-30)
+
+```bash
+./drivers/webgpu/tint_cli/build.sh --wasm      # -> bin/tint_convert.{js,wasm}
+TINT_WASM_ENVIRONMENT=worker,node ./drivers/webgpu/tint_cli/build.sh --wasm   # node-loadable, for testing
+```
+
+Same script, same source lists and same Tint defines as the native CLI — deliberately, because the
+two must emit byte-identical WGSL and a second source list is the cheapest way to lose that. It
+exists for the parked Tint-Web-Worker idea; **read the update block at the top of
+`godotwebgpu/references/notes/finish_async_shader_comp.md` before spending anything on that**, the
+worker is blocked on the forbidden async-pipeline half.
+
+⚠ **STATUS: it LINKS, it does not yet TRANSLATE.** `tint_wasm_pipeline_id()` returns correctly, so
+the module loads and calls in; `tint_wasm_translate()` dies with `RuntimeError: function signature
+mismatch` a couple of frames into `tint_wrapper_spirv_to_wgsl`, i.e. on the **setjmp** side of the
+vendored ICE handler (patch 0008). Two flag combinations were tried and both fail the same way at
+that point: emcc defaults (legacy sjlj), and `-sSUPPORT_LONGJMP=wasm -fno-exceptions` matching the
+engine. The remaining suspect is the JS glue carrying legacy sjlj helpers against a wasm-native
+sjlj module. **Do not quote this module as working.** Work stopped here deliberately — the worker it
+exists for is blocked anyway (see the notes file), so the last mile was not worth buying.
+
+| artifact | raw | gzip |
+| --- | ---: | ---: |
+| `tint_convert.wasm` | 4,166,787 B | 1,191,587 B |
+| `tint_convert.js` | 60,322 B | 17,221 B |
+
+⚠ **That is a SECOND copy of Tint + SPIRV-Tools**, **~1.21 MB gzipped** on top of an 11.7 MB
+template zip — roughly +10% on the engine download. It cannot be shared with the engine's copy: a
+Web Worker is its own JS realm with its own wasm instance. Measured 2026-08-30, emcc 6.0.8-git, 569
+objects, `-O2`, `JOBS_WASM=4`, ~35 min from clean. Treat it as accurate to a few percent for a
+module that also runs; the size is dominated by Tint, which is already linked and complete.
+
+Three build facts are load-bearing, and none of them fails at build time:
+- ⚠ **`-sSUPPORT_LONGJMP=wasm` and `-fno-exceptions` are ONE decision**, on BOTH compile and link.
+  Without `-fno-exceptions` libc++ emits `__cxa_throw`, Emscripten links no throwing support under
+  wasm sjlj, and the **link** fails; the obvious escape is refused outright with
+  `SUPPORT_LONGJMP=wasm cannot be used with DISABLE_EXCEPTION_THROWING=0`. The pair matches how the
+  engine already compiles Tint (`SConstruct`'s `disable_exceptions` defaults to `True`), so the two
+  copies agree rather than merely both building.
+- ⚠ The wasm build takes Tint's `*_other.cc` platform sources, not the host's posix ones — those
+  reach for fork/exec and real temp files.
+- ⚠ `wasm_entry.cpp` bumps the SPIR-V header to >= 1.3 the way the CLI does. A no-op on engine
+  SPIR-V (already >= 1.3, so a worker's WGSL would stay identical to the main thread's), but
+  required to drive the module against the 1.0 fixtures in `webgpu_tests/shader_corpus/` — which is
+  how it is meant to be verified without a browser, and how the runtime failure above was found.
+
 ⚠ **`drivers/webgpu/rendering_device_driver_webgpu.cpp` is a pipeline-id input as of 2026-08-30**,
 because the driver defines translation too — the pass order, the conditional freeze behind the
 runtime-overrides flag, and the WGSL rewrites that run *after* Tint. The cost is real and

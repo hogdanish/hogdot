@@ -1,5 +1,56 @@
 # Finishing Async Shader Compilation
 
+> ## ⚠ 2026-08-30 UPDATE — Part 1 is NOT separable from Part 2, and the branch is gone
+>
+> Two findings that supersede this document's "Recommended Implementation Order".
+>
+> **1. The branch is unrecoverable.** `async_shader_pipeline` was deleted from
+> `dwalter/godotwebgpu`; commits `864e936cd3` and `eb9d522e92` are garbage-collected and are not
+> reachable from any `refs/pull/*/head` either (verified via the GitHub API, all PR refs fetched).
+> "Cherry-pick the worker" is not an option that exists. Any revival is a re-implementation.
+>
+> **2. "Merge the Tint web worker (as-is)" cannot be done alone.** This document lists the worker's
+> driver-side pieces as `_post_spirv_to_worker()`, `_poll_tint_worker_results()` and
+> **`PendingWorkerPipeline` deferral logic** — and deferral is the whole mechanism. Two independent
+> proofs that it requires the async-pipeline half:
+>
+> - **The main thread cannot receive a worker result synchronously on the shipped template.**
+>   `threads=no` builds contain **zero** references to `SharedArrayBuffer` (measured on
+>   `godot.web.template_debug.wasm32.nothreads.js`; the `threads=yes` build has them), so there is
+>   no `Atomics.wait`. A worker's answer can only arrive by returning to the JS event loop — the
+>   same constraint that makes a `wgpuInstanceProcessEvents` spin an infinite hang. So the worker
+>   can only ever help work whose result is **not needed in the same synchronous call**.
+> - **Nothing in the driver has lead time.** `shader_create_from_container` must return a WGShader
+>   with `stage_modules[]` populated, so it needs the WGSL before it returns; and a specialization's
+>   SPIR-V does not exist until `render_pipeline_create` patches it with values known only then.
+>   There is no point at which a translation can be posted early and collected later — unless
+>   pipeline creation itself may return "not yet".
+>
+> That "not yet" is exactly `render_pipeline_create_async` + `PipelineHashMapRD::add_compiled_pipeline`.
+> The engine already tolerates an unready pipeline (`get_pipeline(..., p_wait_for_compilation=false)`
+> falls back to the ubershader), **but** `compile_pipeline()` inserts the key into `compilation_set`
+> before calling the creation function and never clears it, so a creation that declines to call
+> `add_compiled_pipeline()` loses that pipeline forever. Only the async path closes that loop, and a
+> driver-level poll cannot: it has no RID, no key hash and no reach into `PipelineHashMapRD`.
+>
+> **Consequence:** the worker is gated behind the async-pipeline work this same document measured at
+> **34.0 → 20.5 fps** and which the 2026-08-30 driver report forbids outright. Part 1's measured win
+> (max spike −50%, P95 −31%) is real but not reachable without it.
+>
+> **What did get built (2026-08-30), because it is useful either way:**
+> - `drivers/webgpu/tint_cli/build.sh --wasm` → `bin/tint_convert.{js,wasm}`, the standalone Tint
+>   translation core a worker would load, with its byte cost printed: **4,166,787 B raw /
+>   1,191,587 B gzip**, i.e. ~+10% on the engine download for a second copy of Tint that a Worker
+>   cannot share. ⚠ It LINKS but does not yet TRANSLATE — `tint_wasm_translate()` hits a setjmp ABI
+>   mismatch in the vendored ICE handler. See `build-export` for both flag combinations tried.
+> - `drivers/webgpu/tint_cli/wasm_entry.cpp`, its entry point.
+> - `spirv_preprocess::run_translation_passes()`, so the driver, the CLI and any future worker share
+>   ONE pass list instead of three copies that must emit byte-identical WGSL.
+> - The A4 runtime-overrides flag deleted a large share of the work a worker would have offloaded:
+>   `translate_ms` 8813 → 5648 ms on the coverage gate.
+>
+> Everything below is the 2026-05-07 document, unchanged.
+
 **Date**: 2026-05-07
 **Branch with existing work**: `async_shader_pipeline`
 **Current branch**: `webgpu-4.6.2`

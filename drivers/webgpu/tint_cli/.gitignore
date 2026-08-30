@@ -1,2 +1,6 @@
 .build/
+# The --wasm object tree. Separate from .build on purpose: native and wasm
+# objects share every filename and would link into each other's binary through
+# build.sh's mtime skip.
+.build-wasm/
 fuzz/corpus/

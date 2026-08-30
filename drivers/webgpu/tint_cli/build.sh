@@ -4,8 +4,20 @@
 # Usage:
 #   ./drivers/webgpu/tint_cli/build.sh          # Build with auto-detected parallelism
 #   ./drivers/webgpu/tint_cli/build.sh --clean   # Remove build artifacts and rebuild
+#   ./drivers/webgpu/tint_cli/build.sh --wasm    # Build tint_convert.wasm for the Tint worker
 #
-# Output: bin/tint_convert_cli
+# Output: bin/tint_convert_cli, or bin/tint_convert.{js,wasm} with --wasm.
+#
+# ⚠ --wasm builds a SECOND copy of Tint and SPIRV-Tools, as a standalone module
+# the Tint Web Worker loads. It has to be a second copy: a Worker is its own JS
+# realm with its own wasm instance and cannot reach the Tint already linked into
+# the engine module. That download is the entire cost of the worker approach, so
+# this script prints the byte sizes at the end — they are the ship-decision
+# input, not a footnote.
+#
+# ⚠ The two modes share every source list and every Tint define on purpose. The
+# worker's WGSL must be byte-identical to the main thread's, and a source list
+# that could drift is the cheapest possible way to lose that.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -16,11 +28,29 @@ cd "$REPO_ROOT"
 TINT_DIR="thirdparty/tint"
 SPIRV_TOOLS_DIR="thirdparty/spirv-tools"
 SPIRV_HEADERS_DIR="thirdparty/spirv-headers"
-BUILD_DIR="drivers/webgpu/tint_cli/.build"
 SHIM_DIR="drivers/webgpu/tint_cli"
 
 JOBS="${JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
 CXX="${CXX:-c++}"
+
+# Parse the target mode before anything derives paths from it.
+WASM=false
+for arg in "$@"; do
+    [[ "$arg" == "--wasm" ]] && WASM=true
+done
+
+if [[ "$WASM" == true ]]; then
+    # ⚠ Separate object tree. Native and wasm objects have the same names and
+    # would silently link into each other's binary through the mtime skip.
+    BUILD_DIR="drivers/webgpu/tint_cli/.build-wasm"
+    CXX="${EMXX:-em++}"
+    # ⚠ num_jobs is capped for the same reason webgpu=yes web builds are: nine
+    # concurrent em++ processes on the Tint translation units exhaust this
+    # machine's 24 GB, and the tell is a pegged machine with quiet fans.
+    JOBS="${JOBS_WASM:-4}"
+else
+    BUILD_DIR="drivers/webgpu/tint_cli/.build"
+fi
 
 # Wait until fewer than $JOBS background compiles are running.
 # `wait -n` needs bash >= 4.3; macOS ships bash 3.2, where it fails instantly and
@@ -59,6 +89,27 @@ echo "Pipeline id: $PIPELINE_ID"
 WARNINGS="-w"  # Suppress warnings from thirdparty code.
 COMMON_FLAGS="-O2 $WARNINGS"
 
+if [[ "$WASM" == true ]]; then
+    # ⚠ Must match platform/web/detect.py's longjmp mode exactly, on BOTH compile
+    # and link. Tint's vendored ICE handler (patch 0008) longjmps back out of an
+    # internal error, and Emscripten's two longjmp implementations are not ABI
+    # compatible: built with the default, the module links clean and then dies at
+    # the first translation with `RuntimeError: function signature mismatch` in an
+    # `invoke_viii` frame — a runtime failure with no build-time signal.
+    #
+    # ⚠ -fno-exceptions comes with it, and the two are ONE decision. Without it
+    # libc++ emits __cxa_throw, Emscripten does not link throwing support under
+    # wasm sjlj, and the link fails with "DISABLE_EXCEPTION_THROWING was set ...
+    # but such support is required by symbol '__cxa_throw'" — and the obvious
+    # escape, -sDISABLE_EXCEPTION_THROWING=0, is refused outright:
+    # "SUPPORT_LONGJMP=wasm cannot be used with DISABLE_EXCEPTION_THROWING=0".
+    # This is exactly how the engine already compiles Tint (SConstruct's
+    # disable_exceptions defaults to True), so the two copies match rather than
+    # merely both working. Tint's ICE path does not need throwing: patch 0008's
+    # handler longjmps, which is the reason for the sjlj mode above.
+    COMMON_FLAGS="$COMMON_FLAGS -sSUPPORT_LONGJMP=wasm -fno-exceptions"
+fi
+
 # Include paths for SPIRV-Tools.
 SPIRV_TOOLS_INCLUDES=(
     -I"$SPIRV_TOOLS_DIR"
@@ -96,6 +147,18 @@ TINT_DEFINES=(
 )
 
 # Detect platform-specific Tint sources.
+# ⚠ wasm takes the `_other` set rather than the host's: Tint's posix variants
+# reach for fork/exec and real temp files, which Emscripten either stubs or
+# fails to link, and none of it is on the translation path anyway.
+if [[ "$WASM" == true ]]; then
+    TINT_PLATFORM_SOURCES=(
+        "src/tint/utils/command/command_other.cc"
+        "src/tint/utils/file/tmpfile_other.cc"
+        "src/tint/utils/system/env_other.cc"
+        "src/tint/utils/system/terminal_other.cc"
+        "src/tint/utils/text/styled_text_printer_other.cc"
+    )
+else
 case "$(uname -s)" in
     Darwin)
         TINT_PLATFORM_SOURCES=(
@@ -127,6 +190,7 @@ case "$(uname -s)" in
         )
         ;;
 esac
+fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Compile function: skip if .o is newer than source.
@@ -259,9 +323,15 @@ compile_one "drivers/webgpu/tint_wrapper.cpp" \
     "${TINT_INCLUDES[@]}" "${TINT_DEFINES[@]}" \
     -I"drivers/webgpu/" &
 
-# main.cpp — compiled with shim + Tint includes. Always recompiled: the
-# pipeline-id stamp changes with files compile_one's mtime check cannot see.
-$CXX -c "drivers/webgpu/tint_cli/main.cpp" \
+# The entry TU — main.cpp natively, wasm_entry.cpp for the worker module.
+# Always recompiled: the pipeline-id stamp changes with files compile_one's
+# mtime check cannot see.
+if [[ "$WASM" == true ]]; then
+    ENTRY_SRC="drivers/webgpu/tint_cli/wasm_entry.cpp"
+else
+    ENTRY_SRC="drivers/webgpu/tint_cli/main.cpp"
+fi
+$CXX -c "$ENTRY_SRC" \
     -o "$BUILD_DIR/cli/main.o" \
     -std=c++20 $COMMON_FLAGS \
     -I"$SHIM_DIR" \
@@ -286,7 +356,42 @@ done
 echo "  Linking ${#LINK_OBJS[@]} objects..."
 
 mkdir -p bin
-$CXX -o bin/tint_convert_cli "${LINK_OBJS[@]}" -O2
+if [[ "$WASM" == true ]]; then
+    # ⚠ ENVIRONMENT=worker keeps the glue from emitting the DOM/node branches.
+    # Override with TINT_WASM_ENVIRONMENT=worker,node to get a module `node` can
+    # load, which is how the translation is verified against the shader corpus
+    # without a browser; ship the default.
+    # ENVIRONMENT=worker keeps the glue from emitting the DOM/node branches;
+    # MODULARIZE gives the worker a factory it can await instead of a global
+    # side effect. ALLOW_MEMORY_GROWTH because a large shader's SPIR-V plus the
+    # Tint IR plus the WGSL text all live at once and the ceiling is a shader
+    # nobody has written yet.
+    # ⚠ No EXIT_RUNTIME and no main(): this module is a library of translate
+    # calls, and a runtime that exits would take the second and later ones with
+    # it.
+    $CXX -o bin/tint_convert.js "${LINK_OBJS[@]}" -O2 \
+        -sSUPPORT_LONGJMP=wasm \
+        -sMODULARIZE=1 \
+        -sEXPORT_NAME=TintConvert \
+        -sENVIRONMENT="${TINT_WASM_ENVIRONMENT:-worker}" \
+        -sALLOW_MEMORY_GROWTH=1 \
+        -sEXPORTED_FUNCTIONS='["_tint_wasm_alloc","_tint_wasm_free","_tint_wasm_translate","_tint_wasm_result","_tint_wasm_error","_tint_wasm_pipeline_id","_malloc","_free"]' \
+        -sEXPORTED_RUNTIME_METHODS='["ccall","cwrap","UTF8ToString","HEAPU8"]'
+    echo
+    echo "Built: bin/tint_convert.js + bin/tint_convert.wasm"
+    echo "  pipeline id: $PIPELINE_ID"
+    # The ship-decision number. Printed gzipped too, because that is what a
+    # browser actually downloads over a Caddy/Cloudflare-served origin.
+    for f in bin/tint_convert.js bin/tint_convert.wasm; do
+        raw=$(wc -c < "$f" | tr -d ' ')
+        gz=$(gzip -9 -c "$f" | wc -c | tr -d ' ')
+        printf '  %-26s %10s B raw  %10s B gzip\n' "$(basename "$f")" "$raw" "$gz"
+    done
+else
+    $CXX -o bin/tint_convert_cli "${LINK_OBJS[@]}" -O2
+fi
 
-echo ""
-echo "Built: bin/tint_convert_cli ($(du -h bin/tint_convert_cli | cut -f1))"
+if [[ "$WASM" != true ]]; then
+    echo ""
+    echo "Built: bin/tint_convert_cli ($(du -h bin/tint_convert_cli | cut -f1))"
+fi
