@@ -53,6 +53,12 @@ public:
 	// default — see ShaderBakerExportPluginPlatformWebGPU.
 	virtual bool supports_half_float() const { return true; }
 
+	// Whether this export target's rendering driver can read an input attachment (a
+	// subpass read). Same shape and same reason as supports_half_float(): the platform
+	// answers, so the baker's view cannot drift from the driver's. True for every driver
+	// but one — see ShaderBakerExportPluginPlatformWebGPU.
+	virtual bool supports_input_attachments() const { return true; }
+
 	virtual ~ShaderBakerExportPluginPlatform() {}
 };
 
@@ -99,6 +105,7 @@ protected:
 	// The matched platform's answer, captured in _initialize_container_format() because
 	// the feature block that reads it runs later in _begin_customize_resources().
 	bool shader_container_half_float = true;
+	bool shader_container_input_attachments = true;
 	Vector<Ref<ShaderBakerExportPluginPlatform>> platforms;
 	uint64_t customization_configuration_hash = 0;
 	uint32_t tasks_processed = 0;

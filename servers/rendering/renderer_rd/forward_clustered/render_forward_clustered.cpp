@@ -5040,6 +5040,10 @@ uint32_t RenderForwardClustered::get_pipeline_compilations(RSE::PipelineSource p
 }
 
 void RenderForwardClustered::enable_features(BitField<FeatureBits> p_feature_bits) {
+	// The effects RendererSceneRenderRD owns (the tonemapper's subpass gate) are not
+	// reachable from here — chain up first, then state this renderer's own verdicts.
+	RendererSceneRenderRD::enable_features(p_feature_bits);
+
 	if (p_feature_bits.has_flag(FEATURE_MULTIVIEW_BIT)) {
 		scene_shader.enable_multiview_shader_group();
 	}

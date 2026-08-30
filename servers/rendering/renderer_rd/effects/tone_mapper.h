@@ -163,6 +163,11 @@ public:
 	ToneMapper(bool p_use_mobile_version);
 	~ToneMapper();
 
+	// Whether the shader baker should carry the mobile tonemapper's subpass variants.
+	// Stated by the export target, never by this binary — see the WEB_ENABLED block in
+	// the constructor and RendererSceneRenderRD::enable_features().
+	void set_subpass_variants_baked(bool p_baked);
+
 	struct TonemapSettings {
 		bool use_glow = false;
 		RSE::EnvironmentGlowBlendMode glow_mode = RSE::ENV_GLOW_BLEND_MODE_SCREEN;

@@ -1554,6 +1554,16 @@ bool RendererSceneRenderRD::free(RID p_rid) {
 	return true;
 }
 
+void RendererSceneRenderRD::enable_features(BitField<FeatureBits> p_feature_bits) {
+	// ToneMapper is constructed in init(), long before any export begins, and it decides
+	// its variant set from this binary's own platform — so the verdict has to be stated
+	// here, after the fact, rather than by passing the feature bits into the constructor.
+	// Bake-time only: nothing this touches is read by the rendering path.
+	if (tone_mapper != nullptr) {
+		tone_mapper->set_subpass_variants_baked(p_feature_bits.has_flag(FEATURE_INPUT_ATTACHMENT_BIT));
+	}
+}
+
 void RendererSceneRenderRD::set_debug_draw_mode(RSE::ViewportDebugDraw p_debug_draw) {
 	debug_draw = p_debug_draw;
 }

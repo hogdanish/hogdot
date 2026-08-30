@@ -42,6 +42,10 @@ public:
 		FEATURE_VRS_BIT = 1U << 2U,
 		FEATURE_FP16_BIT = 1U << 3U,
 		FEATURE_FP32_BIT = 1U << 4U,
+		// Whether the export target's rendering driver can read an input attachment
+		// (a subpass read). Every driver but WebGPU can; see
+		// ShaderBakerExportPluginPlatform::supports_input_attachments().
+		FEATURE_INPUT_ATTACHMENT_BIT = 1U << 5U,
 	};
 
 	// Used by the shader baker to globally enable features on all the shaders that will be exported.

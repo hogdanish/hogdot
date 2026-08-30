@@ -997,6 +997,22 @@ bool ShaderRD::is_group_excluded_from_baking(int p_group) const {
 	return groups_excluded_from_baking.has(p_group);
 }
 
+void ShaderRD::set_variant_excluded_from_baking(int p_variant, bool p_excluded) {
+	ERR_FAIL_INDEX(p_variant, variants_enabled.size());
+
+	if (p_excluded) {
+		variants_excluded_from_baking.insert(p_variant);
+	} else {
+		// Stated both ways on every bake, so a second export in the same session to a
+		// target that *does* have the feature is not silently starved of the variant.
+		variants_excluded_from_baking.erase(p_variant);
+	}
+}
+
+bool ShaderRD::is_variant_excluded_from_baking(int p_variant) const {
+	return variants_excluded_from_baking.has(p_variant);
+}
+
 const String &ShaderRD::get_name() const {
 	return name;
 }

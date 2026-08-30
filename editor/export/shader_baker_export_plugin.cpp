@@ -38,6 +38,7 @@
 #include "editor/editor_node.h"
 #include "scene/3d/label_3d.h"
 #include "scene/3d/sprite_3d.h"
+#include "scene/resources/shader.h"
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/rendering_shader_container.h"
@@ -82,6 +83,7 @@ bool ShaderBakerExportPlugin::_initialize_container_format(const Ref<EditorExpor
 			shader_container_format = platform->create_shader_container_format(p_platform, p_preset);
 			ERR_FAIL_NULL_V_MSG(shader_container_format, false, "Unable to create shader container format for the export platform.");
 			shader_container_half_float = platform->supports_half_float();
+			shader_container_input_attachments = platform->supports_input_attachments();
 			return true;
 		}
 	}
@@ -192,6 +194,15 @@ bool ShaderBakerExportPlugin::_begin_customize_resources(const Ref<EditorExportP
 	renderer_features.set_flag(RenderingShaderLibrary::FEATURE_FP32_BIT);
 	if (shader_container_half_float) {
 		renderer_features.set_flag(RenderingShaderLibrary::FEATURE_FP16_BIT);
+	}
+
+	// Same shape again, one level down: a variant whose enablement this editor decided
+	// from its OWN compile-time platform. The mobile tonemapper's subpass variants are
+	// `#ifdef WEB_ENABLED`-disabled in a web binary only, so a desktop editor exporting
+	// to web queues them and their `subpassLoad` fails SPIR-V→WGSL translation. See
+	// RendererSceneRenderRD::enable_features() and ToneMapper::set_subpass_variants_baked().
+	if (shader_container_input_attachments) {
+		renderer_features.set_flag(RenderingShaderLibrary::FEATURE_INPUT_ATTACHMENT_BIT);
 	}
 
 	RendererSceneRenderRD::get_singleton()->enable_features(renderer_features);
@@ -351,6 +362,34 @@ Ref<Resource> ShaderBakerExportPlugin::_customize_resource(const Ref<Resource> &
 		}
 	}
 
+	// ⚠ Bake every shader, not just every *material*. Enumerating Material resources
+	// alone silently misses any `.gdshader` that is only ever worn by a ShaderMaterial
+	// built in script (`ShaderMaterial.new()`), because no exported resource references
+	// it — and those shaders then pay full glslang + SPIR-V→WGSL translation on first
+	// use, in the browser, at the worst possible moment. Measured on CommonGrounds:
+	// 24 of 51 project shaders were referenced by no scene or resource file, 17 of them
+	// `shader_type spatial`, which is 15 unbaked SceneForwardMobileShaderRD versions.
+	//
+	// Baking off the Shader is sound because the ShaderRD cache key is derived from the
+	// compiled code sections alone (ShaderRD::_version_get_sha1) and never from how the
+	// material wearing it was built, so this produces exactly the entry the runtime asks
+	// for later. MaterialStorage::shader_set_code() creates the ShaderData and its
+	// ShaderRD version with no material attached, so a bare `.gdshader` is enough.
+	Ref<Shader> shader = p_resource;
+	if (shader.is_valid()) {
+		RID shader_rid = shader->get_rid();
+		if (shader_rid.is_valid()) {
+			RendererRD::MaterialStorage::ShaderData *shader_data = singleton->shader_get_data(shader_rid);
+			if (shader_data != nullptr) {
+				Pair<ShaderRD *, RID> shader_version_pair = shader_data->get_native_shader_and_version();
+				if (shader_version_pair.first != nullptr) {
+					_customize_shader_version(shader_version_pair.first, shader_version_pair.second);
+				}
+			}
+		}
+	}
+
+	// Null: the resource itself is never rewritten, so no re-save and no remap happens.
 	return Ref<Resource>();
 }
 
@@ -471,6 +510,15 @@ void ShaderBakerExportPlugin::_customize_shader_version(ShaderRD *p_shader, RID 
 	for (int64_t i = 0; i < variant_count; i++) {
 		int group = p_shader->get_variant_to_group(i);
 		if (!p_shader->is_variant_enabled(i) || !groups_to_compile.has(group)) {
+			continue;
+		}
+
+		// The per-variant analog of the group exclusion above. is_variant_enabled() cannot
+		// make this distinction on its own: it answers for the platform *this editor* was
+		// compiled for, and the variant may be dead on the export target. The variant's
+		// slot in the group is left empty, exactly as a disabled variant's is, and the
+		// runtime — which disables it for the same reason — seeks past it at load.
+		if (p_shader->is_variant_excluded_from_baking(i)) {
 			continue;
 		}
 

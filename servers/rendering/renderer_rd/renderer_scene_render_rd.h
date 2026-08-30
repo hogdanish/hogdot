@@ -340,6 +340,14 @@ public:
 
 	virtual bool free(RID p_rid) override;
 
+	/* SHADER LIBRARY */
+
+	// The renderer-agnostic half of the shader baker's feature plumbing: the effects
+	// RendererSceneRenderRD owns itself, which no forward renderer can reach. Concrete
+	// renderers override this and must chain up to it — see
+	// RenderForwardMobile::enable_features().
+	virtual void enable_features(BitField<FeatureBits> p_feature_bits) override;
+
 	virtual void update() override;
 
 	virtual void set_debug_draw_mode(RSE::ViewportDebugDraw p_debug_draw) override;

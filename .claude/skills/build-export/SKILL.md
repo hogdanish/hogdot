@@ -430,6 +430,58 @@ No cache invalidation: `ShaderRD::_initialize_cache()` hashes a group from `base
 `general_defines` + the group id + only *that* group's variant defines + the dynamic buffers, so
 the FP32 sha256 is byte-identical across the change. Full record: `feature-shader-baker.md` § step 3.
 
+### The bake covers every `.gdshader`, not just every `Material` (2026-08-30)
+
+⚠ **Mainline's baker enumerates *materials*, and that silently misses whole shaders.**
+`ShaderBakerExportPlugin::_customize_resource()` cast only to `Ref<Material>`, so a `.gdshader`
+worn exclusively by a `ShaderMaterial.new()` built in GDScript — referenced by no `.tscn`/`.tres`
+anywhere — reached the customizer and was dropped on the floor. Measured on CommonGrounds:
+**24 of 51 project shaders had no resource reference, 17 of them `shader_type spatial`**, which is
+15 unbaked `SceneForwardMobileShaderRD` versions (35 baked against the editor's own 50 for the same
+group hash). Every one of those paid glslang + Tint in the browser on first use.
+
+A `Ref<Shader>` branch beside the material one fixes it: `Shader::get_rid()` →
+`MaterialStorage::shader_get_data()` → `get_native_shader_and_version()`. It is sound because the
+ShaderRD version key hashes the **compiled code sections only** (`_version_get_sha1`), never how
+the material wearing the shader was built, so the entry produced at bake time is byte-identically
+the one the runtime asks for. `MaterialStorage::shader_set_code()` builds the `ShaderData` and its
+ShaderRD version with no material attached, so a bare `.gdshader` is enough.
+
+⚠ **This does not reach runtime-generated `BaseMaterial3D`/`ParticleProcessMaterial` combos.**
+Their code comes from `BaseMaterial3D::_update_shader()` via `shader_create_from_code(…, p_embedded
+= false)` — neither embedded nor an exported resource. Those still need a `.tres` on disk or a
+generated bake manifest on the project side.
+
+⚠ **It grows the pack.** The FP32 scene shader is the largest class in the bake; measure the delta
+rather than assuming it.
+
+### The bake skips variants the export target can never run (2026-08-30)
+
+The group-level `set_group_excluded_from_baking()` above has a per-variant twin,
+`ShaderRD::set_variant_excluded_from_baking()`, for the other way a bake can go wrong: a variant
+whose enablement was decided by the platform **the editor binary was compiled for**. The only such
+gate in the tree is `ToneMapper`'s `#ifdef WEB_ENABLED` block, which disables the four mobile
+`SUBPASS` variants because WebGPU has no input attachments. A macOS editor exporting to web does
+not take that `#ifdef`, so it queued them, and two then failed `subpassLoad` translation —
+**two `WGSL translation failed` warnings and ~33 KB of dead SPIR-V per export**, plus the habit of
+walking past a bake warning.
+
+The seam mirrors the FP16 one exactly:
+`ShaderBakerExportPluginPlatform::supports_input_attachments()` (default `true`, `false` only in
+the WebGPU platform) → `RenderingShaderLibrary::FEATURE_INPUT_ATTACHMENT_BIT` →
+`RendererSceneRenderRD::enable_features()` → `ToneMapper::set_subpass_variants_baked()`.
+
+⚠ **`enable_features()` is now implemented on `RendererSceneRenderRD` itself** and the two forward
+renderers chain up to it — `ToneMapper` is constructed in `RendererSceneRenderRD::init()`, long
+before any export, and is unreachable from `RenderForwardMobile`. A new
+`RendererSceneRenderRD` subclass that overrides `enable_features` without calling the base silently
+loses this gate.
+
+⚠ **The dangerous direction is the inverse**, and it is what the seam really guards: an editor that
+*disables* a variant its export target *enables* bakes a hole into the group, and one enabled
+variant with zero data fails the whole group load (`ShaderRD::_load_from_cache`) and recompiles
+every variant in it. Nothing else prevents that.
+
 ## Linux editor (linuxbsd) — first built 2026-08-27
 
 The first linuxbsd editor build ever attempted (CommonGrounds CI spike 6.A.1) succeeded on

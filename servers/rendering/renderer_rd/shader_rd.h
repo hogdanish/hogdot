@@ -71,6 +71,10 @@ private:
 	// answer that cannot disturb the editor's own rendering by disabling a group it is
 	// still drawing with. See set_group_excluded_from_baking().
 	HashSet<int> groups_excluded_from_baking;
+	// The same escape hatch one level down, for a variant whose *enablement* is decided
+	// by the platform this editor was compiled for rather than by the export target's.
+	// See set_variant_excluded_from_baking().
+	HashSet<int> variants_excluded_from_baking;
 
 	Vector<RD::PipelineImmutableSampler> immutable_samplers;
 	Vector<uint64_t> dynamic_buffers;
@@ -256,6 +260,15 @@ public:
 	// safe to set while the editor is rendering.
 	void set_group_excluded_from_baking(int p_group, bool p_excluded);
 	bool is_group_excluded_from_baking(int p_group) const;
+
+	// Variants the shader baker must skip, on the same terms and for the same reason as
+	// the group flag above — except that a variant's enablement can also be decided by
+	// the platform the *editor binary* was compiled for (`#ifdef WEB_ENABLED` and
+	// friends), which the export target's platform need not share. Bake-time only:
+	// unlike set_variant_enabled() it may be called after versions exist, because it
+	// changes nothing the rendering path reads.
+	void set_variant_excluded_from_baking(int p_variant, bool p_excluded);
+	bool is_variant_excluded_from_baking(int p_variant) const;
 
 	const String &get_name() const;
 

@@ -122,6 +122,33 @@ ToneMapper::~ToneMapper() {
 	}
 }
 
+void ToneMapper::set_subpass_variants_baked(bool p_baked) {
+	if (!using_mobile_version) {
+		// Only the mobile tonemapper has subpass variants at all.
+		return;
+	}
+
+	// The variant set the baker sees is decided by the platform the *editor* was
+	// compiled for: the WEB_ENABLED block in the constructor above disables these four
+	// only in a web binary, so a macOS or Linux editor exporting to web arrives here
+	// with them enabled and queues them for baking. Two of them then fail SPIR-V→WGSL
+	// translation on `subpassLoad` (WebGPU has no input attachments), which costs a pair
+	// of WARNING lines and ~33 KB of dead SPIR-V in the pack — and, worse, trains
+	// everyone to walk past a bake warning. Excluding them leaves this editor's own
+	// rendering untouched; the runtime skips them at load because they are disabled
+	// there for exactly the same reason.
+	//
+	// ⚠ The inverse is the dangerous direction and is what this seam really guards: an
+	// editor that disables a variant its export target *enables* would bake a hole into
+	// the group, and one enabled variant with no data fails the whole group load
+	// (ShaderRD::_load_from_cache). Stating the verdict from the target's capability,
+	// both ways, is what keeps the two views from drifting apart.
+	tonemap_mobile.shader.set_variant_excluded_from_baking(TONEMAP_MOBILE_MODE_SUBPASS, !p_baked);
+	tonemap_mobile.shader.set_variant_excluded_from_baking(TONEMAP_MOBILE_MODE_SUBPASS_1D_LUT, !p_baked);
+	tonemap_mobile.shader.set_variant_excluded_from_baking(TONEMAP_MOBILE_MODE_SUBPASS_MULTIVIEW, !p_baked);
+	tonemap_mobile.shader.set_variant_excluded_from_baking(TONEMAP_MOBILE_MODE_SUBPASS_1D_LUT_MULTIVIEW, !p_baked);
+}
+
 void ToneMapper::tonemapper(RID p_source_color, RID p_dst_framebuffer, const TonemapSettings &p_settings) {
 	ERR_FAIL_COND_MSG(using_mobile_version, "Can't use the non mobile version of the tonemapper with the Mobile renderer.");
 	UniformSetCacheRD *uniform_set_cache = UniformSetCacheRD::get_singleton();

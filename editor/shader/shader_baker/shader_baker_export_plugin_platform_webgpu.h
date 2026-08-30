@@ -79,4 +79,10 @@ public:
 	// they are one decision, and the export would otherwise ship no FP16 shaders for a
 	// runtime that had started asking for them.
 	virtual bool supports_half_float() const override { return false; }
+
+	// WebGPU has no input attachments and no subpass reads — the driver flattens
+	// subpasses, RenderForwardMobile refuses subpass post-processing under WEB_ENABLED,
+	// and ToneMapper disables its subpass variants there. Saying so here keeps a desktop
+	// editor from baking (and failing to translate) shaders the browser can never run.
+	virtual bool supports_input_attachments() const override { return false; }
 };
