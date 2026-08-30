@@ -1160,12 +1160,21 @@ void RenderingDeviceDriverWebGPU::_cgperf_publish_build() {
 	// build-currency assertion keys on `[CGPERF] build engine=`, which has to exist
 	// immediately so a stale template is refused early and so a device lost during
 	// boot still leaves provenance behind.
+	//
+	// ⚠ The second field falls back to `architecture` before "unknown". Chrome
+	// leaves GPUAdapterInfo.device empty for fingerprinting reasons on every
+	// platform measured (2026-08-30: apple/metal-3 reports vendor and
+	// architecture, device and description both ""), so the contract's literal
+	// `adapter=<vendor>/<device>` would print `apple/unknown` on the one line
+	// that is supposed to identify the machine a report came from. The full four
+	// fields are on __cgPerf.build.adapter regardless.
+	const String adapter_second = ident.device.is_empty() ? (ident.architecture.is_empty() ? String("unknown") : ident.architecture) : ident.device;
 	const String boot_line = vformat("[CGPERF] build engine=%s pipeline_id=%s baked=0/0 threads=%d adapter=%s/%s",
 			engine_commit.left(12),
 			pipeline_id,
 			threads,
 			ident.vendor.is_empty() ? String("unknown") : ident.vendor,
-			ident.device.is_empty() ? String("unknown") : ident.device);
+			adapter_second);
 	const CharString boot_line_utf8 = boot_line.utf8();
 	EM_ASM({ console.log(UTF8ToString($0)); }, boot_line_utf8.get_data());
 }
