@@ -726,12 +726,13 @@ reappears, something is building without `CCACHE_DIR` reaching it.
   link and run under emcc 6.0.8-git (2026-08-30, the coherent build set above).
 - ~~The CommonGrounds handoff~~ — exercised end to end 2026-08-30; the open part is the release
   channel, next line.
-- **A `cg-v4.7.2-r3` release has not been cut for the instrumentation work.** `engine.env` still
-  pins `HOGDOT_TAG=cg-v4.7.2-r2` / `HOGDOT_BUILD=4.7.2.stable.custom_build.3c2c5520f`, whose six
-  digests describe none of the current `bin/` artifacts. Cutting r3 means merging
-  `feat/shader-baker-fp16-gate` into `main` first and dispatching `cg_release.yml` **from `main`,
-  never a tag push**.
-- The ~24 % web `.wasm` growth flagged above is unbisected.
+- ~~A `cg-v4.7.2-r3` release has not been cut~~ — stale twice over: **r3 was cut and pinned**
+  (game repo `engine.env`, 2026-08-30 morning), and **r4** followed the same day carrying the
+  2026-08-30 optimization pass (shader-enumerating baker, translate_ms instrumentation, BGL
+  lifetime fixes, flag-gated runtime overrides).
+- ~~The ~24 % web `.wasm` growth flagged above is unbisected~~ — closed by r3's zip sizes
+  (the game's W30 register; a bisect is not owed). The profiled `production=yes` release wasm
+  is 36.9 MB raw / 8.95 MB wire; the 45.6 MB figure was the unprofiled local template.
 
 ---
 *Source of truth for building hogdot — correct it in the same change as any build command you actually run.*

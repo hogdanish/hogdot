@@ -345,8 +345,12 @@ translates differently from the pck it was fed.
 - Five creation sites, all recorded: the main-path and specialization `createShaderModule`, the base
   and Uint16-strip `createRenderPipeline` (a strip primitive genuinely pays two), and
   `createComputePipeline`. `baked` on a pipeline record comes from `WGShader::used_baked_wgsl`; on a
-  specialization module it is always `false`, because specialization re-translates from SPIR-V and a
-  bake can never serve that path.
+  specialization module it is always `false` — but do NOT read that as "the bake misses
+  specializations" (a 2026-08-30 audit did, and chased a non-gap): a **baked** shader never reaches
+  the spec-module path at all, because its `--overrides` WGSL carries `@id()` declarations and
+  specialization becomes `WGPUConstantEntry` at pipeline creation. A `specmod#` record existing at
+  all means a bake **miss** (or, with `webgpu_runtime_overrides` on, a frozen-retry fallback —
+  `override_translate_fallback` counts those).
 - ⚠ **`translate_ms` is the second, separate number, and it is the big one** (added 2026-08-30). `ms`
   brackets only the create call; `translate_ms` brackets everything before it — the SPIR-V
   spec-constant patch, Tint, and every WGSL rewrite pass — which was previously not measured at all.
