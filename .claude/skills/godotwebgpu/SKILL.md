@@ -220,14 +220,31 @@ bottom edges** (`origin + size`), never its extents. Comparing an absolute coord
 scissored every off-origin pass to nothing and silently deleted all positional shadows for the
 project's entire history (RL-048). An empty scissor raises no validation error.
 
-## Performance — the backend's whole shape is an IPC argument
+## Performance — measured 2026-09-01, and the IPC story is only half of it
 
-Every GPU call crosses a WASM→JS→browser-GPU-process IPC boundary at 40–250× native per-call cost, so
-Godot's "commands are free" forward-mobile renderer becomes **IPC-bound, not GPU-bound**. The optimization
-hierarchy, in order: **eliminate calls** (batching, merging, dedup) → **shrink payloads** → **move work to
-build time**. That campaign took web from 3.25× slower than native to roughly parity. Read
-`references/site/PERFORMANCE_AND_OPTIMIZATION.md` before any perf work, and never micro-optimize a
-call that could be removed.
+Every GPU call crosses a WASM→JS→browser-GPU-process boundary, so the fork's campaign (batching,
+merging, dedup; `references/site/PERFORMANCE_AND_OPTIMIZATION.md`) was right to count calls. But the
+2026-09-01 session's bed (`webgpu_tests/perf/`, CommonGrounds-shaped scenes, real Chrome, rAF busy
+time + a per-frame WebGPU API census) found the frame was dominated by **two defects that count as
+one call each**, present in GodotWebGPU 4.6.2 and hogdot alike:
+
+| defect | per frame (40 SubViewport puppets) | fix |
+| --- | --- | --- |
+| dynamic-persistent buffers (`MultiUmaBuffer`: canvas + mobile instance data) flushed as a whole 2 MB slice per update | 169 `writeBuffer` calls, **163 MB**, 48 % of CPU samples | range-aware `RDD::buffer_flush(id, offset, size)`; callers pass what they wrote; the canvas flushes only its own instances (`instance_data_flush_from`) — the slice base is derived from `frame_idx` on every call |
+| "proactive encoder isolation" (5f5efee119): finish + `queue.submit` + new encoder before every render pass whose attachment is TextureBinding\|RenderAttachment, i.e. every render target | **65 submits** | off by default; `rendering/rendering_device/webgpu_encoder_isolation=true` or `?webgpu_encoder_isolation` restores it (it only ever preserved earlier passes when a validation error invalidated a command buffer) |
+
+Result on the M5: `world` 55.9 fps / **15.0 ms** busy → 118.5 fps (vsync cap) / **1.5 ms**; 81 puppets
+31 → 120 fps. Per-draw cost after the fix is ~1.2 µs (draw + setBindGroup), linear to 4096 draws.
+Material sets with dynamic offsets are no longer rebound when unchanged. ⚠ **Every driver change gets
+a screenshot A/B** (`bench.mjs --screenshot`, `hold`): the first flush patch made 39 of 40 puppets
+vanish while the fps "improved". The ledger is `webgpu_tests/perf/HANDOFF.md`.
+
+Pipelines: on web `PipelineHashMapRD` compiles inline (RL-043), so the first draw of a new mobile
+variant waited ~130 ms for Dawn's GPU-process compile while the main thread was idle (rAF busy < 1 ms).
+`RDD::pipeline_creation_set_deferred` + `pipeline_is_ready` let non-blocking requests use
+`wgpuDeviceCreateRenderPipelineAsync` while the ubershader draws; the completion is
+`AllowSpontaneous` and only stores handles (the fork's parked attempt lost fps to per-draw polling and
+Tint-worker plumbing, `references/notes/finish_async_shader_comp.md` — none of that is here).
 
 ## Driver telemetry — `window.__cgPerf` (added 2026-08-30)
 

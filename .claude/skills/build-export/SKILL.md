@@ -370,6 +370,15 @@ CommonGrounds/web) or the core shaders bake for the wrong renderer and miss at r
 through `compile_stages` (a Metal editor otherwise emits 1.6, which runtime Tint rejects). Keep
 that in mind before "simplifying" the extra parameter away.
 
+⚠ **The export cache reused SPIR-V-only containers forever** (fixed 2026-09-01). The baker keeps
+its compiled containers under `.godot/exported/<id>/shader_baker/<platform>/<driver>` and never
+re-validates them, and the export platform caches customized resources by a per-plugin hash — so
+one export during a stale-CLI window (or before WGSL baking existed) left every later export with
+13 of 16 scene shader versions unbaked and no warning. Both keys now carry the bake state
+(`webgpu-wgsl-<pipeline id>` vs `webgpu-spv`). Audit a pck's coverage with
+`webgpu_tests/perf/pck-bake-audit.py`-style parsing of `.godot/**/*.webgpu.cache` (flag bit 0 of the
+WebGPU header = baked WGSL), and read `__cgPerf.counters.baked_wgsl_hit/miss` at runtime.
+
 ⚠ **The baked cache only hits when the editor and the export template are built from the same
 commit** — `GODOT_VERSION_HASH` is part of every cache path (RL-055). Commit first, then build
 both, then export. A skewed pair degrades silently to full runtime compilation.
