@@ -205,12 +205,36 @@ Defined in `.github/workflows/webgpu_tests.yml`. Runs on push/PR to `webgpu-4.6.
 |-----|-----------|---------|---------------|
 | `shader-corpus` | — | 10 min | Yes |
 | `build-webgpu` | — | 90 min | Yes |
-| `validate-spirv` | build-webgpu | 10 min | Yes |
-| `smoke-test` | build-webgpu | 15 min | Yes |
+| `validate-spirv` | build-webgpu | 10 min | **Quarantined** — opt-in |
+| `smoke-test` | build-webgpu | 15 min | **Quarantined** — opt-in |
 | `scene-smoketest` | — | 20 min | Yes |
 | `resource-lifecycle` | — | 15 min | Yes |
 | `screenshot-comparison` | — | 20 min | No (warning only) |
 | `test-summary` | all above | — | — |
+
+### Quarantined: SPIR-V validation and the Chromium smoke test
+
+`validate-spirv` and `smoke-test`, plus the `Export test project with SPIR-V dump`
+step that feeds them, are **off by default since 2026-09-01**. Run them
+deliberately with the workflow's `spirv_validation` dispatch input.
+
+They are the only part of this suite that has never gone green. In run
+`33509935210` the coverage scene reached `[ShaderCoverage] PASS` and saved its
+report, then sat in renderer teardown under Xvfb/llvmpipe until `timeout` killed
+the step with exit 124 — having already produced every artifact it exists to
+produce. Whether that teardown is slow or genuinely stuck was never established,
+and nine consecutive runs were spent guessing at it against a 40-minute build.
+
+Nothing ships from these jobs. COMMONGROUNDS consumes hogdot through release
+assets on `cg-v*` tags built by `cg_release.yml`, pinned by SHA-256 in its
+`engine.env`, so no game build, export or deploy reads anything this workflow
+produces. Quarantining costs engine-side assurance only.
+
+The next debugging step is to stop depending on the process exiting at all: the
+scene's last act is saving its report, so once `Report saved to:` appears every
+artifact is on disk and the process can be killed outright. Prove that shell
+logic locally against a fake binary that prints the markers and then hangs
+before spending another runner on it.
 
 ### Trigger Paths
 
