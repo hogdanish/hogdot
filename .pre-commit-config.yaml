@@ -220,5 +220,26 @@ repos:
 #
 # This is still the "repo: local" scope, so new local hooks can be defined directly at this indentation:
 #     - id: new-local-hook
+      - id: check-webgpu-ci-contracts
+        name: check-webgpu-ci-contracts
+        language: python
+        entry: python hogdot/check_webgpu_ci_contracts.py
+        pass_filenames: false
+        files: ^(\.github/workflows/(cg_release|web_builds|webgpu_tests)\.yml|hogdot/(check_webgpu_ci_contracts|test_check_webgpu_ci_contracts)\.py)$
+
+      - id: test-webgpu-screenshot-launch
+        name: test-webgpu-screenshot-contracts
+        language: system
+        entry: node --test webgpu_tests/screenshot_comparison/launch_options.test.mjs
+        pass_filenames: false
+        files: ^webgpu_tests/screenshot_comparison/(launch_options\.test|screenshot_tests)\.mjs$
+
+      - id: test-webgpu-scene-results
+        name: test-webgpu-scene-results
+        language: system
+        entry: node --test webgpu_tests/scene_smoketest/result_contract.test.mjs
+        pass_filenames: false
+        files: ^webgpu_tests/(scene_smoketest/(result_contract\.test|run_scenes)\.mjs|scene_smoketest/scenes\.json|benchmark/godot/scene_[^/]+/project\.godot|local_ci\.sh)$
+
 # To add external repo hooks, bring the indentation back to:
 # - repo: my-remote-hook

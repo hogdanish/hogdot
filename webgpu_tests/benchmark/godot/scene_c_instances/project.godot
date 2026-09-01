@@ -18,6 +18,3 @@ window/vsync/vsync_mode=0
 
 renderer/rendering_method="mobile"
 renderer/rendering_method.web="mobile"
-
-[autoload]
-BenchmarkProfiler="*res://benchmark_profiler.gd"

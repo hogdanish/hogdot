@@ -35,6 +35,7 @@ import { runTests as testTextureLayout } from './test_texture_layout.mjs';
 import { runTests as testTextureConversion } from './test_texture_conversion.mjs';
 import { runTests as testBindGroupCompat } from './test_bind_group_compat.mjs';
 import { runTests as testOverrideFiltering } from './test_override_filtering.mjs';
+import { runTests as testWebFeaturePreflight } from './test_web_feature_preflight.mjs';
 
 console.log('================================================================');
 console.log('  WebGPU Driver Unit Tests');
@@ -54,6 +55,7 @@ testTextureLayout();
 testTextureConversion();
 testBindGroupCompat();
 testOverrideFiltering();
+testWebFeaturePreflight();
 
 // Print summary and exit.
 const results = summary();

@@ -15,10 +15,27 @@ var spinning_cubes: Array[MeshInstance3D] = []
 var torus_node: MeshInstance3D
 
 const CUBE_COUNT := 5
-const NUM_SUBVIEWPORTS := 6
-const SUBVIEWPORT_SIZE := 512
+const DEFAULT_NUM_SUBVIEWPORTS := 6
+const DEFAULT_SUBVIEWPORT_SIZE := 512
+
+var num_subviewports: int = DEFAULT_NUM_SUBVIEWPORTS
+var subviewport_size: int = DEFAULT_SUBVIEWPORT_SIZE
+
+
+func _web_smoke_int(property: String, default_value: int) -> int:
+	if not OS.has_feature("web"):
+		return default_value
+	var value: Variant = JavaScriptBridge.eval(
+		"Number(window.sceneSmokeConfig?.%s || 0)" % property, true
+	)
+	return int(value) if value != null and float(value) > 0.0 else default_value
 
 func _ready() -> void:
+	num_subviewports = _web_smoke_int("postfx_viewports", DEFAULT_NUM_SUBVIEWPORTS)
+	subviewport_size = _web_smoke_int("postfx_size", DEFAULT_SUBVIEWPORT_SIZE)
+	if num_subviewports != DEFAULT_NUM_SUBVIEWPORTS or subviewport_size != DEFAULT_SUBVIEWPORT_SIZE:
+		print("[SCENE-SMOKE] postfx viewports=%d size=%d" % [num_subviewports, subviewport_size])
+
 	# FPS overlay
 	var canvas := CanvasLayer.new()
 	add_child(canvas)
@@ -103,9 +120,9 @@ func _ready() -> void:
 	torus_mesh.inner_radius = 0.35
 	torus_mesh.outer_radius = 0.75
 
-	for vi in NUM_SUBVIEWPORTS:
+	for vi in num_subviewports:
 		var viewport := SubViewport.new()
-		viewport.size = Vector2i(SUBVIEWPORT_SIZE, SUBVIEWPORT_SIZE)
+		viewport.size = Vector2i(subviewport_size, subviewport_size)
 		viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
 		add_child(viewport)
 
@@ -133,7 +150,7 @@ func _ready() -> void:
 		var torus := MeshInstance3D.new()
 		torus.mesh = torus_mesh
 		var torus_mat := StandardMaterial3D.new()
-		torus_mat.albedo_color = Color.from_hsv(float(vi) / NUM_SUBVIEWPORTS, 0.75, 0.9)
+		torus_mat.albedo_color = Color.from_hsv(float(vi) / num_subviewports, 0.75, 0.9)
 		torus_mat.roughness = 0.15
 		torus_mat.metallic = 0.85
 		torus.set_surface_override_material(0, torus_mat)
@@ -150,7 +167,7 @@ func _ready() -> void:
 		monitor_mat.albedo_texture = viewport.get_texture()
 		monitor_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 		monitor.set_surface_override_material(0, monitor_mat)
-		var angle := TAU * vi / NUM_SUBVIEWPORTS
+		var angle := TAU * vi / num_subviewports
 		monitor.transform.origin = Vector3(cos(angle) * 4.0, 1.1, sin(angle) * 4.0)
 		monitor.transform = monitor.transform.looking_at(Vector3(0, 1.1, 0), Vector3.UP)
 		add_child(monitor)

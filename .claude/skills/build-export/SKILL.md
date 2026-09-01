@@ -283,8 +283,9 @@ The reasoning, because it will need revisiting if a web build misbehaves:
 corrected here from the fork's own sources. Don't reintroduce it.
 
 **CI pin, decided 2026-08-27: emsdk `6.0.8` for every `webgpu=yes` CI build** — the two WebGPU jobs
-in `web_builds.yml` (per-matrix `em-version-override: webgpu` → `EM_VERSION_WEBGPU`) and all four
-templates in `cg_release.yml`. Rationale: the driver targets emdawnwebgpu's current `webgpu.h`
+in `web_builds.yml` (per-matrix `em-version-override: webgpu` → `EM_VERSION_WEBGPU`), all four
+templates in `cg_release.yml`, and the template build in `webgpu_tests.yml`. Rationale: the driver
+targets emdawnwebgpu's current `webgpu.h`
 (4-parameter `WGPUQueueWorkDoneCallback` etc.), which upstream's `EM_VERSION: 4.0.11` pin cannot
 compile — run 33120336421 failed exactly there — and 6.0.8 is the exact emcc the shipped
 CommonGrounds templates were built and verified with (the local Homebrew keg measured 6.0.8,
@@ -293,7 +294,7 @@ on 6.0.x only, so compiling it under 4.x would produce an artifact nobody tests.
 canary job deliberately **stays on upstream's 4.0.11** — it exists to prove the default web config
 still builds as upstream builds it, and it is unverified under emcc 6. ⚠ CI is pinned to an exact
 emsdk on purpose while the local Homebrew emcc floats (table above) — when they drift, local
-observations stop transferring to CI; bump `EM_VERSION_WEBGPU` (both files, in lockstep) only
+observations stop transferring to CI; bump `EM_VERSION_WEBGPU` (all three files, in lockstep) only
 together with rebuilt-and-verified shipped templates. ⚠ The webgpu CI jobs also carry
 `EMCC_CFLAGS: -Wno-unused-template` (workflow env + `import_env_vars=EMCC_CFLAGS` in their scons
 flags): 6.0.8's clang warns on unused static function templates in **upstream** headers
@@ -586,8 +587,65 @@ plain `target=editor` job — the compile gate for the release channel's baker e
 upstream's emsdk 4.0.11). The android/ios/macos/windows workflows and the rest of upstream's
 Linux/web matrices are **not called** — those platforms ship on official Godot (the game's S8
 engine split), and the ~20 concurrent-job account cap means dead jobs queue against the release
-workflow and the game repo's Actions. `webgpu_tests.yml` is untouched (self-triggered on
-`drivers/webgpu/**` PRs). `runner.yml` triggers on `branches: ['**', '!dependabot/**']` only, so
+workflow and the game repo's Actions. `webgpu_tests.yml` remains self-triggered on
+`drivers/webgpu/**` PRs. Its one `webgpu=yes` build uses the same emsdk pin, setup action, warning
+suppression and no-Closure configuration as the trimmed matrix; `check_webgpu_ci_contracts.py` plus
+its downstream pre-commit hooks fail when any of the three pins, required build flags or
+browser-execution contracts drift. The screenshot job runs Chromium in its supported Linux headless
+Vulkan mode and Firefox headed under `xvfb-run`; Mesa llvmpipe supplies both hosted adapters. Earlier
+headed Chromium lost its external Dawn Instance and headless Firefox exposed no adapter in run
+33481861452. A green run requires exactly **8/8
+data-bearing captures** (four deterministic raw-WebGPU scenes in both browsers), writes
+`screenshots/report.json`, and uploads the screenshot artifact with `if-no-files-found: error`;
+zero, partial and one-browser known-bad tests guard that closure. The engine scene gate now lives in
+`build-webgpu`, where the built Linux editor and exact template actually exist: it exports all eight
+tracked `benchmark_*` projects and requires the exact **16/16 scene/browser matrix** to pass in headless
+Chromium/Vulkan and headed Firefox under Xvfb. Browser execution keeps the dynamic-link template shape
+used by the release channel. Run 33492977615 proved the earlier startup failure was not dynamic linking:
+the standard export shell rejected all eight WebGPU projects because its generic feature preflight
+required WebGL2 even when `renderingDriver` was `webgpu`. The shell now skips only that irrelevant
+precondition for WebGPU while retaining WebGL2 as mandatory for Compatibility exports; a no-WebGL
+known-bad test locks the renderer-specific contract. A pass requires the engine-start marker plus a
+capturable, nonblank canvas; heavy scenes are polled for render proof until the per-scene timeout instead
+of being judged after a fixed ten-second post-start delay. Hosted software rendering uses explicit smoke
+profiles for the two outliers: `benchmark_postfx` still exercises SubViewports, SSAO and glow with two
+256px targets, while `benchmark_batching` still creates individual MeshInstance3D nodes across all ten
+materials at 5,000 instances. Required `[SCENE-SMOKE]` markers prove the profile reached each exported
+project; direct benchmark runs retain the full six 512px targets and 60,000 instances. Their first
+capture waits 30 seconds and is bounded by the remainder of the 180-second scene deadline. Playwright
+previously let a single capture overrun the nominal 30-second timeout by more than a minute. A missing or
+timed-out capture is a failure rather than an assumed render. The benchmark projects no longer declare the shared
+`benchmark_profiler.gd` as a permanently available autoload: `run_benchmark.sh` already injects and
+removes it for measurement runs, and the scene exporter now rejects any dangling project autoload before
+export. The workflow contract enumerates
+all eight tracked IDs and a known-bad test proves that dropping any one fails. The former independent
+job had no exports or artifact; all 19 configured scenes reported `SKIP (not exported)` while it
+exited 0 in run 33481861452. The other 11 entries point outside this checkout into the absent
+`godot-demo-projects` repository, so they are honestly local/manual coverage rather than advertised
+hosted coverage. The headed downstream smoke test also runs under Xvfb. The final summary requires
+every dependency to be exactly `success` (skipped/cancelled is not green).
+Run 33478955073 demonstrated the earlier stale contracts: emsdk 4.0.11 exposed a three-parameter
+`WGPUQueueWorkDoneCallback` against the driver's four-parameter callback, and headed Playwright died
+before either browser opened. Run 33487995717 subsequently proved the complete **8/8 screenshot**
+artifact under the hybrid launch topology. Run 33492977615 repeated **0/8 Chromium**, but the added
+diagnostics exposed the common pre-WASM WebGL2 rejection above rather than a GPU or shader failure.
+Run 33497433868 reached **6/8 Chromium** after that source fix; the remaining post-FX and 60k-instance
+scenes emitted no GPU, shader, or device-lost error, but a first capture at ten seconds blocked past the
+nominal deadline and returned blank. All eight exports also emitted the now-removed dangling-profiler
+autoload error. A later isolated full-load software-adapter control lost the WebGPU device in both scenes,
+so merely waiting longer was rejected in favor of the explicit smoke profiles above.
+Run `33505889510` proved the source-compatible **16/16 scene matrix**: exactly 8/8 in Chromium and
+8/8 in Firefox (`gh run view 33505889510 --job 99849704446 --log`). It also exposed that the next
+producer step had never been part of that proof. It installed the template under stale hard-coded
+`4.6.2.dev` while the built editor expected `4.7.2.stable`, ignored both the copy and export exits,
+ran the SPIR-V dump under `--headless` even though shader compilation needs a renderer, and let both
+empty uploads warn. The build job therefore went green while downstream consumers failed because
+`spirv-dump` and `webgpu-export` did not exist. The fixed workflow aliases the built dlink release
+template to both tracked custom-template paths, fails the headless export closed, runs the Mobile
+coverage scene separately under Xvfb, asserts the HTML and a non-empty SPIR-V set, and makes both
+uploads fail on missing files. `check_webgpu_ci_contracts.py` rejects each known-bad shape. A green
+rerun with both downstream consumers is the remaining artifact-closure proof.
+`runner.yml` triggers on `branches: ['**', '!dependabot/**']` only, so
 `cg-v*` tag pushes never start the matrix and a Dependabot branch push does not run the whole
 matrix a second time on top of its own PR (on the push event the `sources-changed` gate does not
 apply, so a workflow-file-only bump would otherwise trigger the editor and web builds for nothing).
@@ -599,10 +657,14 @@ push trigger with `!dependabot/**`; (2) `web_builds.yml` — drop wasm64 + extra
 wasm32 canary, keep the two webgpu jobs with `em-version-override: webgpu`, the
 `EM_VERSION_WEBGPU: 6.0.8` + `EMCC_CFLAGS: -Wno-unused-template` env, and per-job
 `import_env_vars=EMCC_CFLAGS use_closure_compiler=no` (rationale for each: the Emscripten decision
-record above); (3) `linux_builds.yml` — one plain editor matrix entry; (4) re-SHA-pin any new
+record above); (3) `webgpu_tests.yml` — keep the same WebGPU pin, setup action, suppression and
+no-Closure flags, plus the hybrid Chromium-headless/Firefox-Xvfb launches, renderer-aware shell
+preflight, complete-result and artifact
+closure, and all three contract hooks; (4)
+`linux_builds.yml` — one plain editor matrix entry; (5) re-SHA-pin any new
 third-party `uses:` (repo setting `sha_pinning_required` rejects tag refs, and
 `allowed_actions: selected` blocks unlisted owners — patterns live in the repo's Actions settings,
-set 2026-08-27); (5) `.github/dependabot.yml` is fork-only and survives untouched, but if upstream
+set 2026-08-27); (6) `.github/dependabot.yml` is fork-only and survives untouched, but if upstream
 adds a composite action carrying a third-party `uses:`, it needs its own `directory:` entry there.
 
 - **Every third-party action is SHA-pinned** (`@<40-hex> # vN`), across workflows *and* the
