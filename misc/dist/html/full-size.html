@@ -163,6 +163,7 @@ const engine = new Engine(GODOT_CONFIG);
 
 	const missing = Engine.getMissingFeatures({
 		threads: GODOT_THREADS_ENABLED,
+		webgl2: GODOT_RENDERING_DRIVER !== 'webgpu',
 	});
 
 	if (GODOT_RENDERING_DRIVER === 'webgpu' && (typeof navigator === 'undefined' || !navigator.gpu)) {

@@ -41,8 +41,11 @@
       "id": "benchmark_postfx",
       "path": "../benchmark/godot/scene_f_postfx",
       "preset": "WebGPU",
+      "capture_delay_ms": 30000,
       "max_errors": 2,
-      "description": "Post-processing (SubViewport + SSAO + Bloom) — known texture sync warning"
+      "description": "Post-processing (SubViewport + SSAO + Bloom) — known texture sync warning",
+      "inject_script": "window.sceneSmokeConfig = { postfx_viewports: 2, postfx_size: 256 };",
+      "pass_patterns": ["[SCENE-SMOKE] postfx viewports=2 size=256"]
     },
     {
       "id": "benchmark_shadows",
@@ -55,8 +58,11 @@
       "id": "benchmark_batching",
       "path": "../benchmark/godot/scene_h_batching",
       "preset": "WebGPU",
+      "capture_delay_ms": 30000,
       "max_errors": 0,
-      "description": "Render batching (60k instances, 10 materials)"
+      "description": "Render batching (60k instances, 10 materials; hosted smoke uses 5k)",
+      "inject_script": "window.sceneSmokeConfig = { batching_meshes: 5000 };",
+      "pass_patterns": ["[SCENE-SMOKE] batching meshes=5000 materials=10"]
     },
     {
       "id": "demo_2d_particles",

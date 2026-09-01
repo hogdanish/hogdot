@@ -247,6 +247,7 @@ async function initWebGPU() {
 
 	const missing = Engine.getMissingFeatures({
 		threads: GODOT_THREADS_ENABLED,
+		webgl2: false,
 	});
 
 	if (missing.length !== 0) {

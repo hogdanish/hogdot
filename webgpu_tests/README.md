@@ -17,7 +17,7 @@ Automated tests for the Godot WebGPU rendering backend. Validates the full shade
 
 The WebGPU shader pipeline is:
 
-```
+```text
 GLSL → SPIR-V (glslang, at editor build time)
      → 7 binary rewriting passes (C++ spirv_preprocess, at runtime)
      → WGSL (Tint C++ library, linked into engine, at runtime)
@@ -25,6 +25,7 @@ GLSL → SPIR-V (glslang, at editor build time)
 ```
 
 The SPIR-V preprocessing passes (C++):
+
 1. **freeze_spec_constant_ops** — Evaluates `OpSpecConstantOp` into plain constants
 2. **rewrite_copy_logical** — `OpCopyLogical` → `OpCopyObject` (SPIR-V 1.4+ struct copy)
 3. **rewrite_terminate_invocation** — `OpTerminateInvocation` → `OpKill` (modern discard)
@@ -72,6 +73,7 @@ node webgpu_tests/shader_corpus/validate_spirv_dump.mjs /tmp/spirv_dump/
 The validator uses an **expected failures baseline** (`shader_corpus/expected_failures.json`) — shader variants compiled by the Vulkan editor that the WebGPU runtime never uses (different code paths). CI fails only on **regressions** (new failures beyond the baseline).
 
 To update the baseline after intentional changes:
+
 ```bash
 node webgpu_tests/shader_corpus/validate_spirv_dump.mjs /tmp/spirv_dump/ --update-baseline
 ```
@@ -104,7 +106,16 @@ node smoke_test.mjs ./export/
 
 ### 4. Scene Smoketest — Multi-Browser (requires pre-exported scenes)
 
-Runs 18 demo and benchmark scenes across Chrome, Firefox, and Safari:
+Runs the eight tracked benchmark projects plus 11 optional Godot demo-project entries across Chrome,
+Firefox, and Safari. The demo entries require a sibling `godot-demo-projects` checkout and are not
+part of hosted CI; hosted CI exports and requires all eight tracked benchmarks in both browsers.
+The benchmark projects are valid standalone projects: `run_benchmark.sh` temporarily injects the
+shared profiler for measurement runs, while smoke-test exports reject any dangling autoload before
+starting the editor. Hosted smoke testing keeps the same projects and rendering features but scales the
+two software-renderer-heavy workloads explicitly: post-FX uses two 256px SubViewports and batching uses
+5,000 individual instances. Required `[SCENE-SMOKE]` markers prove those profiles were applied; direct
+benchmark runs retain the full six 512px SubViewports and 60,000 instances. Their first compositor
+capture is deferred for 30 seconds and remains bounded by the 180-second per-scene deadline.
 
 ```bash
 cd webgpu_tests/scene_smoketest
@@ -116,11 +127,13 @@ node run_scenes.mjs --browser safari      # Safari only (macOS, requires "Allow 
 node run_scenes.mjs --scene benchmark_pbr # Single scene, default browser
 ```
 
-**Pass criteria:** Engine starts (canvas > 300px), no GPU validation errors, no shader failures, no device-lost.
+**Pass criteria:** Engine starts, the compositor produces a data-bearing canvas capture, and there are
+no disallowed GPU validation errors, shader failures, device loss, or missing scene-specific markers.
 
 **Safari prerequisite:** Enable Safari → Develop → "Allow JavaScript from Apple Events" (uses real Safari via AppleScript since Playwright's safaridriver disables WebGPU).
 
 **Exporting scenes** (requires editor + web template):
+
 ```bash
 node run_scenes.mjs --export --browser chrome
 ```
@@ -146,7 +159,7 @@ node screenshot_tests.mjs                      # subsequent runs compare
 
 Defined in `.github/workflows/webgpu_tests.yml`. Runs on push/PR to `webgpu-4.6.2` when `drivers/webgpu/`, `servers/rendering/`, or `webgpu_tests/` are modified.
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────┐
 │  CI Pipeline (.github/workflows/webgpu_tests.yml)               │
 ├─────────────────────────────────────────────────────────────────┤
@@ -165,14 +178,9 @@ Defined in `.github/workflows/webgpu_tests.yml`. Runs on push/PR to `webgpu-4.6.
 │  │ comparison      │                                            │
 │  └─────────────────┘                                            │
 │                                                                 │
-│  ┌─────────────────┐  (parallel, no build needed)               │
-│  │ scene-smoketest │  18 scenes × Chrome + Firefox              │
-│  │                 │  (pre-exported in repo)                    │
-│  └─────────────────┘                                            │
-│                                                                 │
 │  ┌─────────────────┐                                            │
 │  │ build-webgpu    │  Web template + Linux editor + export      │
-│  │ (~60 min)       │  + SPIR-V dump (309 shaders)               │
+│  │ (~60 min)       │  + 8 benchmarks × 2 browsers + SPIR-V dump │
 │  └────────┬────────┘                                            │
 │           │                                                     │
 │           ├──────────────┐                                      │
@@ -205,6 +213,7 @@ Defined in `.github/workflows/webgpu_tests.yml`. Runs on push/PR to `webgpu-4.6.
 ### Trigger Paths
 
 CI runs when any of these paths change:
+
 - `drivers/webgpu/**`
 - `webgpu_tests/**`
 - `servers/rendering/**`

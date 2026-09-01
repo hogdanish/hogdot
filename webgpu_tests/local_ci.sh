@@ -203,16 +203,16 @@ echo ""
 
 run_test "Scene smoketest — Chrome (19 scenes)" \
     "$SCRIPT_DIR/scene_smoketest" \
-    node run_scenes.mjs --browser chrome --timeout 30000
+    node run_scenes.mjs --browser chrome --timeout 180000
 
 run_test "Scene smoketest — Firefox (19 scenes)" \
     "$SCRIPT_DIR/scene_smoketest" \
-    node run_scenes.mjs --browser firefox --timeout 30000
+    node run_scenes.mjs --browser firefox --timeout 180000
 
 if [[ "$NO_SAFARI" == false && "$(uname)" == "Darwin" ]]; then
     run_test "Scene smoketest — Safari (19 scenes)" \
         "$SCRIPT_DIR/scene_smoketest" \
-        node run_scenes.mjs --browser safari --timeout 30000
+        node run_scenes.mjs --browser safari --timeout 180000
 else
     printf "${BOLD}▶ %-40s${NC}${YELLOW}SKIP${NC} (--no-safari or not macOS)\n" "Scene smoketest — Safari (19 scenes)"
     SKIPPED=$((SKIPPED + 1))

@@ -20,7 +20,15 @@ env:
     dev_mode=yes
     tests=no
     debug_symbols=no
-  EM_VERSION: 4.0.11
+  # The WebGPU driver targets the current emdawnwebgpu callback ABI and is
+  # verified against this exact toolchain. Keep this in lockstep with the
+  # WebGPU jobs in web_builds.yml and cg_release.yml; the downstream
+  # pre-commit contract fails if one pin drifts.
+  EM_VERSION_WEBGPU: 6.0.8
+  # emcc 6.0.8 diagnoses an unused static function template in upstream code.
+  # Import this only into the WebGPU build; see the build-export decision
+  # record before changing or extending the suppression.
+  EMCC_CFLAGS: -Wno-unused-template
 
 jobs:
   # ═══════════════════════════════════════════════════════════════════════════════
@@ -87,18 +95,26 @@ jobs:
   # ═══════════════════════════════════════════════════════════════════════════════
   build-webgpu:
     runs-on: ubuntu-24.04
-    name: Build WebGPU Template + Dump SPIR-V
-    timeout-minutes: 90
+    name: Build WebGPU Template + Browser Scenes
+    timeout-minutes: 120
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           submodules: recursive
 
-      - name: Set up Emscripten
-        uses: mymindstorm/setup-emsdk@6ab9eb1bda2574c4ddb79809fc9247783eaf9021 # v14
+      - name: Verify WebGPU CI contracts
+        run: python3 hogdot/check_webgpu_ci_contracts.py
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          version: ${{ env.EM_VERSION }}
+          node-version: '20'
+
+      - name: Set up Emscripten
+        uses: emscripten-core/setup-emsdk@4528d102f7230f0e7b276855c01ea1159be0e984 # v16
+        with:
+          version: ${{ env.EM_VERSION_WEBGPU }}
           no-cache: true
 
       - name: Verify Emscripten setup
@@ -116,7 +132,9 @@ jobs:
       - name: Build WebGPU export template
         uses: ./.github/actions/godot-build
         with:
-          scons-flags: ${{ env.SCONS_FLAGS }} threads=no dlink_enabled=yes webgpu=yes opengl3=no
+          scons-flags: >-
+            ${{ env.SCONS_FLAGS }} threads=no dlink_enabled=yes webgpu=yes
+            opengl3=no import_env_vars=EMCC_CFLAGS use_closure_compiler=no
           platform: web
           target: template_release
 
@@ -126,9 +144,40 @@ jobs:
           cache-name: web-webgpu-test
         continue-on-error: true
 
+      - name: Restore editor sources removed by the template build
+        run: git restore --source=HEAD --worktree -- editor
+
       - name: Build Linux editor (for export + SPIR-V dump)
         run: |
           scons platform=linuxbsd target=editor dev_mode=yes tests=no debug_symbols=no -j$(nproc)
+
+      - name: Install scene smoketest browsers
+        working-directory: webgpu_tests/scene_smoketest
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers vulkan-tools
+          vulkaninfo --summary
+          npm install
+          npx playwright install chromium firefox --with-deps
+
+      - name: Export and run tracked benchmark scenes (Chromium)
+        working-directory: webgpu_tests/scene_smoketest
+        run: >-
+          xvfb-run --auto-servernum node run_scenes.mjs
+          --export
+          --browser chrome
+          --scenes benchmark_sprites,benchmark_pbr,benchmark_instances,benchmark_particles,benchmark_animated,benchmark_postfx,benchmark_shadows,benchmark_batching
+          --editor-bin ../../bin/godot.linuxbsd.editor.x86_64
+          --template-zip ../../bin/godot.web.template_release.wasm32.nothreads.dlink.zip
+          --timeout 180000
+
+      - name: Run tracked benchmark scenes (Firefox)
+        working-directory: webgpu_tests/scene_smoketest
+        run: >-
+          xvfb-run --auto-servernum node run_scenes.mjs
+          --browser firefox
+          --scenes benchmark_sprites,benchmark_pbr,benchmark_instances,benchmark_particles,benchmark_animated,benchmark_postfx,benchmark_shadows,benchmark_batching
+          --timeout 180000
 
       - name: Export test project with SPIR-V dump
         run: |
@@ -196,11 +245,11 @@ jobs:
           node webgpu_tests/shader_corpus/validate_spirv_dump.mjs /tmp/spirv_dump/
 
   # ═══════════════════════════════════════════════════════════════════════════════
-  # Smoke Test: Run exported project in headless Chrome
+  # Smoke Test: Run exported project in headed Chrome under Xvfb
   # ═══════════════════════════════════════════════════════════════════════════════
   smoke-test:
     runs-on: ubuntu-24.04
-    name: Headless Chrome Smoke Test
+    name: Chromium Smoke Test
     needs: [build-webgpu]
     timeout-minutes: 15
     steps:
@@ -227,37 +276,7 @@ jobs:
 
       - name: Run smoke test
         working-directory: webgpu_tests/test_project
-        run: node smoke_test.mjs ./export/
-
-  # ═══════════════════════════════════════════════════════════════════════════════
-  # Scene Smoketest: 18 demos/benchmarks across Chrome + Firefox
-  # ═══════════════════════════════════════════════════════════════════════════════
-  scene-smoketest:
-    runs-on: ubuntu-24.04
-    name: Scene Smoketest (Chrome + Firefox)
-    timeout-minutes: 20
-    steps:
-      - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: '20'
-
-      - name: Install Playwright and browsers
-        run: |
-          cd webgpu_tests/scene_smoketest
-          npm install
-          npx playwright install chromium firefox --with-deps
-
-      - name: Run scene smoketest (Chrome)
-        working-directory: webgpu_tests/scene_smoketest
-        run: node run_scenes.mjs --browser chrome --timeout 30000
-
-      - name: Run scene smoketest (Firefox)
-        working-directory: webgpu_tests/scene_smoketest
-        run: node run_scenes.mjs --browser firefox --timeout 30000
+        run: xvfb-run --auto-servernum node smoke_test.mjs ./export/
 
   # ═══════════════════════════════════════════════════════════════════════════════
   # Resource Lifecycle: Browser-based stress test
@@ -304,6 +323,9 @@ jobs:
 
       - name: Install Playwright and browsers
         run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers vulkan-tools
+          vulkaninfo --summary
           cd webgpu_tests/screenshot_comparison
           npm init -y
           npm install playwright
@@ -311,7 +333,7 @@ jobs:
 
       - name: Run screenshot tests
         working-directory: webgpu_tests/screenshot_comparison
-        run: node screenshot_tests.mjs --update-baselines
+        run: xvfb-run --auto-servernum node screenshot_tests.mjs --update-baselines
         # First run creates baselines. On subsequent runs after baselines are committed,
         # change to: node screenshot_tests.mjs
 
@@ -322,6 +344,7 @@ jobs:
           name: screenshot-comparison
           path: webgpu_tests/screenshot_comparison/screenshots/
           retention-days: 14
+          if-no-files-found: error
 
   # ═══════════════════════════════════════════════════════════════════════════════
   # Summary
@@ -329,7 +352,7 @@ jobs:
   test-summary:
     runs-on: ubuntu-24.04
     name: Test Summary
-    needs: [shader-corpus, driver-unit-tests, validate-spirv, smoke-test, scene-smoketest, resource-lifecycle, screenshot-comparison]
+    needs: [shader-corpus, driver-unit-tests, build-webgpu, validate-spirv, smoke-test, resource-lifecycle, screenshot-comparison]
     if: always()
     steps:
       - name: Check results
@@ -340,42 +363,42 @@ jobs:
           echo ""
           echo "  Shader Corpus:        ${{ needs.shader-corpus.result }}"
           echo "  Driver Unit Tests:    ${{ needs.driver-unit-tests.result }}"
+          echo "  Build + Browser Scenes: ${{ needs.build-webgpu.result }}"
           echo "  SPIR-V Validation:    ${{ needs.validate-spirv.result }}"
           echo "  Smoke Test:           ${{ needs.smoke-test.result }}"
-          echo "  Scene Smoketest:      ${{ needs.scene-smoketest.result }}"
           echo "  Resource Lifecycle:   ${{ needs.resource-lifecycle.result }}"
           echo "  Screenshot Compare:   ${{ needs.screenshot-comparison.result }}"
           echo ""
 
           FAILED=0
 
-          if [ "${{ needs.shader-corpus.result }}" = "failure" ]; then
-            echo "::error::Shader corpus tests failed"
+          if [ "${{ needs.shader-corpus.result }}" != "success" ]; then
+            echo "::error::Shader corpus tests did not succeed"
             FAILED=1
           fi
-          if [ "${{ needs.driver-unit-tests.result }}" = "failure" ]; then
-            echo "::error::Driver unit tests failed"
+          if [ "${{ needs.driver-unit-tests.result }}" != "success" ]; then
+            echo "::error::Driver unit tests did not succeed"
             FAILED=1
           fi
-          if [ "${{ needs.validate-spirv.result }}" = "failure" ]; then
-            echo "::error::Engine SPIR-V validation failed — Tint cannot convert one or more shaders"
+          if [ "${{ needs.build-webgpu.result }}" != "success" ]; then
+            echo "::error::WebGPU build and exported browser scenes did not succeed"
             FAILED=1
           fi
-          if [ "${{ needs.smoke-test.result }}" = "failure" ]; then
-            echo "::error::Headless smoke test failed — shader compilation or WebGPU errors in browser"
+          if [ "${{ needs.validate-spirv.result }}" != "success" ]; then
+            echo "::error::Engine SPIR-V validation did not succeed"
             FAILED=1
           fi
-          if [ "${{ needs.scene-smoketest.result }}" = "failure" ]; then
-            echo "::error::Scene smoketest failed — one or more scenes have GPU/shader errors in Chrome or Firefox"
+          if [ "${{ needs.smoke-test.result }}" != "success" ]; then
+            echo "::error::Chromium smoke test did not succeed"
             FAILED=1
           fi
-          if [ "${{ needs.resource-lifecycle.result }}" = "failure" ]; then
-            echo "::error::Resource lifecycle tests failed"
+          if [ "${{ needs.resource-lifecycle.result }}" != "success" ]; then
+            echo "::error::Resource lifecycle tests did not succeed"
             FAILED=1
           fi
-          # Screenshot comparison failures are warnings, not blockers
-          if [ "${{ needs.screenshot-comparison.result }}" = "failure" ]; then
-            echo "::warning::Screenshot comparison detected visual differences"
+          if [ "${{ needs.screenshot-comparison.result }}" != "success" ]; then
+            echo "::error::Screenshot execution did not produce the complete Chromium + Firefox artifact"
+            FAILED=1
           fi
 
           if [ $FAILED -eq 1 ]; then

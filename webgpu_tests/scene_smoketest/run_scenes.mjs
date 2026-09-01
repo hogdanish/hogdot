@@ -1,7 +1,7 @@
 /**
  * Multi-Scene Multi-Browser WebGPU Smoke Test
  *
- * Exports and runs multiple Godot scenes in headless Chrome, Firefox, and/or Safari,
+ * Exports and runs multiple Godot scenes in Chrome, Firefox, and/or Safari,
  * validating:
  * - No GPU errors (device-lost, validation errors)
  * - No shader compilation failures
@@ -14,6 +14,7 @@
  *   node run_scenes.mjs [--export] [--export-only] [--skip-export]
  *                       [--scene <name>] [--scenes <name,name,...>]
  *                       [--browser <chrome|firefox|safari|all>]
+ *                       [--editor-bin <path>] [--template-zip <path>]
  *                       [--timeout <ms>] [--frames <n>]
  *
  * Options:
@@ -23,7 +24,9 @@
  *   --scene <name>     Run only the named scene (partial match supported)
  *   --scenes <a,b,...> Run comma-separated list of scenes (--scene also works)
  *   --browser <name>   Browser to test: chrome (default), firefox, safari, or all
- *   --timeout <ms>     Per-scene timeout (default: 30000)
+ *   --editor-bin <p>   Godot editor used by --export (overrides scenes.json)
+ *   --template-zip <p> Web template used by --export (overrides scenes.json)
+ *   --timeout <ms>     Per-scene timeout (default: 180000)
  *   --frames <n>       Minimum frames to wait (default: 60)
  *
  * Exit codes:
@@ -42,7 +45,7 @@ const __dirname = dirname(__filename);
 
 const SCENES_CONFIG = join(__dirname, 'scenes.json');
 const EXPORTS_DIR = join(__dirname, 'exports');
-const DEFAULT_TIMEOUT = 30000;
+const DEFAULT_TIMEOUT = 180000;
 const DEFAULT_FRAMES = 60;
 
 const MIME_TYPES = {
@@ -168,6 +171,15 @@ function exportScene(scene, editorBin, templateZip) {
         return { success: false, error: `project.godot not found at ${projectPath}` };
     }
 
+    const projectContents = readFileSync(join(projectPath, 'project.godot'), 'utf8');
+    const missingAutoloads = findMissingAutoloadTargets(projectPath, projectContents);
+    if (missingAutoloads.length > 0) {
+        return {
+            success: false,
+            error: `project.godot references missing autoloads: ${missingAutoloads.join(', ')}`,
+        };
+    }
+
     // Patch export preset to use our template
     const preset = scene.preset || 'WebGPU';
     const presetsPath = join(projectPath, 'export_presets.cfg');
@@ -223,6 +235,53 @@ const BLANK_CANVAS_CHECK_JS = `
 })()
 `;
 
+export function sceneRunPassed({
+    engineStarted,
+    totalErrors,
+    maxErrors,
+    deviceLost,
+    blankCanvas,
+    unmatchedPatterns,
+}) {
+    return engineStarted
+        && totalErrors <= maxErrors
+        && !deviceLost
+        && !blankCanvas
+        && unmatchedPatterns.length === 0;
+}
+
+export function canvasScreenshotIsDataBearing(byteLength) {
+    return byteLength >= 2500;
+}
+
+export function findMissingAutoloadTargets(projectPath, projectContents, pathExists = existsSync) {
+    const targets = [];
+    let inAutoloadSection = false;
+
+    for (const line of projectContents.split(/\r?\n/)) {
+        if (/^\[[^\]]+\]\s*$/.test(line)) {
+            inAutoloadSection = line.trim() === '[autoload]';
+            continue;
+        }
+        if (!inAutoloadSection) {
+            continue;
+        }
+
+        const match = line.match(/^[^;=]+="\*?(res:\/\/[^"\n]+)"\s*$/);
+        if (match) {
+            targets.push(match[1]);
+        }
+    }
+
+    return targets
+        .map(target => resolve(projectPath, target.substring('res://'.length)))
+        .filter(target => !pathExists(target));
+}
+
+export function compositorCaptureTimeout(timeout, elapsed) {
+    return Math.max(0, timeout - elapsed);
+}
+
 // ─── Run Scene (Chrome / Firefox via Playwright) ─────────────────────────────
 
 async function runScenePlaywright(scene, browser, timeout) {
@@ -238,6 +297,7 @@ async function runScenePlaywright(scene, browser, timeout) {
     const gpuErrors = [];
     const shaderErrors = [];
     const consoleErrors = [];
+    const deviceLostErrors = [];
     let deviceLost = false;
     let engineStarted = false;
 
@@ -258,6 +318,7 @@ async function runScenePlaywright(scene, browser, timeout) {
 
         if (text.includes('device lost') || text.includes('Device lost')) {
             deviceLost = true;
+            deviceLostErrors.push(text.substring(0, 200));
         }
 
         if (text.includes('Godot Engine v')) {
@@ -281,13 +342,31 @@ async function runScenePlaywright(scene, browser, timeout) {
 
     await page.goto(url);
 
-    // Wait for engine to start (and pass_patterns to match) or timeout
+    // Wait for engine startup, required markers, and actual compositor output.
+    // Heavy scenes can emit the engine banner well before their first rendered
+    // frame, so an arbitrary post-start delay is not render proof.
     const startTime = Date.now();
+    const captureDelay = Math.min(timeout, scene.capture_delay_ms || 10000);
+    let blankCanvas = true;
     while ((Date.now() - startTime) < timeout) {
         await new Promise(r => setTimeout(r, 500));
         const patternsReady = passPatterns.length === 0 || matchedPatterns.size >= passPatterns.length;
-        if (engineStarted && patternsReady && (Date.now() - startTime) > Math.min(timeout, 10000)) {
-            break;
+        const elapsed = Date.now() - startTime;
+        if (engineStarted && patternsReady && elapsed >= captureDelay) {
+            try {
+                const canvasEl = await page.$('#canvas');
+                if (canvasEl) {
+                    const screenshotTimeout = compositorCaptureTimeout(timeout, elapsed);
+                    if (screenshotTimeout === 0) {
+                        break;
+                    }
+                    const buf = await canvasEl.screenshot({ timeout: screenshotTimeout });
+                    blankCanvas = !canvasScreenshotIsDataBearing(buf.length);
+                    if (!blankCanvas) {
+                        break;
+                    }
+                }
+            } catch {}
         }
     }
 
@@ -322,14 +401,9 @@ async function runScenePlaywright(scene, browser, timeout) {
     // after presentation), so we use Playwright's compositor-level screenshot instead.
     // A solid black canvas compresses to < 2KB as PNG. Rendered scenes with dark
     // backgrounds still produce > 3KB due to anti-aliased edges, UI elements, etc.
-    let blankCanvas = false;
-    try {
-        const canvasEl = await page.$('#canvas');
-        if (canvasEl) {
-            const buf = await canvasEl.screenshot();
-            blankCanvas = buf.length < 2500;
-        }
-    } catch {}
+    // Fail closed if the canvas cannot be captured; absence of render proof is
+    // not evidence that the scene rendered. The polling loop owns the only
+    // capture attempt so Playwright cannot extend the per-scene deadline.
 
     await page.close();
     server.close();
@@ -337,7 +411,14 @@ async function runScenePlaywright(scene, browser, timeout) {
     const maxErrors = scene.max_errors || 0;
     const totalErrors = gpuErrors.length + shaderErrors.length + (deviceLost ? 1 : 0);
     const unmatchedPatterns = passPatterns.filter(p => !matchedPatterns.has(p));
-    const passed = totalErrors <= maxErrors && !deviceLost && !blankCanvas && unmatchedPatterns.length === 0;
+    const passed = sceneRunPassed({
+        engineStarted,
+        totalErrors,
+        maxErrors,
+        deviceLost,
+        blankCanvas,
+        unmatchedPatterns,
+    });
 
     return {
         status: passed ? 'PASS' : 'FAIL',
@@ -350,7 +431,12 @@ async function runScenePlaywright(scene, browser, timeout) {
         unmatchedPatterns,
         totalErrors,
         maxErrors,
-        details: [...gpuErrors.slice(0, 3), ...shaderErrors.slice(0, 3)],
+        details: [
+            ...deviceLostErrors.slice(0, 3),
+            ...gpuErrors.slice(0, 3),
+            ...shaderErrors.slice(0, 3),
+            ...consoleErrors.slice(0, 3),
+        ],
     };
 }
 
@@ -504,7 +590,14 @@ async function runSceneSafari(scene, timeout) {
     const deviceLost = !!result.deviceLost;
     const maxErrors = scene.max_errors || 0;
     const totalErrors = result.gpuErrors + result.shaderFails + (deviceLost ? 1 : 0);
-    const passed = totalErrors <= maxErrors && !deviceLost && loaded && !hasFatalError && !blankCanvas && unmatchedPatterns.length === 0;
+    const passed = !hasFatalError && sceneRunPassed({
+        engineStarted: loaded,
+        totalErrors,
+        maxErrors,
+        deviceLost,
+        blankCanvas,
+        unmatchedPatterns,
+    });
 
     return {
         status: passed ? 'PASS' : 'FAIL',
@@ -528,14 +621,16 @@ async function launchChrome() {
     const isCI = !!process.env.CI;
 
     if (isCI) {
-        // In CI (headless Linux): use Playwright's bundled Chromium with WebGPU flags.
+        // Chrome's supported Linux WebGPU automation path is new headless mode
+        // over Vulkan. Mesa's llvmpipe supplies the hosted runner's adapter.
         const browser = await pw.chromium.launch({
             headless: true,
             args: [
+                '--no-sandbox',
+                '--use-angle=vulkan',
+                '--enable-features=Vulkan',
+                '--disable-vulkan-surface',
                 '--enable-unsafe-webgpu',
-                '--enable-features=Vulkan,UseSkiaRenderer',
-                '--use-angle=swiftshader',
-                '--enable-gpu',
             ],
         });
         return { browser, name: 'chrome', type: 'playwright' };
@@ -558,12 +653,15 @@ async function launchChrome() {
 
 async function launchFirefox() {
     const pw = await import('playwright');
-    const isCI = !!process.env.CI;
     const browser = await pw.firefox.launch({
-        headless: isCI,
+        // CI supplies DISPLAY through xvfb-run; WebGPU exposes no adapter in
+        // Playwright Firefox's Linux headless path.
+        headless: false,
         firefoxUserPrefs: {
             'dom.webgpu.enabled': true,
-            'gfx.webgpu.force-enabled': true,
+            'gfx.webgpu.ignore-blocklist': true,
+            'gfx.webrender.all': true,
+            'layers.acceleration.force-enabled': true,
         },
     });
     return { browser, name: 'firefox', type: 'playwright' };
@@ -572,6 +670,38 @@ async function launchFirefox() {
 // Safari doesn't use Playwright — returns a sentinel
 function launchSafari() {
     return { browser: null, name: 'safari', type: 'applescript' };
+}
+
+export function assertCompleteSceneResults(results, sceneIds, browserNames) {
+    const expected = new Set(browserNames.flatMap(browser => sceneIds.map(scene => `${browser}/${scene}`)));
+    const seen = new Map();
+    const errors = [];
+
+    for (const result of results) {
+        const key = `${result.browser}/${result.scene}`;
+        if (!expected.has(key)) {
+            errors.push(`unexpected ${key}`);
+            continue;
+        }
+        seen.set(key, (seen.get(key) || 0) + 1);
+        if (result.status !== 'PASS') {
+            errors.push(`${key}: ${result.status}${result.reason ? ` (${result.reason})` : ''}`);
+        }
+    }
+
+    for (const key of expected) {
+        const count = seen.get(key) || 0;
+        if (count !== 1) {
+            errors.push(`${key}: expected one result, found ${count}`);
+        }
+    }
+
+    if (results.length !== expected.size) {
+        errors.unshift(`expected ${expected.size} results, found ${results.length}`);
+    }
+    if (errors.length > 0) {
+        throw new Error(`Incomplete scene smoketest: ${errors.join('; ')}`);
+    }
 }
 
 // ─── Main ────────────────────────────────────────────────────────────────────
@@ -585,6 +715,8 @@ async function main() {
     const sceneFilter = sceneFlag ? args[args.indexOf(sceneFlag) + 1] : null;
     const timeout = args.includes('--timeout') ? parseInt(args[args.indexOf('--timeout') + 1]) : DEFAULT_TIMEOUT;
     const browserArg = args.includes('--browser') ? args[args.indexOf('--browser') + 1] : 'chrome';
+    const editorBinArg = args.includes('--editor-bin') ? args[args.indexOf('--editor-bin') + 1] : null;
+    const templateZipArg = args.includes('--template-zip') ? args[args.indexOf('--template-zip') + 1] : null;
 
     console.log('╔═══════════════════════════════════════════════════════════╗');
     console.log('║   Multi-Scene Multi-Browser WebGPU Smoke Test            ║');
@@ -618,10 +750,15 @@ async function main() {
     console.log(`Timeout per scene: ${timeout}ms`);
     console.log(`Export mode: ${doExport ? 'yes' : 'skip (use pre-exported)'}\n`);
 
+    let exportFailures = 0;
+
     // Export if requested
     if (doExport) {
-        const editorBin = resolve(__dirname, config.editor_bin || 'godot');
-        const templateZip = resolve(__dirname, config.template_zip || '../../bin/godot.web.template_release.wasm32.nothreads.zip');
+        const editorBin = resolve(__dirname, editorBinArg || config.editor_bin || 'godot');
+        const templateZip = resolve(
+            __dirname,
+            templateZipArg || config.template_zip || '../../bin/godot.web.template_release.wasm32.nothreads.zip',
+        );
 
         if (!existsSync(editorBin)) {
             console.error(`ERROR: Editor binary not found: ${editorBin}`);
@@ -646,6 +783,7 @@ async function main() {
             const result = exportScene(scene, editorBin, templateZip);
             if (!result.success) {
                 console.log(`    EXPORT FAILED: ${scene.id} — ${result.error}`);
+                exportFailures++;
             } else {
                 console.log(`    EXPORTED: ${scene.id}`);
                 exported.add(eid);
@@ -655,8 +793,11 @@ async function main() {
     }
 
     if (exportOnly) {
-        console.log('Export-only mode — skipping tests.');
-        process.exit(0);
+        if (exportFailures > 0) {
+            throw new Error(`Export-only run failed for ${exportFailures} scene(s)`);
+        }
+        console.log('Export-only mode complete.');
+        return;
     }
 
     // Run tests per browser
@@ -721,7 +862,7 @@ async function main() {
             } else {
                 const blankNote = result.blankCanvas ? ', blank_canvas=true' : '';
                 const patNote = result.unmatchedPatterns?.length ? ', missing_patterns=' + result.unmatchedPatterns.length : '';
-                console.log(`FAIL  (gpu=${result.gpuErrors}, shader=${result.shaderErrors}, device_lost=${result.deviceLost}${blankNote}${patNote})`);
+                console.log(`FAIL  (engine_started=${result.engineStarted}, gpu=${result.gpuErrors}, shader=${result.shaderErrors}, console=${result.consoleErrors}, device_lost=${result.deviceLost}${blankNote}${patNote})`);
                 if (result.blankCanvas) {
                     console.log(`         Canvas rendered but is blank/black`);
                 }
@@ -788,10 +929,12 @@ async function main() {
     const totalSkipped = allResults.filter(r => r.status === 'SKIP').length;
     console.log(`Total: ${totalPassed} passed, ${totalFailed} failed, ${totalSkipped} skipped (${scenes.length} scenes × ${browserNames.length} browsers)\n`);
 
-    process.exit(totalFailed > 0 ? 1 : 0);
+    assertCompleteSceneResults(allResults, scenes.map(scene => scene.id), browserNames);
 }
 
-main().catch((e) => {
-    console.error('Fatal:', e);
-    process.exit(1);
-});
+if (process.argv[1] && resolve(process.argv[1]) === __filename) {
+    main().catch((e) => {
+        console.error('Fatal:', e);
+        process.exit(1);
+    });
+}
