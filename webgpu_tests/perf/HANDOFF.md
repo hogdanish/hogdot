@@ -127,3 +127,25 @@ Two things for the CommonGrounds agent to chase:
    console and file it against hogdot.
 5. Then start on the levers above, biggest first: puppet viewport size/`hdr_2d`/update mode, and
    preloading VFX scenes hidden on the loading screen.
+
+## What CommonGrounds did with it (2026-09-01, evening)
+
+The game-side pass that consumed this handoff, for the record (its own numbers live in the game's
+`perf` skill, `references/remediation-log.md`):
+
+- **r7** (`541e2cd7e9`) was pinned and deployed first; the compile reel's worst post-warm frame went
+  2098 ms → 285 ms from the engine alone, on the same game code.
+- **The bake was never matching any shader with a `varying`.** The origin-naming miss line
+  (`a5dffac0e6`) showed 11 of 14 remaining misses were bare `.gdshader`s the baker had baked, all
+  declaring varyings: the Metal editor generated user varyings from location 13
+  (`SUPPORTS_MULTIVIEW`), the browser from 11, and the version sha1 never agreed. Pinned to 11 in
+  `fdfcba8691` (RL-059). Plus the three Octmap raster versions the desktop editor never instantiates
+  (`4dc8c05960`) and `SpriteBase3D` in the baker's scene walk. Result on the game's offline boot:
+  26 unbaked versions → 2, `[CGPERF] baked=428/428` at the boot line, `translate_ms` 3.6 s → 0.85 s,
+  the loading-screen warm 8.6 s → 4.1 s.
+- **r8** (`fdfcba8691`) carries all of it. The general rule is RL-059: anything reaching
+  `ShaderCompiler::DefaultIdentifierActions` that varies with the running device invalidates the
+  bake by construction, and the counters cannot tell it from a game-side miss — read the origin.
+- Still open on this side: a WGSL-only shader container for the WebGPU target (each baked version
+  is ~1 MB with SPIR-V + WGSL; 19 more versions cost the game's pack ~17 MB raw), and a
+  `bench.mjs`-style throttle arm for the game's own harness.
