@@ -84,6 +84,30 @@ carried the same two defects.
   screenshot A/B against the previous build (a wrong flush made the game 2× "faster" by not
   drawing 39 of 40 puppets).
 
+## What the game showed on the final build (local run, 2026-09-01)
+
+`scripts/run-web.sh --release` against editor + templates at `a8bfd599d7`: the export log says
+`Shader baker: baking WGSL with … (pipeline id 2fb05bbd195d27ec)`, the boot line reads
+`[CGPERF] baked=331/355`, `encoder_splits=0`, no `Invalid …` or device-lost messages, 60 fps
+(the game's cap) in menu and world with ~190 draws and ~49 render passes per frame.
+
+Two things for the CommonGrounds agent to chase:
+
+- After entering the world the counters read `baked_wgsl_hit=594, baked_wgsl_miss=581,
+  translate_ms≈4000`: roughly half the scene-shader creates after world entry are not served by
+  the bake, while the fresh export cache holds WGSL for every one of its 738 variants and a
+  verbose boot shows only 12 `Shader cache miss` versions in the menu. The misses therefore come
+  from shader *versions the exporter never saw*: materials or shaders built or mutated in code
+  after load (feature flags set on a `StandardMaterial3D.new()`, `Shader.code` edits, per-instance
+  shader variants). Find them: copy `_build/web`, set `"args":["--verbose"]` in `index.html`, boot
+  into the world, and count the `Shader cache miss for SceneForwardMobileShaderRD/…` lines; each
+  names a version that has no exported resource. Move each to a `.tres`, and duplicate resources
+  instead of building materials in script.
+- The export log prints hundreds of `Index p_pass = 1 is out of bounds (draw_passes.size() = 1)`
+  errors: the baker asks every `GPUParticles3D` for draw passes 1–3 regardless of its pass count.
+  Harmless noise from the upstream baker, but it hides real warnings; filter it in run-web.sh or
+  fix upstream.
+
 ## Before the playtest deploy (checklist for the CommonGrounds agent)
 
 1. Pull hogdot `main` at or after `2aba519efc`; rebuild `bin/godot.macos.editor.arm64`,
