@@ -71,7 +71,7 @@ support anyway.
 | --- | --- | --- |
 | `scons` | brew | Godot's build system. |
 | `ccache` | 4.13.6 | ⚠ **NOT automatic, and needs THREE things, not one** — see "Making ccache actually work" below. Config `~/.config/ccache/ccache.conf`, cache `~/.cache/ccache`, cap 30G. |
-| Vulkan SDK | LunarG, installed 2026-08-06 | Needed for `-lMoltenVK` at link time. Installed with `sh misc/scripts/install_vulkan_sdk_macos.sh` — headless, no sudo, lands in `~/VulkanSDK`. Outside Homebrew, so `brewup` does not cover it. |
+| Vulkan SDK | LunarG, installed 2026-08-06 | Needed for `-lMoltenVK` at link time. Headless, no sudo, lands in `~/VulkanSDK`; outside Homebrew, so `brewup` does not cover it. ⚠ Prefer **`./hogdot/install-vulkan-sdk-macos.sh`** (pinned + sha256-verified, what CI runs) over upstream's `misc/scripts/install_vulkan_sdk_macos.sh` (fetches `latest`, verifies nothing) — using the same one locally keeps the dev machine on the SDK the release channel builds against. |
 | `pre-commit` | 4.6.1 | The only way to run Godot's `.pre-commit-config.yaml`. |
 | `emcc` | 6.0.x | Web targets only. `EM_CACHE` → `~/.cache/emscripten` (fish `conf.d/xdg-apps.fish`). ⚠ **Do not pin a patch version in prose** — `brew autoupdate` moves it every 12 h. Measured 6.0.5 on 2026-08-06 morning and **6.0.6-git** the same afternoon, and RL-039 is what a stale version assertion costs. `emcc --version` is the answer. |
 | `glslang` | brew 16.5.0 | ⚠ **No longer a build dependency of `webgpu=yes`** — see below. Still needed for the offline dev tooling in `webgpu_tests/shader_corpus/` (`compile_fixtures.sh`, `validate_spirv_dump.mjs`) and for `bin/tint_convert_cli` corpus work. |
@@ -577,23 +577,36 @@ upstream's emsdk 4.0.11). The android/ios/macos/windows workflows and the rest o
 Linux/web matrices are **not called** — those platforms ship on official Godot (the game's S8
 engine split), and the ~20 concurrent-job account cap means dead jobs queue against the release
 workflow and the game repo's Actions. `webgpu_tests.yml` is untouched (self-triggered on
-`drivers/webgpu/**` PRs). `runner.yml` triggers on `branches: ['**']` only, so `cg-v*` tag pushes
-never start the matrix.
+`drivers/webgpu/**` PRs). `runner.yml` triggers on `branches: ['**', '!dependabot/**']` only, so
+`cg-v*` tag pushes never start the matrix and a Dependabot branch push does not run the whole
+matrix a second time on top of its own PR (on the push event the `sources-changed` gate does not
+apply, so a workflow-file-only bump would otherwise trigger the editor and web builds for nothing).
 
 ⚠ **Rebase-forward: these workflow edits are a recorded mechanical step** to re-apply on every
 future upstream merge — upstream will reintroduce the platform jobs and matrix entries. The
 re-apply list: (1) `runner.yml` — keep only static-checks/linux/web call jobs, `branches`-only
-push trigger; (2) `web_builds.yml` — drop wasm64 + extras, keep the vanilla wasm32 canary, keep
-the two webgpu jobs with `em-version-override: webgpu`, the `EM_VERSION_WEBGPU: 6.0.8` +
-`EMCC_CFLAGS: -Wno-unused-template` env, and per-job `import_env_vars=EMCC_CFLAGS
-use_closure_compiler=no` (rationale for each: the Emscripten decision record above);
-(3) `linux_builds.yml` — one plain editor matrix entry; (4) re-SHA-pin any new third-party
-`uses:` (repo setting `sha_pinning_required` rejects tag refs, and `allowed_actions: selected`
-blocks unlisted owners — patterns live in the repo's Actions settings, set 2026-08-27).
+push trigger with `!dependabot/**`; (2) `web_builds.yml` — drop wasm64 + extras, keep the vanilla
+wasm32 canary, keep the two webgpu jobs with `em-version-override: webgpu`, the
+`EM_VERSION_WEBGPU: 6.0.8` + `EMCC_CFLAGS: -Wno-unused-template` env, and per-job
+`import_env_vars=EMCC_CFLAGS use_closure_compiler=no` (rationale for each: the Emscripten decision
+record above); (3) `linux_builds.yml` — one plain editor matrix entry; (4) re-SHA-pin any new
+third-party `uses:` (repo setting `sha_pinning_required` rejects tag refs, and
+`allowed_actions: selected` blocks unlisted owners — patterns live in the repo's Actions settings,
+set 2026-08-27); (5) `.github/dependabot.yml` is fork-only and survives untouched, but if upstream
+adds a composite action carrying a third-party `uses:`, it needs its own `directory:` entry there.
 
 - **Every third-party action is SHA-pinned** (`@<40-hex> # vN`), across workflows *and* the
   `.github/actions/*` composites. Local `./.github/actions/*` and same-repo reusable workflows are
   exempt from both repo settings.
+- **Dependabot watches `github-actions` only** (`.github/dependabot.yml`, added 2026-08-28):
+  weekly, Monday 06:00 America/Chicago, grouped into one PR, `ci(deps)` commit prefix. ⚠ It does
+  **not** weaken the SHA-pinning policy — Dependabot rewrites the 40-hex SHA *and* the trailing
+  `# vN` comment together, and `sha_pinning_required` is the backstop if it ever did. ⚠ The
+  `github-actions` ecosystem does **not** support the plural `directories:` key or its globs: `/`
+  covers `.github/workflows/` and nothing else, so each composite action that carries a
+  third-party `uses:` needs its own entry. Six do (`godot-deps`, `godot-cache-restore`,
+  `godot-cache-save`, `upload-artifact`, `download-artifact`, `godot-cpp-build`); the other six
+  are pure shell and have nothing to update.
 - **No secrets in this repo's Actions, ever** (decision of record) — the release channel uses only
   the ambient `GITHUB_TOKEN`. The game repo is private; anything needing its content is *copied
   into* hogdot (see the build profile below), never checked out from it.
@@ -611,6 +624,13 @@ blocks unlisted owners — patterns live in the repo's Actions settings, set 202
   template `--dry-run`. Neither the SCons version (CI pins 4.10.1 in `.github/actions/godot-deps`,
   Homebrew ships 4.11.1) nor Python 3.14 was implicated — both reproduce identically once `editor/`
   is gone.
+- **Repo default workflow permissions are `read`** (measured 2026-08-28 via
+  `gh api repos/hogdanish/hogdot/actions/permissions/workflow`), and the repo is public. That is
+  why only `cg_release.yml` needed the least-privilege fix below: every other workflow's persisted
+  checkout credential is a read token on a public tree, and adding `persist-credentials: false` to
+  upstream's workflow files would buy nothing while costing a conflict on every rebase-forward.
+  ⚠ **If that default is ever flipped to write, or the repo is made private, revisit that** —
+  the reasoning, not the conclusion, is what is recorded here.
 - ⚠ A README.md missing its final newline blocked every fork CI run ever (see lint section).
 
 ## The cg-release channel (`cg_release.yml`, first cut 2026-08-27)
@@ -621,7 +641,7 @@ tag fast-fail (well-formed, not already existing), builds everything game CI con
 dispatched `GITHUB_SHA`, creates+pushes the tag only after every build succeeded (a failed run
 leaves no tag; a `GITHUB_TOKEN`-pushed tag cannot retrigger the workflow), and publishes the
 GitHub Release. Standalone workflow — not gated on static-checks, own concurrency group
-(`cg-release|<tag>`, `cancel-in-progress: false`), `permissions: contents: write`.
+(`cg-release|<tag>`, `cancel-in-progress: false`).
 
 ⚠ **Dispatch-from-main is what makes releases cacheable (fixed 2026-08-28).** GitHub cache
 isolation scopes a run's saved caches to the run's own ref plus the default branch — so the
@@ -640,13 +660,78 @@ steps** (a tag-scoped save is unreachable dead weight against the 10 GiB cache q
 | Asset | Contents |
 | --- | --- |
 | `editor-linux-x86_64.tar.gz` | `godot.linuxbsd.editor.x86_64` + `tint_convert_cli` — the baker pair, same commit (RL-055 + the tint pipeline-id stamp), must stay beside each other. |
-| `editor-macos-arm64.tar.gz` | `godot.macos.editor.arm64` + `tint_convert_cli` (since r2, 6.A.4) — the Mac dev editor as a pinned asset instead of an mtime in `bin/`. Built on `macos-15` with the Vulkan SDK step REQUIRED (the editor links `-lMoltenVK`; matches the local recipe above). arm64 only. |
+| `editor-macos-arm64.tar.gz` | `godot.macos.editor.arm64` + `tint_convert_cli` (since r2, 6.A.4) — the Mac dev editor as a pinned asset instead of an mtime in `bin/`. Built on `macos-15` with the Vulkan SDK step REQUIRED (the editor links `-lMoltenVK`; matches the local recipe above), via the pinned `hogdot/install-vulkan-sdk-macos.sh`. arm64 only. |
 | `web-template_{release,debug}.{threads,nothreads}.wasm32.zip` | The four production templates: `webgpu=yes vulkan=no opengl3=no initial_memory=256 build_profile=hogdot/build_profile.web.gdbuild`, `production=yes` on release only (the prod-web-build recipe: debug skips exactly that flag). |
+| `editor-linux-x86_64.debugsymbols.tar.gz` | The linuxbsd editor's separated DWARF (`godot.linuxbsd.editor.x86_64.debugsymbols`). Diagnostic-only; nothing needs it to build or export. See "Symbolizing a stalled editor" below. |
 | `checksums.txt` | sha256 per asset; also in the release body. |
+| `build-manifest.txt` | Runner image + toolchain per asset (see "Reproducibility" below); also in the release body, folded into a `<details>`. |
 
 The release body carries the fork commit, the editor `--version` string (game CI's
 `HOGDOT_BUILD`; format `4.7.2.stable.custom_build.<sha9>` — CI must NOT set `BUILD_NAME`, which
 upstream's godot-build composite sets to `gh`), the emsdk pin, and the build profile's sha256.
+
+⚠ **The game downloads assets by name** (`web-export.yml`: an explicit list, each verified against
+an `HOGDOT_SHA256_*` pin in `engine.env`), so adding an asset to a release is safe and removing or
+renaming one is not.
+
+### Symbolizing a stalled editor
+
+**The linuxbsd editor is built `debug_symbols=yes separate_debug_symbols=yes` and ships its DWARF
+as a second asset.** This is a diagnostic-only change; it does not alter the editor.
+
+*Why.* The game's web export intermittently deadlocks inside `WorkerThreadPool` during PCK packing
+(CommonGrounds audit WEB-01: 19 threads, none running, two `WorkerThread N` blocked in
+`pthread_mutex_lock` while the main thread waits on a condvar under `savepack`). The watchdog's
+`thread apply all bt` was worthless — **every frame in the main binary read `?? ()`**, because
+`debug_symbols=no` makes SConstruct link with `-s` (`SConstruct:885`, the `else` of the
+`debug_symbols` branch). That one linker flag, not any explicit `strip` step, is the whole reason
+the fork's editors are unsymbolizable. A stripped binary cannot be post-mortemed at all, so an
+intermittent stall that costs 16–44 minutes a run stayed undiagnosable for weeks.
+
+*What the two flags do here* (verified in this tree, not assumed): `debug_symbols=yes` drops the
+`-s` and compiles `-g2 -gdwarf-4`; `separate_debug_symbols=yes` enables the linuxbsd post-action in
+`platform/linuxbsd/platform_linuxbsd_builders.py`, which runs `objcopy --only-keep-debug` →
+`strip --strip-debug --strip-unneeded` → `objcopy --add-gnu-debuglink`. The shipped binary ends up
+**stripped exactly as before plus a ~112-byte `.gnu_debuglink` section** (measured on a minimal
+ubuntu-24.04 repro: 67 664 B with `-s` vs 67 776 B through the post-action), so
+`editor-linux-x86_64.tar.gz` is unchanged in shape and effectively unchanged in size.
+
+*How to use it.* Unpack the sidecar so that `godot.linuxbsd.editor.x86_64.debugsymbols` sits **in
+the same directory as** `godot.linuxbsd.editor.x86_64`, then attach gdb normally. Nothing else:
+gdb reads `.gnu_debuglink`, finds the sidecar by basename beside the executable, verifies the
+embedded CRC, and resolves frames — no `add-symbol-file`, no PIE load-bias arithmetic, and a
+sidecar from the wrong build warns instead of inventing names. Verified against the WEB-01 failure
+shape: without the sidecar a blocked mutex frame is `#4 0x… in ?? ()`; with it, the same frame
+resolves to the function, its `file:line`, *and* the identity of the mutex being waited on.
+
+⚠ **Do not extend this to the web templates.** Emscripten debug info means `-g3` (`SConstruct:869`),
+which inflates the wasm players actually download. The macOS editor is also deliberately left at
+`debug_symbols=no`: `separate_debug_symbols` there means a `dsymutil` `.dSYM` bundle, and no
+incident has ever needed one.
+
+⚠ **`debug_symbols=yes` costs runner disk**, which is why the `linux-editor` job now deletes the
+preinstalled Android/.NET/GHC/CodeQL toolchains first. `-g2` inflates the object tree several-fold
+(the fork's `linux-editor-llvm-sanitizers` SCons cache is 772 MB against 118 MB for the same editor
+without symbols) and the SCons `CacheDir` keeps a second copy of every derived file, against ~12 GB
+free on a stock `ubuntu-24.04` runner. Linking with full DWARF also raises peak `ld` memory on a
+16 GB runner; if that is what breaks, the first lever is `linkflags=-Wl,--no-keep-memory` — SCons
+appends that variable to `LINKFLAGS` (`SConstruct:641`), so it needs no patch. If instead the job
+fails on ENOSPC, or the SCons cache starts crowding the 10 GiB repo quota, the cheaper fallback is
+a **symbol-table-only** sidecar: drop the `-s` *without* `-g`, which costs nothing at compile time
+and still names every frame, but needs a fork-local `SConstruct`/`platform/linuxbsd/SCsub` patch
+and gives no line numbers. Neither has been needed.
+
+⚠ **Both of those numbers are MEASURED every release, not assumed.** The `linux-editor` job wraps
+scons in `/usr/bin/time -v` and brackets it with `df`, then folds `peak rss`, `build wall` and
+`disk free` into that asset's `build-manifest.txt` fragment — a durable copy, because the run log
+expires in 90 days and "does a `-g2` editor still fit a hosted runner" is exactly the question a
+future incident asks. Read the manifest before touching either lever above.
+
+⚠ **The post-action cannot fail.** `make_debug_linuxbsd` drives all three tools through bare
+`os.system()` and discards their exit codes, so a broken objcopy would leave SCons reporting
+success while shipping an unstripped editor with no sidecar. The job's `Verify the symbol split`
+step is the fail-closed check: DWARF present in the sidecar, absent from the binary, and the
+binary's `.gnu_debuglink` naming the sidecar.
 
 **`hogdot/build_profile.web.gdbuild` is a tracked COPY of the game's
 `godot/build_profile.web.gdbuild`** (copied-profile-with-drift-check, decided 2026-08-27 — a
@@ -659,6 +744,73 @@ Iterating on a failed release: each fix is a new push to main, then re-dispatch 
 tag input — a failed dispatch run created no tag, so there is nothing to clean up. Once a tag
 exists (the run succeeded), it is consumed by the game's `engine.env` digest pins: cut the next
 `-rN` instead of touching it.
+
+### Least privilege and the supply chain (hardened 2026-08-28)
+
+This channel is the fork's only workflow with write access and the only one whose output is
+consumed as a trusted binary, so it is the only one where either mistake is expensive.
+
+- **`permissions: contents: read` at workflow level; `contents: write` on the `release` job
+  alone.** It used to be workflow-level write, which handed a repo-mutating credential to
+  preflight and all six compilation jobs — jobs that pull apt packages, an emsdk, a Vulkan SDK and
+  a pip SCons, then run a build system that executes arbitrary in-tree Python for two hours. The
+  `release` job compiles nothing (`download-artifact` + `gh`), so write lives on the smallest
+  possible surface.
+- **`persist-credentials: false` on every checkout except `release`'s.** `actions/checkout`
+  otherwise leaves the token in `.git/config` as an extraheader for the life of the job. ⚠ The
+  `release` job's checkout keeps it *and says so explicitly* — its tag step is a real
+  `git push origin`, which authenticates through exactly that header. `gh release create` does
+  not need it (`GH_TOKEN` from the environment); the tag push does. Do not "tidy" it away.
+- ⚠ **The macOS Vulkan SDK is pinned and digest-verified, by
+  `hogdot/install-vulkan-sdk-macos.sh`, NOT upstream's
+  `misc/scripts/install_vulkan_sdk_macos.sh`.** Upstream's fetches LunarG's `latest` and executes
+  the installer with no pin, no digest and no signature — ~360 MiB of remote code running on the
+  runner that builds a shipped asset, and a silent reproducibility hole ("latest" is a different
+  SDK every few weeks, recorded nowhere). The replacement verifies sha256 *before* it unzips
+  anything and fails closed. Currently **1.4.357.1** (LunarG 2026-08-17, `cf23e604…c769a5`,
+  376,108,497 bytes) — which was `latest` when it was pinned, so pinning changed nothing about
+  what gets built. Upstream's script is deliberately left untouched: it is mainline Godot's file
+  and editing it would conflict on every rebase-forward. **Bumping the pin moves two constants in
+  that script and they must move together** — the header carries the exact `curl | shasum` recipe.
+  A version without its matching digest is worse than no pin, because it looks verified.
+
+### Reproducibility — `build-manifest.txt`
+
+`ubuntu-24.04` and `macos-15` are rolling labels, not images, and everything inside them floats.
+Each build job therefore drops a `manifest-NN-*.txt` fragment (runner `ImageOS`/`ImageVersion`,
+compiler, Python, SCons, plus emcc/emsdk on web and the Vulkan SDK on macOS); the `release` job
+concatenates them into the `build-manifest.txt` asset with the fork commit, build-profile sha256
+and the workflow-run URL on top. A missing fragment fails the step on purpose — a manifest with a
+hole in it is worse than none.
+
+**Python is pinned to `3.13` at this channel's `godot-deps` call sites** (`env.PYTHON_VERSION`),
+not in the composite: the composite's `3.x` default is upstream's file, and a floating Python is
+the right behavior for a pass/fail CI gate — it is only wrong for a shipped artifact. SCons is
+already pinned (`4.10.1`) inside the composite.
+
+### Artifact and cache storage (HOG-03, 2026-08-28)
+
+- **`retention-days: 1` on every `upload-artifact` in this workflow.** The `cg-release-*`
+  artifacts exist only to hand bytes to the `release` job in the same run; the permanent copy is
+  the Release asset, which is what the game downloads. At the 90-day default they were an exact
+  duplicate of the release — measured 2026-08-28, 12 unexpired `cg-release-*` artifacts holding
+  ~320 MB. (⚠ The larger consumer is fork-CI matrix output: 3.13 GB of unexpired artifacts total,
+  the rest of it from `./.github/actions/upload-artifact`, which upstream sets to 60 days.)
+- ⚠ **13 tag-scoped `cg-release-*` scons caches (~1.01 GB) are permanently unreachable** and
+  must be swept by hand — r1 and r2 ran as tag pushes, so their saves landed on
+  `refs/tags/cg-v4.7.2-r{1,2}` where no run can ever restore them. The dispatch-from-main design
+  plus the `if: github.event_name == 'workflow_dispatch'` guard on the save steps means no new
+  ones are created; this is a one-time cleanup:
+
+  ```fish
+  # dry run — list what would go
+  gh api --paginate '/repos/hogdanish/hogdot/actions/caches?per_page=100' \
+    --jq '.actions_caches[] | select(.ref | test("refs/tags/cg-v")) | [.id, .ref, .key] | @tsv'
+  # then delete
+  gh api --paginate '/repos/hogdanish/hogdot/actions/caches?per_page=100' \
+    --jq '.actions_caches[] | select(.ref | test("refs/tags/cg-v")) | .id' |
+    while read -l id; gh api -X DELETE "/repos/hogdanish/hogdot/actions/caches/$id"; end
+  ```
 
 ## The lint baseline (established 2026-08-06, before the first port commit)
 

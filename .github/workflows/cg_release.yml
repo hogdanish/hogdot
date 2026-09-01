@@ -1,13 +1,13 @@
 name: 📦 CG Release
 # The engine-artifact channel for CommonGrounds (the fork's sole consumer).
-# A `cg-v*` tag builds the linuxbsd editor (+ tint_convert_cli, same commit —
-# the shader baker refuses a skewed pair) and all four production web
-# templates, then publishes them as a GitHub Release whose body carries the
-# digests game CI verifies before laying assets out.
+# A release run builds the linuxbsd and macOS editors (each + tint_convert_cli
+# from the same commit — the shader baker refuses a skewed pair) and all four
+# production web templates, then publishes them as a GitHub Release whose body
+# carries the digests game CI verifies before laying assets out.
 #
 # Deliberately standalone: not gated on static-checks or any upstream job, and
 # its own concurrency group so the upstream matrix can never cancel it.
-# Decision records: .claude/skills/build-export/SKILL.md ("The release
+# Decision records: .claude/skills/build-export/SKILL.md ("The cg-release
 # channel" + the Emscripten decision record).
 
 # ⚠ Two triggers, one warm and one cold. `workflow_dispatch` on main is THE
@@ -39,13 +39,30 @@ concurrency:
   group: cg-release|${{ github.event.inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
+# ⚠ Read-only by default; `contents: write` is granted ONLY on the `release`
+# job, which is the only one that mutates anything (pushes the tag, creates the
+# Release). This used to be a workflow-level `contents: write`, which handed a
+# repo-mutating credential to preflight and all six compilation jobs — jobs that
+# pull submodules, apt packages, an emsdk, a Vulkan SDK and a pip SCons, and
+# then run a build system that executes arbitrary in-tree Python for two hours.
+# Any one of those inputs going bad could have rewritten refs, tags or releases.
+# Build jobs need to *read* the tree and nothing more; keep it that way.
 permissions:
-  contents: write
+  contents: read
 
 env:
   # The exact emsdk the shipped CommonGrounds templates were verified with.
   # Keep in lockstep with EM_VERSION_WEBGPU in web_builds.yml.
   EM_VERSION_WEBGPU: 6.0.8
+  # ⚠ Pinned because a release asset has to be reproducible. The shared
+  # godot-deps composite defaults to `3.x`, which setup-python resolves to
+  # whatever its newest build is that week — so the same commit, released a
+  # fortnight apart, can be built by two different Pythons with nothing
+  # recording it. Pinned HERE, at this channel's call sites, rather than in the
+  # composite: that default is upstream Godot's file (editing it costs a
+  # conflict on every rebase-forward), and a floating Python is the *right*
+  # behavior for a pass/fail CI gate — it is only wrong for an artifact.
+  PYTHON_VERSION: '3.13'
   # The game's engine build profile, vendored as a tracked copy (the game repo
   # is private and this repo holds zero secrets). Its sha256 goes into the
   # release body so game CI can detect drift against its own copy.
@@ -90,6 +107,12 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           submodules: recursive
+          # ⚠ Do not persist the ambient token into .git/config. Nothing in this
+          # job talks to git after checkout, so there is no reason for a
+          # credential to sit in the workspace through two hours of compilation
+          # with every build tool able to read it. Only the `release` job below
+          # keeps its credential, and only because it runs a real `git push`.
+          persist-credentials: false
 
       - name: Setup dependencies
         run: |
@@ -97,7 +120,31 @@ jobs:
           sudo apt-get install -y build-essential pkg-config libx11-dev \
             libxcursor-dev libxinerama-dev libgl1-mesa-dev libglu1-mesa-dev \
             libasound2-dev libpulse-dev libudev-dev libxi-dev libxrandr-dev \
-            libwayland-dev libwayland-bin libdigest-sha-perl
+            libwayland-dev libwayland-bin libdigest-sha-perl time
+
+      - name: Reclaim runner disk
+        # ⚠ A precondition of `debug_symbols=yes` below, not housekeeping. A
+        # GitHub-hosted ubuntu-24.04 runner leaves ~12 GB free on `/`, and `-g2`
+        # inflates the object tree several-fold — the fork's own
+        # `linux-editor-llvm-sanitizers` SCons cache is 772 MB against 118 MB for
+        # the same editor built without symbols. The SCons CacheDir then keeps a
+        # second copy of every derived file, so 12 GB is not headroom a debug
+        # editor build can be assumed to fit in — and an ENOSPC surfaces as a
+        # baffling linker or Python error 25 minutes into a release, which is a
+        # bad way to learn it. What is deleted is preinstalled image
+        # ballast (Android NDK, .NET, GHC, CodeQL) that a C++ SCons build never
+        # opens. `df` on both sides so a future incident can see the headroom the
+        # build actually had rather than the headroom we assumed it had.
+        run: |
+          set -euo pipefail
+          df -h /
+          sudo rm -rf \
+            /usr/local/lib/android \
+            /usr/share/dotnet \
+            /usr/local/.ghcup \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL
+          df -h /
 
       - name: Restore Godot build cache
         uses: ./.github/actions/godot-cache-restore
@@ -107,14 +154,86 @@ jobs:
 
       - name: Setup Python and SCons
         uses: ./.github/actions/godot-deps
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Build editor
         # No BUILD_NAME override: the version string must stay
         # `custom_build` — game CI pins it as HOGDOT_BUILD.
+        #
+        # ⚠ `debug_symbols=yes separate_debug_symbols=yes` does not change what
+        # this job ships. The pair only stops SConstruct linking with `-s` (its
+        # `debug_symbols=no` branch, SConstruct:885 — that single flag, not any
+        # explicit `strip`, is why every frame of the WEB-01 backtrace read
+        # `?? ()`) and turns on the linuxbsd post-action in
+        # platform/linuxbsd/platform_linuxbsd_builders.py, which does three
+        # things: `objcopy --only-keep-debug` lifts the DWARF out into
+        # `<binary>.debugsymbols`, `strip --strip-debug --strip-unneeded` puts
+        # the binary back to what `-s` produced, and `objcopy
+        # --add-gnu-debuglink` stamps the sidecar's basename and CRC into it.
+        # `-g` does not affect codegen, so `editor-linux-x86_64.tar.gz` stays
+        # the same editor at very nearly the same size — the symbols leave as a
+        # separate asset that nothing is obliged to download.
+        #
+        # Why: the game's web export intermittently deadlocks inside
+        # WorkerThreadPool during PCK packing (CommonGrounds audit WEB-01), and
+        # the watchdog's `thread apply all bt` was unreadable — a fully stripped
+        # binary cannot be post-mortemed at all. Laid beside the binary, the
+        # sidecar is found by gdb through `.gnu_debuglink` with no
+        # `add-symbol-file` and no PIE load-bias arithmetic, and the embedded
+        # CRC means a sidecar from the wrong build is a loud warning rather than
+        # confidently wrong function names.
+        #
+        # ⚠ `/usr/bin/time -v` and the `df` bracket are the record for the two
+        # numbers `-g2` puts in doubt and nothing else in this run would answer:
+        # whether the debug object tree fits the runner's disk, and whether the
+        # link's peak RSS fits its 16 GB. GNU time's "Maximum resident set size"
+        # is `ru_maxrss` over RUSAGE_CHILDREN — the largest single process in the
+        # tree, which on a `-g2` build is the link, exactly the process in
+        # question. Read them out of the log before touching any lever; the
+        # recorded first lever if the link does NOT fit is
+        # `linkflags=-Wl,--no-keep-memory`, which needs no engine patch.
         run: |
-          scons platform=linuxbsd target=editor debug_symbols=no \
+          set -euo pipefail
+          df -h /
+          /usr/bin/time -v -o "$RUNNER_TEMP/build-time.txt" \
+            scons platform=linuxbsd target=editor \
+            debug_symbols=yes separate_debug_symbols=yes \
             "cache_path=${{ github.workspace }}/.scons_cache/" redirect_build_objects=no
+          echo "--- resource usage of the -g2 build ---"
+          cat "$RUNNER_TEMP/build-time.txt"
+          echo "--- disk after the -g2 build (objects + SCons CacheDir) ---"
+          df -h /
+          df --output=avail -k / | tail -n 1 > "$RUNNER_TEMP/disk-avail-kb.txt"
+          du -sh bin .scons_cache 2>/dev/null || true
           ls -l bin/
+
+      - name: Verify the symbol split
+        # ⚠ Fail closed, because the post-action cannot. `make_debug_linuxbsd`
+        # drives objcopy and strip through bare `os.system()` and discards all
+        # three exit codes, so a missing binutils or an OOM-killed objcopy still
+        # leaves SCons reporting success — and this job would then ship an
+        # unstripped editor with no sidecar: a quietly fatter tarball, and
+        # symbols nobody discovers are absent until the next stalled export.
+        #
+        # Output is captured to files rather than piped into `grep -q`: grep
+        # exits at its first match and SIGPIPEs readelf, which under
+        # `pipefail` fails the pipeline that just succeeded.
+        run: |
+          set -euo pipefail
+          bin=bin/godot.linuxbsd.editor.x86_64
+          dbg="$bin.debugsymbols"
+          test -s "$dbg"
+          readelf -S "$dbg" >"$RUNNER_TEMP/sections-debugsymbols.txt"
+          readelf -S "$bin" >"$RUNNER_TEMP/sections-editor.txt"
+          readelf -p .gnu_debuglink "$bin" >"$RUNNER_TEMP/debuglink.txt"
+          # The sidecar carries the DWARF, the shipped binary does not, and the
+          # binary names the sidecar — the third check is the one that makes gdb
+          # resolve symbols from nothing but the two files in one directory.
+          grep -q '\.debug_info' "$RUNNER_TEMP/sections-debugsymbols.txt"
+          ! grep -q '\.debug_info' "$RUNNER_TEMP/sections-editor.txt"
+          grep -q 'godot\.linuxbsd\.editor\.x86_64\.debugsymbols' "$RUNNER_TEMP/debuglink.txt"
+          ls -l "$bin" "$dbg"
 
       - name: Build tint_convert_cli
         # Native host tool the editor's shader baker shells out to at export
@@ -141,6 +260,55 @@ jobs:
           cat dist/editor-version.txt
           tar -C bin -czf dist/editor-linux-x86_64.tar.gz \
             godot.linuxbsd.editor.x86_64 tint_convert_cli
+          # ⚠ A SEPARATE asset, deliberately not folded into the tarball above.
+          # The game unpacks that tarball on every web-export run and caches it
+          # by digest, whereas the symbols are wanted only once an export has
+          # already hung — making every run carry the DWARF for an incident that
+          # hits a minority of runs is the wrong trade, and the watchdog has
+          # minutes to spare in which to fetch it on demand. The `.tar.gz`
+          # extension is load-bearing: the game derives each digest-pin key
+          # mechanically from the asset filename (strip `.tar.gz`/`.zip`,
+          # uppercase, `-` and `.` become `_`), so this one lands on
+          # HOGDOT_SHA256_EDITOR_LINUX_X86_64_DEBUGSYMBOLS. A `.tar.zst` would
+          # compress far better and derive a nonsense key.
+          tar -C bin -czf dist/editor-linux-x86_64.debugsymbols.tar.gz \
+            godot.linuxbsd.editor.x86_64.debugsymbols
+          ls -l dist/
+
+      - name: Record build manifest
+        # Every build job drops one `manifest-NN-*.txt` fragment; the release job
+        # concatenates them (sorted, hence the NN) into the `build-manifest.txt`
+        # release asset. Point: an incident can ask "what actually built this
+        # asset" a year later. Runner images float (ubuntu-24.04 is a rolling
+        # label, not an image), and the toolchain inside them floats with it —
+        # unrecorded, none of that is reconstructable after the fact.
+        run: |
+          set -euo pipefail
+          {
+            echo "### editor-linux-x86_64.tar.gz"
+            echo "runs-on:       ubuntu-24.04"
+            echo "runner-image:  ${ImageOS:-unknown} ${ImageVersion:-unknown} (${RUNNER_OS}/${RUNNER_ARCH})"
+            echo "cc:            $(gcc --version | head -n 1)"
+            echo "cxx:           $(g++ --version | head -n 1)"
+            echo "ld:            $(ld --version | head -n 1)"
+            echo "python:        $(python --version 2>&1)"
+            echo "scons:         $(python -m pip show scons | awk '/^Version:/ { print $2 }')"
+            echo "editor:        $(cat dist/editor-version.txt)"
+            echo "scons flags:   target=editor debug_symbols=yes separate_debug_symbols=yes"
+            # ⚠ Durable copy of the two numbers `-g2` puts in doubt. The run log
+            # expires; this asset does not, and the next person asking "does a
+            # debug editor still fit a hosted runner" should not have to re-run a
+            # release to find out.
+            echo "peak rss:      $(awk -F': ' '/Maximum resident set size/ { print $2 }' "$RUNNER_TEMP/build-time.txt") kB (largest process in the build tree; the link)"
+            echo "build wall:    $(awk -F': ' '/Elapsed \(wall clock\) time/ { print $2 }' "$RUNNER_TEMP/build-time.txt")"
+            echo "disk free:     $(cat "$RUNNER_TEMP/disk-avail-kb.txt") kB on / after the build"
+            echo
+            echo "### editor-linux-x86_64.debugsymbols.tar.gz"
+            echo "sidecar for:   godot.linuxbsd.editor.x86_64, via .gnu_debuglink (gdb checks the CRC)"
+            echo "editor bytes:  $(stat -c%s bin/godot.linuxbsd.editor.x86_64) (stripped, as shipped)"
+            echo "symbol bytes:  $(stat -c%s bin/godot.linuxbsd.editor.x86_64.debugsymbols) (uncompressed)"
+            echo
+          } | tee dist/manifest-10-editor-linux.txt
 
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -148,6 +316,12 @@ jobs:
           name: cg-release-editor
           path: dist/*
           if-no-files-found: error
+          # ⚠ One day, not the 90-day default. These artifacts exist only to hand
+          # bytes to the `release` job in the same run — the permanent copy is the
+          # Release asset, which is what the game's web-export.yml verifies and
+          # downloads. Keeping both was ~200 MB of exact duplicate per release
+          # sitting against the account's storage quota for three months.
+          retention-days: 1
 
   macos-editor:
     needs: [preflight]
@@ -162,12 +336,24 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           submodules: recursive
+          # Same reasoning as the linuxbsd job: no git after checkout, so no
+          # credential left lying in the workspace while the build runs.
+          persist-credentials: false
 
-      - name: Setup Vulkan SDK
+      - name: Setup Vulkan SDK (pinned, digest-verified)
         # Required, not best-effort: the editor links -lMoltenVK, and an
         # editor built without it would not match the local recipe of record
         # (build-export SKILL "Commands").
-        run: sh misc/scripts/install_vulkan_sdk_macos.sh
+        #
+        # ⚠ NOT upstream's `misc/scripts/install_vulkan_sdk_macos.sh`. That
+        # script downloads LunarG's `latest` SDK and executes the installer with
+        # no version pin, no digest and no signature check — arbitrary remote
+        # code running on the runner that produces a shipped release asset, and
+        # a silent reproducibility hole besides ("latest" is a different SDK
+        # every few weeks, recorded nowhere). The fork-local replacement pins the
+        # version, verifies sha256 BEFORE it unpacks anything, and fails closed.
+        # Upstream's script is left untouched so rebases-forward stay clean.
+        run: ./hogdot/install-vulkan-sdk-macos.sh
 
       - name: Restore Godot build cache
         uses: ./.github/actions/godot-cache-restore
@@ -177,6 +363,8 @@ jobs:
 
       - name: Setup Python and SCons
         uses: ./.github/actions/godot-deps
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Build editor
         # No BUILD_NAME override: the version string must stay `custom_build`.
@@ -207,12 +395,33 @@ jobs:
           tar -C bin -czf dist/editor-macos-arm64.tar.gz \
             godot.macos.editor.arm64 tint_convert_cli
 
+      - name: Record build manifest
+        # VULKAN_SDK_VERSION is exported into GITHUB_ENV by the install script,
+        # which is the single source of truth for the pin — restating the version
+        # here would just create a second place for it to go stale.
+        run: |
+          set -euo pipefail
+          {
+            echo "### editor-macos-arm64.tar.gz"
+            echo "runs-on:       macos-15"
+            echo "runner-image:  ${ImageOS:-unknown} ${ImageVersion:-unknown} (${RUNNER_OS}/${RUNNER_ARCH})"
+            echo "cc:            $(clang --version | head -n 1)"
+            echo "macos-sdk:     $(xcrun --show-sdk-version 2>/dev/null || echo unknown)"
+            echo "vulkan-sdk:    ${VULKAN_SDK_VERSION:-unknown} (pinned, sha256-verified)"
+            echo "python:        $(python --version 2>&1)"
+            echo "scons:         $(python -m pip show scons | awk '/^Version:/ { print $2 }')"
+            echo "editor:        $(./bin/godot.macos.editor.arm64 --version | tail -n 1)"
+            echo
+          } | tee dist/manifest-20-editor-macos.txt
+
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: cg-release-editor-macos
           path: dist/*
           if-no-files-found: error
+          # Intermediate hand-off only; the Release asset is the permanent copy.
+          retention-days: 1
 
   web-template:
     needs: [preflight]
@@ -261,6 +470,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           submodules: recursive
+          # Same reasoning as the editor jobs: no git after checkout, so no
+          # credential left lying in the workspace while the build runs.
+          persist-credentials: false
 
       - name: Set up Emscripten
         uses: emscripten-core/setup-emsdk@4528d102f7230f0e7b276855c01ea1159be0e984 # v16
@@ -279,6 +491,8 @@ jobs:
 
       - name: Setup Python and SCons
         uses: ./.github/actions/godot-deps
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Build template
         run: |
@@ -307,21 +521,56 @@ jobs:
           mkdir -p dist
           cp "bin/${{ matrix.bin-zip }}" "dist/${{ matrix.asset }}"
 
+      - name: Record build manifest
+        # One fragment per matrix leg — the filenames must not collide, since
+        # download-artifact merges every job's dist/ into one directory.
+        run: |
+          set -euo pipefail
+          {
+            echo "### ${{ matrix.asset }}"
+            echo "runs-on:       ubuntu-24.04"
+            echo "runner-image:  ${ImageOS:-unknown} ${ImageVersion:-unknown} (${RUNNER_OS}/${RUNNER_ARCH})"
+            echo "emcc:          $(emcc -v 2>&1 | head -n 1)"
+            echo "emsdk pin:     ${EM_VERSION_WEBGPU}"
+            echo "python:        $(python --version 2>&1)"
+            echo "scons:         $(python -m pip show scons | awk '/^Version:/ { print $2 }')"
+            echo "scons flags:   target=${{ matrix.target }} arch=wasm32 webgpu=yes vulkan=no opengl3=no ${{ matrix.scons-flags }} initial_memory=256"
+            echo
+          } | tee "dist/manifest-30-${{ matrix.cache-name }}.txt"
+
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ${{ matrix.cache-name }}
           path: dist/*
           if-no-files-found: error
+          # Intermediate hand-off only; the Release asset is the permanent copy.
+          retention-days: 1
 
   release:
     name: Publish release
     runs-on: ubuntu-24.04
     needs: [linux-editor, macos-editor, web-template]
     timeout-minutes: 15
+    # ⚠ The ONLY job in this workflow with write access, and the only one that
+    # needs it: it pushes the tag and creates the Release. Everything above runs
+    # under the workflow-level `contents: read`. This job compiles nothing and
+    # installs no toolchain — its whole job is `download-artifact` + `gh` — so
+    # the write credential is exposed to the smallest possible surface.
+    permissions:
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # ⚠ The one checkout that KEEPS its credential, stated explicitly
+          # rather than left to the default so the contrast with the build jobs
+          # is visible and nobody "tidies" it away. The tag step below is a real
+          # `git push origin`, which authenticates through the extraheader
+          # checkout writes into .git/config; `persist-credentials: false` here
+          # would break releases. `gh release create` does not need it (it reads
+          # GH_TOKEN from the environment) — the tag push does.
+          persist-credentials: true
 
       - name: Download artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -351,6 +600,24 @@ jobs:
           EDITOR_VERSION="$(cat editor-version.txt)"
           rm editor-version.txt
           PROFILE_SHA="$(sha256sum "../${BUILD_PROFILE}" | cut -d' ' -f1)"
+
+          # Fold the per-job fragments into one `build-manifest.txt` asset, then
+          # delete them so they don't each become a release asset of their own.
+          # The numeric prefixes are what gives the glob a sane order (the shell
+          # expands it sorted); a missing fragment fails the step, which is the
+          # behavior we want — a manifest with a hole in it is worse than none.
+          {
+            echo "hogdot ${TAG} — build manifest"
+            echo
+            echo "fork commit:   ${GITHUB_SHA}"
+            echo "build profile: ${BUILD_PROFILE} (sha256 ${PROFILE_SHA})"
+            echo "workflow run:  ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo
+            cat manifest-*.txt
+          } > build-manifest.txt
+          rm -f manifest-*.txt
+          cat build-manifest.txt
+
           sha256sum $(ls | sort) > checksums.txt
           cat checksums.txt
 
@@ -380,11 +647,26 @@ jobs:
             echo "editor-macos-arm64.tar.gz                 -> godot.macos.editor.arm64 + tint_convert_cli"
             echo '```'
             echo
+            echo "\`editor-linux-x86_64.debugsymbols.tar.gz\` is that editor's separated DWARF." \
+                 "Nothing needs it to build or export — it exists to post-mortem a stalled or" \
+                 "crashed editor. Unpack it beside \`godot.linuxbsd.editor.x86_64\` and gdb finds" \
+                 "it through the binary's \`.gnu_debuglink\` with no extra flags; the shipped" \
+                 "binary is stripped either way, so the tarball above is unaffected."
+            echo
             echo "sha256 per asset (also shipped as \`checksums.txt\`):"
             echo
             echo '```'
             cat checksums.txt
             echo '```'
+            echo
+            echo "<details><summary>Build manifest — runner images and toolchain versions" \
+                 "(also shipped as <code>build-manifest.txt</code>)</summary>"
+            echo
+            echo '```'
+            cat build-manifest.txt
+            echo '```'
+            echo
+            echo "</details>"
           } > ../release-body.md
 
           gh release create "${TAG}" \
