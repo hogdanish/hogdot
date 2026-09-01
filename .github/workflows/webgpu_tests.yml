@@ -198,10 +198,39 @@ jobs:
 
           # Shader compilation is lazy and --headless creates no renderer.
           # Run the coverage scene with Mobile under Xvfb to produce the dump.
-          GODOT_DUMP_SPIRV=/tmp/spirv_dump timeout 120 \
+          #
+          # ⚠ The coverage run is judged by WHAT IT PRODUCED, not by how it
+          # exited, and that is deliberate. Under Xvfb on llvmpipe the scene
+          # reaches `[ShaderCoverage] PASS` and saves its report, then can sit
+          # in renderer teardown past any bound we set — run 33509935210 saved
+          # the report at 106s and was still not gone at the 120s bound, so the
+          # step died with 124 having already done every bit of its work.
+          #
+          # A hang in teardown is not a shader defect, so it must not red this
+          # job. What WOULD be a defect is a partial dump or an unexercised
+          # path, and that is still fail-closed below: on 124 the PASS marker
+          # is required, and the dump and export assertions run either way.
+          # Any exit code other than 0 or 124 remains fatal.
+          coverage_log=/tmp/shader_coverage.log
+          rc=0
+          GODOT_DUMP_SPIRV=/tmp/spirv_dump timeout 300 \
             xvfb-run --auto-servernum bin/godot.linuxbsd.editor.x86_64 \
               --path webgpu_tests/test_project \
-              --rendering-method mobile --quit-after 10
+              --rendering-method mobile --quit-after 10 \
+            >"$coverage_log" 2>&1 || rc=$?
+          cat "$coverage_log"
+
+          if [ "$rc" -eq 124 ]; then
+            if grep -q '\[ShaderCoverage\] PASS' "$coverage_log"; then
+              echo "::warning::coverage run hit the 300s bound after reporting PASS — judging it by the dump it produced"
+            else
+              echo "::error::coverage run hit the 300s bound WITHOUT reporting PASS"
+              exit 1
+            fi
+          elif [ "$rc" -ne 0 ]; then
+            echo "::error::coverage run failed with exit code $rc"
+            exit "$rc"
+          fi
 
           echo "SPIR-V files dumped:"
           ls -la /tmp/spirv_dump/ | head -50
