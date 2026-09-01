@@ -391,6 +391,17 @@ that still logged cache misses against a "fully baked" pck:
 | Can the target read an input attachment? | `supports_input_attachments()` | `false` | nothing — it excludes untranslatable subpass variants |
 | Does the target take the **raster** octmap path? | `uses_raster_octmap()` | `true` | `Octmap{Downsampler,Filter,Roughness}RasterShaderRD` — 3 live Tint translations on the browser main thread at first sky radiance, every boot |
 
+⚠ **A fourth, nastier member of the same family, fixed 2026-09-01 (RL-059): the exporting device
+decided the CONTENT of a version, not just which versions existed.** Forward-Mobile set
+`actions.base_varying_index = has_feature(SUPPORTS_MULTIVIEW) ? 13 : 11`, so a Metal editor baked
+every user varying at `layout(location = 13+)` while the browser looked one up at 11+ — the
+generated code is hashed into the version sha1, so **every `.gdshader` declaring a `varying` missed
+its own baked container on every boot since baking existed** (11 of the 14 remaining
+`SceneForwardMobileShaderRD` misses). It is now a constant `11`; Clustered stays at 15.
+⚠ **The rule:** anything reaching `ShaderCompiler::DefaultIdentifierActions` that varies with the
+*running* device is a bake-invalidating bug, not a tuning knob — and its failure mode is a silent
+miss, indistinguishable from a shader that was never baked.
+
 The third one is the inverted case and needs a different mechanism: the editor's verdict is the
 *narrower* one, so the bit has to **create** versions that do not exist.
 `RenderingShaderLibrary::FEATURE_RASTER_OCTMAP_BIT` → `RendererSceneRenderRD::enable_features()` →

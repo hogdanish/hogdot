@@ -846,12 +846,30 @@ void SceneShaderForwardMobile::init(const String p_defines) {
 		// table at the top of that file's vertex stage.
 		//
 		// The engine packs into locations 0..10, plus 11 and 12 for the motion-vector
-		// pair. That pair only exists in the MODE_RENDER_MOTION_VECTORS variant, which is
-		// multiview-only on this renderer; a driver without multiview support can never
-		// compile it, so those two locations go back to user shaders. This matters on
-		// WebGPU, whose `maxInterStageShaderVariables` floor of 16 left a single user
-		// varying slot at the old flat reservation of 15 (RL-029).
-		actions.base_varying_index = RD::get_singleton()->has_feature(RD::SUPPORTS_MULTIVIEW) ? 13 : 11;
+		// pair. That pair only exists in the MODE_RENDER_MOTION_VECTORS variant, which on
+		// this renderer is only ever built as SHADER_VERSION_MOTION_VECTORS_MULTIVIEW —
+		// always `#define USE_MULTIVIEW`, always in the multiview shader group. This
+		// matters on WebGPU, whose `maxInterStageShaderVariables` floor of 16 left a
+		// single user varying slot at the old flat reservation of 15 (RL-029).
+		//
+		// ⚠ **This is a constant, and it must stay one.** It used to be
+		// `has_feature(SUPPORTS_MULTIVIEW) ? 13 : 11`, which asks the DEVICE THIS PROCESS
+		// IS RUNNING ON a question whose answer has to match the device that will RUN the
+		// shader. It never does across an export: the macOS/Metal editor that bakes says
+		// yes and emits `layout(location = 13+)`, the browser's WebGPU driver says no and
+		// emits 11+, the generated code is part of the version sha1, and so every shader
+		// declaring a `varying` missed its own baked container on every boot — silently,
+		// because a miss is indistinguishable from a shader that was never baked (RL-059).
+		// Anything here that varies by runtime device is a bake-invalidating bug, not a
+		// tuning knob.
+		//
+		// ⚠ The cost of the constant: with XR/multiview enabled on the Mobile renderer, a
+		// user shader's first varyings now collide with `screen_position` /
+		// `prev_screen_position` at 11 and 12 inside MOTION_VECTORS_MULTIVIEW. This fork's
+		// sole consumer never renders multiview, and the WebGPU varying budget is built
+		// around 11; a fork that wants XR on Mobile must move that pair instead of moving
+		// this number back.
+		actions.base_varying_index = 11;
 
 		actions.default_filter = ShaderLanguage::FILTER_LINEAR_MIPMAP;
 		actions.default_repeat = ShaderLanguage::REPEAT_ENABLE;

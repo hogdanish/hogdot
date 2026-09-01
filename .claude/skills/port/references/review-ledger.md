@@ -1835,3 +1835,45 @@ WebGPU platform — the same platform-answers-the-question shape as the other tw
 `_customize_scene` casts to `SpriteBase3D`; `_export_customize_object` skips
 `PROPERTY_USAGE_NONE`. Verified at *links* plus a game export and a verbose browser boot (see the
 build-export skill's shader-baking section).
+
+### RL-059 — 2026-09-01 — **bug** (fixed) — the exporting device answered a question only the target could
+
+**Where:** `servers/rendering/renderer_rd/forward_mobile/scene_shader_forward_mobile.cpp`
+(`actions.base_varying_index`)
+
+**Found while:** reading the newly attributable cache-miss lines from RL-058 — with origins
+printed, 11 of the 14 remaining `SceneForwardMobileShaderRD` misses on a CommonGrounds browser boot
+resolved to named `.gdshader` resources the baker had definitely baked (water, puppet_billboard,
+lineboil_sprite3d, city_windows and its glow, rope_ribbon, tractor_beam, flare, impact_slash,
+spiral_dust, water_bubble). All eleven declare `varying`s. None of the shaders that *hit* do.
+
+**What:** the Mobile renderer set
+`actions.base_varying_index = RD::get_singleton()->has_feature(RD::SUPPORTS_MULTIVIEW) ? 13 : 11`.
+That reads the device **this process** is running on, but the number it produces is baked into the
+generated GLSL (`layout(location = N)` for every user varying) and the generated code is hashed
+into the version sha1. A macOS/Metal editor says multiview-yes and bakes containers keyed on 13+;
+the browser's WebGPU driver says multiview-no (`RenderingDeviceDriverWebGPU::has_feature`, hard
+`false`) and looks up 11+. **Every varying-using material has therefore missed its own baked
+container on every boot since baking existed**, at ~10 ms of live Tint per module — and invisibly,
+because a miss on a baked shader is indistinguishable from a shader that was never baked. Only the
+version's sha1 differs, and until RL-058 the miss line printed nothing but that sha1.
+
+⚠ **The general rule this instance establishes:** anything reaching `ShaderCompiler::DefaultIdentifierActions`
+that varies with the *running* device is a bake-invalidating bug, not a tuning knob. It is the same
+editor-decides-for-the-target family as RL-058's FP16 / input-attachment / raster-octmap trio, but
+one level nastier: those changed *which* versions existed, this changed the *content* of a version
+that existed on both sides.
+
+**Disposition:** **fixed** — the Mobile index is a constant `11`. `MODE_RENDER_MOTION_VECTORS`, the
+only thing that occupies 11 and 12, is built on this renderer solely as
+`SHADER_VERSION_MOTION_VECTORS_MULTIVIEW` (always `#define USE_MULTIVIEW`, always in the multiview
+shader group), so a non-multiview render — every render this fork's consumer performs, and every
+render a Metal editor performs with the multiview group off — never declares them and never
+collides. `scene_shader_forward_clustered.cpp` is deliberately untouched at 15: the collision-free
+constant differs per renderer and Clustered is not on the web path.
+
+⚠ **Known cost, accepted:** with XR/multiview enabled on the *Mobile* renderer, a user shader's
+first two varyings now collide with `screen_position` / `prev_screen_position` inside
+MOTION_VECTORS_MULTIVIEW. CommonGrounds never renders multiview and the WebGPU varying budget
+(`maxInterStageShaderVariables` 16, five user slots, RL-029) is built around 11. A fork wanting XR
+on Mobile must move that pair, not move this number back.
