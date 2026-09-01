@@ -130,6 +130,14 @@ FILL: the subpass structure proper. What the port established (2026-08-06, slice
 - **Within a depth bucket the opaque render list runs in reverse creation order** (probe-verified
   2026-08-10 on WebGPU). The batch representative — whose pipeline specialization the whole merged
   draw uses — is whichever eligible instance that ordering lists first.
+- **The forward-mobile singleton mutex protects `ShaderCompiler::compile()`, not `ShaderRD` waits.**
+  `ShaderRD::version_*()` owns a per-version mutex and may wait for `ShaderCompilation` work on the
+  shared `WorkerThreadPool`. Holding `SceneShaderForwardMobile::singleton_mutex` across that wait can
+  starve a two-worker pool when queued `PipelineCompilation` tasks need the singleton mutex. Keep the
+  compiler call in a narrow scope and never wrap `version_get_shader()`, `version_is_valid()`,
+  `version_get_native_source_code()` or `version_free()` in the singleton lock. This is the Mobile
+  counterpart of upstream Godot #102877 / `09282c316a`; CommonGrounds WEB-01 demonstrated the omitted
+  path twice during web export.
 
 ## Driver registration and selection
 
@@ -137,4 +145,5 @@ FILL: how a rendering driver is registered and chosen — `main/main.cpp`, `serv
 and the `rendering/rendering_device/driver.*` project settings. Short section; mostly a call-order trace.
 
 ---
+
 *Source of truth for mainline internals hogdot depends on — fill and update it as each port slice lands.*

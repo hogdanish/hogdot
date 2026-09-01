@@ -416,6 +416,7 @@ objects, `-O2`, `JOBS_WASM=4`, ~35 min from clean. Treat it as accurate to a few
 module that also runs; the size is dominated by Tint, which is already linked and complete.
 
 Three build facts are load-bearing, and none of them fails at build time:
+
 - ⚠ **`-sSUPPORT_LONGJMP=wasm` and `-fno-exceptions` are ONE decision**, on BOTH compile and link.
   Without `-fno-exceptions` libc++ emits `__cxa_throw`, Emscripten links no throwing support under
   wasm sjlj, and the **link** fails; the obvious escape is refused outright with
@@ -704,6 +705,14 @@ sidecar from the wrong build warns instead of inventing names. Verified against 
 shape: without the sidecar a blocked mutex frame is `#4 0x… in ?? ()`; with it, the same frame
 resolves to the function, its `file:line`, *and* the identity of the mutex being waited on.
 
+*What it found.* Both independent export attempts had the same two-worker starvation cycle. The
+main thread held `SceneShaderForwardMobile::singleton_mutex` in `ShaderData::is_valid()` while
+waiting for a `ShaderCompilation` group; both worker threads were already running
+`PipelineCompilation` tasks blocked in `ShaderData::get_shader_variant()` on that mutex. Upstream
+Godot narrowed the equivalent Forward+ lock scope in #102877 / `09282c316a` but omitted Mobile.
+The Mobile invariant and repair live in **`engine`**; a release is not proof until this exact export
+completes twice with the repaired editor.
+
 ⚠ **Do not extend this to the web templates.** Emscripten debug info means `-g3` (`SConstruct:869`),
 which inflates the wasm players actually download. The macOS editor is also deliberately left at
 `debug_symbols=no`: `separate_debug_symbols` there means a `dsymutil` `.dSYM` bundle, and no
@@ -946,4 +955,5 @@ reappears, something is building without `CCACHE_DIR` reaching it.
   is 36.9 MB raw / 8.95 MB wire; the 45.6 MB figure was the unprofiled local template.
 
 ---
+
 *Source of truth for building hogdot — correct it in the same change as any build command you actually run.*
