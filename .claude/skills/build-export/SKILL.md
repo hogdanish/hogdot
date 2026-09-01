@@ -380,7 +380,38 @@ one export during a stale-CLI window (or before WGSL baking existed) left every 
 `webgpu_tests/perf/pck-bake-audit.py`-style parsing of `.godot/**/*.webgpu.cache` (flag bit 0 of the
 WebGPU header = baked WGSL), and read `__cgPerf.counters.baked_wgsl_hit/miss` at runtime.
 
-⚠ **A cache-miss line names its origin** (2026-09-01):
+⚠ **What the exporting editor decides for ITSELF is the whole class of bake gaps** (2026-09-01,
+RL-058). Three questions are now answered by the export platform rather than by whatever device
+the editor happens to run on, and every one of them was found by reading a verbose browser boot
+that still logged cache misses against a "fully baked" pck:
+
+| Question | Platform hook | WebGPU answer | What went unbaked without it |
+| --- | --- | --- | --- |
+| Can the target report `SUPPORTS_HALF_FLOAT`? | `supports_half_float()` | `false` | nothing — it *removes* 40 MB of dead FP16 |
+| Can the target read an input attachment? | `supports_input_attachments()` | `false` | nothing — it excludes untranslatable subpass variants |
+| Does the target take the **raster** octmap path? | `uses_raster_octmap()` | `true` | `Octmap{Downsampler,Filter,Roughness}RasterShaderRD` — 3 live Tint translations on the browser main thread at first sky radiance, every boot |
+
+The third one is the inverted case and needs a different mechanism: the editor's verdict is the
+*narrower* one, so the bit has to **create** versions that do not exist.
+`RenderingShaderLibrary::FEATURE_RASTER_OCTMAP_BIT` → `RendererSceneRenderRD::enable_features()` →
+`CopyEffects::enable_raster_octmap_shaders_for_baking()` (idempotent; `version_create()` only — the
+baker needs `version_build_variant_stage_sources()`, never a local compile). ⚠ **Its mode lists must
+stay identical to `CopyEffects`' raster branches** — they feed `_version_get_sha1()`, so a drifted
+`#define` bakes a container at a cache path the runtime never looks up, silently.
+
+⚠ **The baker enumerates `SpriteBase3D`, not `Sprite3D`** (fixed 2026-09-01). `AnimatedSprite3D` is
+a sibling subclass reaching the same `StandardMaterial3D::get_material_for_2d()` call with the same
+node properties, and a `Sprite3D`-only cast left every one of them unbaked.
+
+⚠ **`Index p_pass = 1 is out of bounds (draw_passes.size() = 1)`, hundreds of them, is not the
+baker's fault and is not real.** `EditorExportPlatform::_export_customize_object()` walked every
+entry of `get_property_list()` including the ones `_validate_property()` had switched off to
+`PROPERTY_USAGE_NONE` (it blanks the usage, it does not erase the entry), and `GPUParticles3D`
+always declares four `draw_pass_N` properties. Fixed by skipping `PROPERTY_USAGE_NONE`. Resource
+customization only runs when a plugin claims the export, which is why the noise looked like the
+shader baker's.
+
+⚠ **A cache-miss line now names its origin** (2026-09-01):
 `Shader cache miss for <name>/<group>/<sha1> (origin: <res:// path or "runtime">; uniforms: a,b,c)`.
 `ShaderRD::version_set_name()` carries the material's `shader_set_path_hint()` path onto the
 version (set *before* `version_set_code()`, which is what starts the compile that reads the cache);

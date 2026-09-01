@@ -1791,3 +1791,47 @@ only platform that had ever built an editor.
 consumer when `webgpu=no`. Verified at *links*: a linuxbsd editor links and stamps
 `4.7.2.stable.custom_build.2ba2026a5` (Ubuntu 24.04 arm64, gcc 13.3, 2026-08-27); linuxbsd and
 macOS both pass the configure-only gate with the change in place.
+
+### RL-058 — 2026-09-01 — **bug** (fixed, three of them, one shape)
+
+**Where:** `servers/rendering/renderer_rd/effects/copy_effects.{h,cpp}`,
+`servers/rendering/rendering_shader_library.h`, `editor/export/shader_baker_export_plugin.{h,cpp}`,
+`editor/shader/shader_baker/shader_baker_export_plugin_platform_webgpu.h`,
+`editor/export/editor_export_platform.cpp`
+
+**Found while:** reading a verbose browser boot of CommonGrounds that still logged 17
+`Shader cache miss for …` versions after entering the world, against a pck that was supposed to be
+fully baked.
+
+**What:** three of the seventeen were `OctmapDownsamplerRasterShaderRD`,
+`OctmapFilterRasterShaderRD` and `OctmapRoughnessRasterShaderRD`. `CopyEffects` decides
+compute-versus-raster octmap in its constructor from **this device's** support for the preferred
+color format as a storage image (`RendererSceneRenderRD::init()`, `RASTER_EFFECT_OCTMAP`). A macOS
+editor answers "storage works" and never constructs the three raster `ShaderRD` versions, so they
+are absent from `ShaderRD::shaders_embedded_set` when the baker walks it; WebGPU answers the other
+way and translates all three live, on the main thread, at the first sky radiance update of every
+boot. ⚠ **This is the third instance of one shape** — a variant set the *exporting editor* decided
+for itself from its own platform (FP16, `supports_half_float()`; the tonemapper's subpass variants,
+`supports_input_attachments()`) — and the first where the editor's verdict is the *narrower* one, so
+the fix has to **create** state rather than exclude it.
+
+Two smaller baker defects fell out of the same read: `_customize_scene` cast to `Sprite3D`, so an
+`AnimatedSprite3D` — a sibling `SpriteBase3D` subclass reaching the identical
+`StandardMaterial3D::get_material_for_2d()` call with the identical node properties — was never
+baked; and `EditorExportPlatform::_export_customize_object()` read every property in
+`get_property_list()` including the ones `_validate_property()` had switched off to
+`PROPERTY_USAGE_NONE`, which is why a shader-baking export printed one
+`Index p_pass = 1 is out of bounds (draw_passes.size() = 1)` per hidden `GPUParticles3D` draw pass —
+hundreds of errors in the CommonGrounds export log, none of them real.
+
+**Disposition:** **fixed.**
+`RenderingShaderLibrary::FEATURE_RASTER_OCTMAP_BIT` → `RendererSceneRenderRD::enable_features()` →
+`CopyEffects::enable_raster_octmap_shaders_for_baking()`, which idempotently initializes the three
+raster shaders and `version_create()`s them (no local compile: the baker only needs
+`version_build_variant_stage_sources()`, and the mode lists must keep matching the constructor's
+raster branches or the container lands at a cache path the runtime never looks up). The bit is set
+from `ShaderBakerExportPluginPlatform::uses_raster_octmap()`, default `false`, `true` only in the
+WebGPU platform — the same platform-answers-the-question shape as the other two, inverted.
+`_customize_scene` casts to `SpriteBase3D`; `_export_customize_object` skips
+`PROPERTY_USAGE_NONE`. Verified at *links* plus a game export and a verbose browser boot (see the
+build-export skill's shader-baking section).

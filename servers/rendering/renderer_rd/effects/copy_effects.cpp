@@ -348,6 +348,35 @@ CopyEffects::CopyEffects(BitField<RasterEffects> p_raster_effects) {
 	}
 }
 
+void CopyEffects::enable_raster_octmap_shaders_for_baking() {
+	if (raster_effects.has_flag(RASTER_EFFECT_OCTMAP) || raster_octmap_bake.created) {
+		// Already the live path (the constructor made them), or already done.
+		return;
+	}
+	raster_octmap_bake.created = true;
+
+	// The mode lists must match the constructor's raster branches exactly, or the baked
+	// container lands at a cache path the runtime never looks up.
+	octmap_downsampler.raster_shader.initialize({ "" });
+	raster_octmap_bake.downsampler = octmap_downsampler.raster_shader.version_create();
+
+	Vector<String> cubemap_filter_modes;
+	for (int i = 0; i < FILTER_MODE_RASTER_MAX; i++) {
+		String mode;
+		if (i & FILTER_MODE_FLAG_HIGH_QUALITY) {
+			mode += "\n#define USE_HIGH_QUALITY\n";
+		} else {
+			mode += "\n#define USE_LOW_QUALITY\n";
+		}
+		cubemap_filter_modes.push_back(mode);
+	}
+	filter.raster_shader.initialize(cubemap_filter_modes);
+	raster_octmap_bake.filter = filter.raster_shader.version_create();
+
+	roughness.raster_shader.initialize({ "" });
+	raster_octmap_bake.roughness = roughness.raster_shader.version_create();
+}
+
 CopyEffects::~CopyEffects() {
 	for (int i = 0; i < COPY_MODE_MAX; i++) {
 		copy.pipelines[i].free();
@@ -356,6 +385,12 @@ CopyEffects::~CopyEffects() {
 	if (raster_effects.has_flag(RASTER_EFFECT_GAUSSIAN_BLUR)) {
 		blur_raster.shader.version_free(blur_raster.shader_version);
 		RD::get_singleton()->free_rid(blur_raster.glow_sampler);
+	}
+
+	if (raster_octmap_bake.created) {
+		octmap_downsampler.raster_shader.version_free(raster_octmap_bake.downsampler);
+		filter.raster_shader.version_free(raster_octmap_bake.filter);
+		roughness.raster_shader.version_free(raster_octmap_bake.roughness);
 	}
 
 	if (raster_effects.has_flag(RASTER_EFFECT_OCTMAP)) {

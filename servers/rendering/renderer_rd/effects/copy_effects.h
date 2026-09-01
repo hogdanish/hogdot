@@ -329,6 +329,17 @@ private:
 		PipelineCacheRD raster_pipeline;
 	} roughness;
 
+	// Bake-only. The three raster octmap versions this renderer did NOT create for
+	// itself, because it took the compute path. Created on demand by
+	// enable_raster_octmap_shaders_for_baking() so the shader baker can walk them out
+	// of ShaderRD::shaders_embedded_set(); never compiled or drawn with here.
+	struct RasterOctmapBakeVersions {
+		bool created = false;
+		RID downsampler;
+		RID filter;
+		RID roughness;
+	} raster_octmap_bake;
+
 	// Merge specular
 
 	enum SpecularMergeMode {
@@ -365,6 +376,12 @@ public:
 	~CopyEffects();
 
 	BitField<RasterEffects> get_raster_effects() { return raster_effects; }
+
+	// Bake-time seam, idempotent and safe to call on a renderer already using the
+	// raster path (it then does nothing). Brings the three raster octmap ShaderRD
+	// versions into existence so a desktop editor exporting to a target that uses
+	// them can bake them. Nothing in the rendering path reads what this creates.
+	void enable_raster_octmap_shaders_for_baking();
 
 	void copy_to_rect(RID p_source_rd_texture, RID p_dest_texture, const Rect2i &p_rect, bool p_flip_y = false, bool p_force_luminance = false, bool p_all_source = false, bool p_8_bit_dst = false, bool p_alpha_to_one = false, bool p_sanitize_inf_nan = false);
 	void copy_octmap_to_panorama(RID p_source_octmap, RID p_dest_panorama, const Size2i &p_panorama_size, float p_lod, bool p_is_array, const Size2 &p_source_octmap_border_size);

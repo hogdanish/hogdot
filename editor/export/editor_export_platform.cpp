@@ -932,6 +932,17 @@ bool EditorExportPlatform::_export_customize_object(Object *p_object, LocalVecto
 	List<PropertyInfo> props;
 	p_object->get_property_list(&props);
 	for (const PropertyInfo &E : props) {
+		// _validate_property() leaves a property it has switched off in the list with
+		// PROPERTY_USAGE_NONE rather than erasing it, and such a property is neither
+		// stored nor editable, so there is nothing here to customize. Reading it anyway
+		// is how an export with shader baking on printed one error per hidden
+		// GPUParticles3D draw pass ("Index p_pass = 1 is out of bounds"): the four
+		// draw_pass_N properties are always declared and only the first get_draw_passes()
+		// of them are valid to read.
+		if (E.usage == PROPERTY_USAGE_NONE) {
+			continue;
+		}
+
 		switch (E.type) {
 			case Variant::OBJECT: {
 				Ref<Resource> res = p_object->get(E.name);

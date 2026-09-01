@@ -1562,6 +1562,13 @@ void RendererSceneRenderRD::enable_features(BitField<FeatureBits> p_feature_bits
 	if (tone_mapper != nullptr) {
 		tone_mapper->set_subpass_variants_baked(p_feature_bits.has_flag(FEATURE_INPUT_ATTACHMENT_BIT));
 	}
+
+	// Same shape again: CopyEffects decided compute-versus-raster octmap from THIS
+	// device's storage-image support when it was constructed, so an export target that
+	// takes the raster path has no versions to bake unless we make them now.
+	if (copy_effects != nullptr && p_feature_bits.has_flag(FEATURE_RASTER_OCTMAP_BIT)) {
+		copy_effects->enable_raster_octmap_shaders_for_baking();
+	}
 }
 
 void RendererSceneRenderRD::set_debug_draw_mode(RSE::ViewportDebugDraw p_debug_draw) {

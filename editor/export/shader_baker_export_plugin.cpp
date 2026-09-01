@@ -84,6 +84,7 @@ bool ShaderBakerExportPlugin::_initialize_container_format(const Ref<EditorExpor
 			ERR_FAIL_NULL_V_MSG(shader_container_format, false, "Unable to create shader container format for the export platform.");
 			shader_container_half_float = platform->supports_half_float();
 			shader_container_input_attachments = platform->supports_input_attachments();
+			shader_container_raster_octmap = platform->uses_raster_octmap();
 			shader_cache_key_suffix = platform->get_cache_key_suffix();
 			return true;
 		}
@@ -214,6 +215,14 @@ bool ShaderBakerExportPlugin::_begin_customize_resources(const Ref<EditorExportP
 	// RendererSceneRenderRD::enable_features() and ToneMapper::set_subpass_variants_baked().
 	if (shader_container_input_attachments) {
 		renderer_features.set_flag(RenderingShaderLibrary::FEATURE_INPUT_ATTACHMENT_BIT);
+	}
+
+	// And the mirror image: a variant set the editor decided AGAINST for itself. A
+	// desktop editor has storage-image support for the octmap format and took the
+	// compute path, so the three raster octmap versions the web runtime actually uses
+	// do not exist to be walked. Ask for them.
+	if (shader_container_raster_octmap) {
+		renderer_features.set_flag(RenderingShaderLibrary::FEATURE_RASTER_OCTMAP_BIT);
 	}
 
 	RendererSceneRenderRD::get_singleton()->enable_features(renderer_features);
@@ -408,12 +417,15 @@ Node *ShaderBakerExportPlugin::_customize_scene(Node *p_root, const String &p_pa
 	LocalVector<Node *> nodes_to_visit;
 	nodes_to_visit.push_back(p_root);
 	while (!nodes_to_visit.is_empty()) {
-		// Visit all nodes recursively in the scene to find the Label3Ds and Sprite3Ds.
+		// Visit all nodes recursively in the scene to find the Label3Ds and SpriteBase3Ds.
 		Node *node = nodes_to_visit[nodes_to_visit.size() - 1];
 		nodes_to_visit.remove_at(nodes_to_visit.size() - 1);
 
 		Label3D *label_3d = Object::cast_to<Label3D>(node);
-		Sprite3D *sprite_3d = Object::cast_to<Sprite3D>(node);
+		// SpriteBase3D, not Sprite3D: AnimatedSprite3D is a sibling subclass that builds its
+		// material through the same StandardMaterial3D::get_material_for_2d() call with the
+		// same node properties, and a Sprite3D-only cast left every one of them unbaked.
+		SpriteBase3D *sprite_3d = Object::cast_to<SpriteBase3D>(node);
 		if (label_3d != nullptr || sprite_3d != nullptr) {
 			// Create materials for Label3D and Sprite3D, which are normally generated at runtime on demand.
 			HashMap<StringName, Variant> properties;

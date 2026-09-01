@@ -66,6 +66,13 @@ public:
 	// but one — see ShaderBakerExportPluginPlatformWebGPU.
 	virtual bool supports_input_attachments() const { return true; }
 
+	// Whether this export target takes the raster octmap path for sky radiance
+	// (RendererSceneRenderRD picks it when the preferred color format is not usable
+	// as a storage image). The inverse of the two questions above: here the EDITOR is
+	// the one that would never create those versions, so the platform has to ask for
+	// them. False for every driver but one — see ShaderBakerExportPluginPlatformWebGPU.
+	virtual bool uses_raster_octmap() const { return false; }
+
 	virtual ~ShaderBakerExportPluginPlatform() {}
 };
 
@@ -114,6 +121,7 @@ protected:
 	// the feature block that reads it runs later in _begin_customize_resources().
 	bool shader_container_half_float = true;
 	bool shader_container_input_attachments = true;
+	bool shader_container_raster_octmap = false;
 	Vector<Ref<ShaderBakerExportPluginPlatform>> platforms;
 	uint64_t customization_configuration_hash = 0;
 	uint32_t tasks_processed = 0;

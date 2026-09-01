@@ -46,6 +46,12 @@ public:
 		// (a subpass read). Every driver but WebGPU can; see
 		// ShaderBakerExportPluginPlatform::supports_input_attachments().
 		FEATURE_INPUT_ATTACHMENT_BIT = 1U << 5U,
+		// Whether the export target takes the RASTER octmap path for sky radiance.
+		// Bake-only: the exporting editor picks compute for itself, so the three raster
+		// octmap ShaderRD versions never exist at export time and the target translates
+		// them live at every boot. See CopyEffects::enable_raster_octmap_shaders_for_baking()
+		// and ShaderBakerExportPluginPlatform::uses_raster_octmap().
+		FEATURE_RASTER_OCTMAP_BIT = 1U << 6U,
 	};
 
 	// Used by the shader baker to globally enable features on all the shaders that will be exported.

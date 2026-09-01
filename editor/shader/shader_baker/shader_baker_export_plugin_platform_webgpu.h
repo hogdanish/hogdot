@@ -90,4 +90,11 @@ private:
 	// and ToneMapper disables its subpass variants there. Saying so here keeps a desktop
 	// editor from baking (and failing to translate) shaders the browser can never run.
 	virtual bool supports_input_attachments() const override { return false; }
+
+	// WebGPU cannot use the octmap color format as a storage image, so the browser
+	// runtime takes the RASTER octmap path (RendererSceneRenderRD::init()) while the
+	// desktop editor doing the bake takes the compute one. Without this the three
+	// Octmap*Raster versions are absent from every export and Tint translates them on
+	// the browser main thread at first sky radiance update, every boot.
+	virtual bool uses_raster_octmap() const override { return true; }
 };
