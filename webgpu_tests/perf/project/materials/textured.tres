@@ -1,0 +1,9 @@
+[gd_resource type="StandardMaterial3D" format=3]
+
+[sub_resource type="GradientTexture2D" id="tex"]
+width = 32
+height = 32
+
+[resource]
+albedo_texture = SubResource("tex")
+roughness = 0.6

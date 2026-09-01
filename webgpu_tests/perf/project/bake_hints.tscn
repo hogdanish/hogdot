@@ -1,0 +1,24 @@
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="Material" path="res://materials/particle_add.tres" id="pm"]
+[ext_resource type="Material" path="res://materials/particle_process.tres" id="pp"]
+
+[sub_resource type="QuadMesh" id="quad"]
+material = ExtResource("pm")
+
+[node name="BakeHints" type="Node3D"]
+
+[node name="Puppet" type="Sprite3D" parent="."]
+billboard = 1
+alpha_cut = 1
+texture_filter = 0
+
+[node name="Outline" type="Sprite3D" parent="."]
+modulate = Color(0, 0, 0, 1)
+billboard = 1
+alpha_cut = 1
+texture_filter = 0
+
+[node name="Burst" type="GPUParticles3D" parent="."]
+process_material = ExtResource("pp")
+draw_pass_1 = SubResource("quad")

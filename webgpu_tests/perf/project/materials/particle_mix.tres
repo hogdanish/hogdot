@@ -1,0 +1,17 @@
+[gd_resource type="StandardMaterial3D" format=3]
+
+[sub_resource type="GradientTexture2D" id="tex"]
+width = 32
+height = 32
+
+[resource]
+shading_mode = 0
+transparency = 1
+blend_mode = 0
+billboard_mode = 3
+billboard_keep_scale = true
+albedo_texture = SubResource("tex")
+vertex_color_use_as_albedo = true
+proximity_fade_enabled = true
+proximity_fade_distance = 0.5
+cull_mode = 2
