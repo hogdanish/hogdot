@@ -84,6 +84,7 @@ bool ShaderBakerExportPlugin::_initialize_container_format(const Ref<EditorExpor
 			ERR_FAIL_NULL_V_MSG(shader_container_format, false, "Unable to create shader container format for the export platform.");
 			shader_container_half_float = platform->supports_half_float();
 			shader_container_input_attachments = platform->supports_input_attachments();
+			shader_cache_key_suffix = platform->get_cache_key_suffix();
 			return true;
 		}
 	}
@@ -131,7 +132,11 @@ void ShaderBakerExportPlugin::_cleanup_container_format() {
 }
 
 bool ShaderBakerExportPlugin::_initialize_cache_directory() {
-	shader_cache_export_path = get_export_base_path().path_join("shader_baker").path_join(shader_cache_platform_name).path_join(shader_container_driver);
+	String cache_key = shader_container_driver;
+	if (!shader_cache_key_suffix.is_empty()) {
+		cache_key += "-" + shader_cache_key_suffix;
+	}
+	shader_cache_export_path = get_export_base_path().path_join("shader_baker").path_join(shader_cache_platform_name).path_join(cache_key);
 
 	if (!DirAccess::dir_exists_absolute(shader_cache_export_path)) {
 		Error err = DirAccess::make_dir_recursive_absolute(shader_cache_export_path);
@@ -168,6 +173,12 @@ bool ShaderBakerExportPlugin::_begin_customize_resources(const Ref<EditorExportP
 	to_hash.append(GODOT_VERSION_HASH);
 	to_hash.append("[Renderer]");
 	to_hash.append(shader_cache_renderer_name);
+	// The bake state (see ShaderBakerExportPluginPlatform::get_cache_key_suffix). Without it a
+	// resource customized while the bake was degraded stays in the export platform's
+	// customization cache, its shaders are never re-visited, and later exports ship whatever
+	// the first one produced.
+	to_hash.append("[BakeState]");
+	to_hash.append(shader_cache_key_suffix);
 	customization_configuration_hash = to_hash.as_string().hash64();
 
 	BitField<RenderingShaderLibrary::FeatureBits> renderer_features = {};

@@ -52,6 +52,13 @@ public:
 	// has_feature() cannot drift apart. True for every driver but one, hence the
 	// default — see ShaderBakerExportPluginPlatformWebGPU.
 	virtual bool supports_half_float() const { return true; }
+	// Appended to the export cache directory name. A platform whose bake output depends on
+	// tooling state (WebGPU: whether tint_convert_cli was usable, and which translation
+	// pipeline it embodies) returns a fingerprint of that state, so a container written under
+	// one state is never reused under another. The cache never re-validates a file it already
+	// has: without this, one export during a stale-CLI window shipped SPIR-V-only containers
+	// for every later export (measured 2026-09-01: 13 of 16 scene shader versions).
+	virtual String get_cache_key_suffix() const { return String(); }
 
 	// Whether this export target's rendering driver can read an input attachment (a
 	// subpass read). Same shape and same reason as supports_half_float(): the platform
@@ -102,6 +109,7 @@ protected:
 	LocalVector<ShaderGroupItem> shader_group_items;
 	RenderingShaderContainerFormat *shader_container_format = nullptr;
 	String shader_container_driver;
+	String shader_cache_key_suffix;
 	// The matched platform's answer, captured in _initialize_container_format() because
 	// the feature block that reads it runs later in _begin_customize_resources().
 	bool shader_container_half_float = true;

@@ -30,12 +30,11 @@
 
 #include "shader_baker_export_plugin_platform_webgpu.h"
 
-#include "editor/shader/shader_baker/tint_pipeline_id.gen.h"
-
 #include "core/io/dir_access.h"
 #include "core/io/file_access.h"
 #include "core/io/json.h"
 #include "core/os/os.h"
+#include "editor/shader/shader_baker/tint_pipeline_id.gen.h"
 
 bool RenderingShaderContainerWebGPUBaked::_set_code_from_spirv(const ReflectShader &p_shader) {
 	if (!RenderingShaderContainerWebGPU::_set_code_from_spirv(p_shader)) {
@@ -142,6 +141,10 @@ RenderingShaderContainerFormat *ShaderBakerExportPluginPlatformWebGPU::create_sh
 	if (!unavailable_reason.is_empty()) {
 		WARN_PRINT(vformat("Shader baker: baking SPIR-V only, without WGSL — %s. Rebuild the CLI with drivers/webgpu/tint_cli/build.sh to bake WGSL and remove runtime shader translation.", unavailable_reason));
 		cli_path = String();
+		cache_key_suffix = "spv";
+	} else {
+		cache_key_suffix = "wgsl-" + String(TINT_BAKE_PIPELINE_ID);
+		print_line(vformat("Shader baker: baking WGSL with %s (pipeline id %s).", cli_path, String(TINT_BAKE_PIPELINE_ID)));
 	}
 
 	return memnew(RenderingShaderContainerFormatWebGPUBaked(cli_path));

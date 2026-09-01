@@ -79,6 +79,11 @@ public:
 	// they are one decision, and the export would otherwise ship no FP16 shaders for a
 	// runtime that had started asking for them.
 	virtual bool supports_half_float() const override { return false; }
+	virtual String get_cache_key_suffix() const override { return cache_key_suffix; }
+
+private:
+	// "wgsl-<pipeline id>" when the CLI can bake WGSL, "spv" when the bake degrades.
+	String cache_key_suffix;
 
 	// WebGPU has no input attachments and no subpass reads — the driver flattens
 	// subpasses, RenderForwardMobile refuses subpass post-processing under WEB_ENABLED,
