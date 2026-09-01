@@ -630,8 +630,10 @@ bool ShaderRD::_load_from_cache(Version *p_version, int p_group) {
 	}
 
 	if (f.is_null()) {
-		const String &sha1 = _version_get_sha1(p_version);
-		print_verbose(vformat("Shader cache miss for %s", name.path_join(group_sha256[p_group]).path_join(sha1)));
+		if (is_print_verbose_enabled()) {
+			const String &sha1 = _version_get_sha1(p_version);
+			print_verbose(vformat("Shader cache miss for %s%s", name.path_join(group_sha256[p_group]).path_join(sha1), _version_get_origin_hint(p_version)));
+		}
 		return false;
 	}
 
@@ -657,7 +659,9 @@ bool ShaderRD::_load_from_cache(Version *p_version, int p_group) {
 		}
 		if (variant_size == 0) {
 			// A new variant has been requested, failing the entire load will generate it
-			print_verbose(vformat("Shader cache miss for %s due to missing variant %d", name.path_join(group_sha256[p_group]).path_join(_version_get_sha1(p_version)), variant_id));
+			if (is_print_verbose_enabled()) {
+				print_verbose(vformat("Shader cache miss for %s%s due to missing variant %d", name.path_join(group_sha256[p_group]).path_join(_version_get_sha1(p_version)), _version_get_origin_hint(p_version), variant_id));
+			}
 			return false;
 		}
 		Vector<uint8_t> variant_bytes;
@@ -833,6 +837,67 @@ void ShaderRD::_version_set(Version *p_version, const HashMap<String, String> &p
 		}
 		p_version->initialize_needed = false;
 	}
+}
+
+static bool _shader_rd_is_ident_char(char p_c) {
+	return (p_c >= 'a' && p_c <= 'z') || (p_c >= 'A' && p_c <= 'Z') || (p_c >= '0' && p_c <= '9') || p_c == '_';
+}
+
+String ShaderRD::_version_get_origin_hint(const Version *p_version) {
+	// A miss line only carries a sha1, which names nothing. Materials get a resource path
+	// through MaterialStorage::shader_set_path_hint(); a material built at runtime (every
+	// StandardMaterial3D, for one) has none, so fall back to the declared uniform names,
+	// which are what a BaseMaterial3D feature set is actually recognizable by.
+	const String origin = p_version->name.is_empty() ? String("runtime") : p_version->name;
+
+	constexpr int MAX_UNIFORM_NAMES = 16;
+	Vector<String> uniform_names;
+	const char *data = p_version->uniforms.get_data();
+	if (data != nullptr) {
+		int i = 0;
+		while (data[i] != 0 && uniform_names.size() < MAX_UNIFORM_NAMES) {
+			if (!_shader_rd_is_ident_char(data[i])) {
+				i++;
+				continue;
+			}
+			const int token_start = i;
+			while (_shader_rd_is_ident_char(data[i])) {
+				i++;
+			}
+			if (String::utf8(&data[token_start], i - token_start) != "uniform") {
+				continue;
+			}
+			// The declaration's name is the last identifier before its terminator, which
+			// skips past any precision or type qualifier ("uniform highp sampler2D tex;").
+			String last_identifier;
+			while (data[i] != 0) {
+				if (_shader_rd_is_ident_char(data[i])) {
+					const int name_start = i;
+					while (_shader_rd_is_ident_char(data[i])) {
+						i++;
+					}
+					last_identifier = String::utf8(&data[name_start], i - name_start);
+				} else if (data[i] == ';' || data[i] == '[' || data[i] == '{' || data[i] == ':') {
+					break;
+				} else {
+					i++;
+				}
+			}
+			if (!last_identifier.is_empty()) {
+				uniform_names.push_back(last_identifier);
+			}
+		}
+	}
+
+	return vformat(" (origin: %s; uniforms: %s)", origin, String(",").join(uniform_names));
+}
+
+void ShaderRD::version_set_name(RID p_version, const String &p_name) {
+	Version *version = version_owner.get_or_null(p_version);
+	ERR_FAIL_NULL(version);
+
+	MutexLock lock(*version->mutex);
+	version->name = p_name;
 }
 
 void ShaderRD::version_set_code(RID p_version, const HashMap<String, String> &p_code, const String &p_uniforms, const String &p_vertex_globals, const String &p_fragment_globals, const Vector<String> &p_custom_defines) {

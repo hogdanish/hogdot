@@ -380,6 +380,14 @@ one export during a stale-CLI window (or before WGSL baking existed) left every 
 `webgpu_tests/perf/pck-bake-audit.py`-style parsing of `.godot/**/*.webgpu.cache` (flag bit 0 of the
 WebGPU header = baked WGSL), and read `__cgPerf.counters.baked_wgsl_hit/miss` at runtime.
 
+⚠ **A cache-miss line names its origin** (2026-09-01):
+`Shader cache miss for <name>/<group>/<sha1> (origin: <res:// path or "runtime">; uniforms: a,b,c)`.
+`ShaderRD::version_set_name()` carries the material's `shader_set_path_hint()` path onto the
+version (set *before* `version_set_code()`, which is what starts the compile that reads the cache);
+a version with no path — every `StandardMaterial3D` built at runtime — falls back to up to 16
+declared uniform names, which is what a `BaseMaterial3D` feature set is actually recognizable by.
+`print_verbose` only, and the whole hint is built inside an `is_print_verbose_enabled()` guard.
+
 ⚠ **The baked cache only hits when the editor and the export template are built from the same
 commit** — `GODOT_VERSION_HASH` is part of every cache path (RL-055). Commit first, then build
 both, then export. A skewed pair degrades silently to full runtime compilation.

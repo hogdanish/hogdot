@@ -1791,6 +1791,9 @@ void ParticlesStorage::ParticlesShaderData::set_code(const String &p_code) {
 		}
 	}
 
+	// Name the version before the code, because setting the code is what starts the
+	// compile that reads (and may miss) the shader cache. Diagnostic only.
+	particles_storage->particles_shader.shader.version_set_name(version, path);
 	particles_storage->particles_shader.shader.version_set_compute_code(version, gen_code.code, gen_code.uniforms, gen_code.stage_globals[ShaderCompiler::STAGE_COMPUTE], gen_code.defines);
 	ERR_FAIL_COND(!particles_storage->particles_shader.shader.version_is_valid(version));
 

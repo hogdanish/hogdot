@@ -559,6 +559,14 @@ _FORCE_INLINE_ static void _fill_std140_ubo_empty(ShaderLanguage::DataType type,
 
 void MaterialStorage::ShaderData::set_path_hint(const String &p_hint) {
 	path = p_hint;
+
+	// The path can arrive either side of set_code(), and every ShaderData names its
+	// version at set_code() time. Push it again here so the cache-miss diagnostic is
+	// attributable in both orderings. Diagnostic only; not part of the version hash.
+	Pair<ShaderRD *, RID> shader_version = get_native_shader_and_version();
+	if (shader_version.first != nullptr && shader_version.second.is_valid()) {
+		shader_version.first->version_set_name(shader_version.second, p_hint);
+	}
 }
 
 void MaterialStorage::ShaderData::set_default_texture_parameter(const StringName &p_name, RID p_texture, int p_index) {

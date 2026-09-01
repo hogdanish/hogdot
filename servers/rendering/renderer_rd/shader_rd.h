@@ -81,6 +81,10 @@ private:
 
 	struct Version {
 		Mutex *mutex = nullptr;
+		// Diagnostic only: where this version came from, so a cache miss is attributable.
+		// Set through version_set_name() by the material shader data classes; empty for
+		// every version the engine creates for itself. Never part of the version's hash.
+		String name;
 		CharString uniforms;
 		CharString vertex_globals;
 		CharString compute_globals;
@@ -194,6 +198,11 @@ private:
 	void _initialize_cache();
 	void _version_set(Version *p_version, const HashMap<String, String> &p_code, const Vector<String> &p_custom_defines);
 
+	// Diagnostic only. Builds the "(origin: ...; uniforms: ...)" suffix appended to a
+	// cache-miss line so the version can be traced back to a resource (or, for a version
+	// built at runtime with no path, recognized by its declared uniform names).
+	static String _version_get_origin_hint(const Version *p_version);
+
 protected:
 	ShaderRD();
 	void setup(const char *p_vertex_code, const char *p_fragment_code, const char *p_compute_code, const char *p_name);
@@ -201,6 +210,10 @@ protected:
 
 public:
 	RID version_create(bool p_embedded = true);
+
+	// Diagnostic only: names the version's origin (a resource path hint) for the cache-miss
+	// log. Does not participate in the version hash and has no effect on compilation.
+	void version_set_name(RID p_version, const String &p_name);
 
 	void version_set_code(RID p_version, const HashMap<String, String> &p_code, const String &p_uniforms, const String &p_vertex_globals, const String &p_fragment_globals, const Vector<String> &p_custom_defines);
 	void version_set_compute_code(RID p_version, const HashMap<String, String> &p_code, const String &p_uniforms, const String &p_compute_globals, const Vector<String> &p_custom_defines);
