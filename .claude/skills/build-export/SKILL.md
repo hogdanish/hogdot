@@ -773,6 +773,29 @@ consumed as a trusted binary, so it is the only one where either mistake is expe
   and editing it would conflict on every rebase-forward. **Bumping the pin moves two constants in
   that script and they must move together** — the header carries the exact `curl | shasum` recipe.
   A version without its matching digest is worse than no pin, because it looks verified.
+- ⚠⚠ **That script runs under Apple's bash 3.2, and it cost a release run to learn what that
+  means** (`cg-v4.7.2-r5`, first attempt, 2026-09-01). Two independent defects, both of which any
+  fork-local macOS shell script can repeat:
+  1. **bash 3.2 is not multibyte-aware when it scans an identifier**, so a UTF-8 character touching
+     a `$VAR` expansion is swallowed *into the variable name*. `"… $SDK_VERSION…"` became a lookup
+     of a variable whose name ended in the ellipsis's bytes; `set -u` aborted the script on its
+     first `echo`. Reproduced exactly: `/bin/bash` (3.2.57) errors, Homebrew's bash 5 does not, so
+     **a local test with the wrong bash proves nothing**. Defense: `${VAR}` braces everywhere, and
+     ASCII-only in executable lines. Comments are safe — bash never scans them.
+  2. ⚠ **A bare `trap 'rm -rf "$dir"' EXIT` silently converts a failed script into a green step.**
+     Bash takes the EXIT trap's *last command's* status as the script's exit status, and `rm`
+     succeeds — so the aborting script above exited **0** and GitHub reported
+     `Setup Vulkan SDK: success` with no SDK installed. The failure only surfaced 30 seconds later
+     as `MoltenVK SDK installation directory not found` in a compile step that looks unrelated.
+     The trap must re-raise: `trap 'rc=$?; rm -rf "$dir"; exit "$rc"' EXIT`. Verified both ways
+     under 3.2 — with the bare trap `exit=0`, with the re-raising trap `exit=6`.
+
+  The script now also asserts its **postcondition** (`$SDK_ROOT` exists) rather than trusting the
+  installer's exit code: SCons looks for a `MoltenVK.xcframework` under a versioned directory
+  (`platform_methods.get_mvk_sdk_path`), not for an installer that returned 0, so a silent no-op
+  install fails in the step that owns it. Prove changes to it against **`/bin/bash`**, not
+  `$(which bash)`, and exercise all three paths (already-installed, download failure, digest
+  mismatch) — each must fail closed and non-zero.
 
 ### Reproducibility — `build-manifest.txt`
 

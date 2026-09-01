@@ -29,6 +29,14 @@
 #   pin never rots out from under the channel the way `latest` does.
 #
 # Decision record: .claude/skills/build-export/SKILL.md ("The cg-release channel").
+# ⚠ EXECUTABLE lines in this file are ASCII-only, and must stay that way. This runs
+#   on a macOS runner, where `bash` is Apple's 3.2 — which is not multibyte-aware
+#   when it scans an identifier, so a UTF-8 character touching a `$VAR` expansion is
+#   swallowed INTO the variable name. `"... $SDK_VERSION<ellipsis>"` became a lookup
+#   of a variable whose name ended in the ellipsis's bytes, `set -u` aborted, and the
+#   release died. Braces (`${VAR}`) are the real defense and are used throughout;
+#   plain ASCII in message strings is the belt. Comments are unaffected -- bash never
+#   scans them -- so prose like this is fine.
 set -euo pipefail
 
 # LunarG macOS SDK 1.4.357.1, released 2026-08-17. sha256 of the 376,108,497-byte
@@ -53,15 +61,23 @@ if [ -n "${GITHUB_ENV:-}" ]; then
 fi
 
 if [ -d "$SDK_ROOT" ]; then
-	echo "Vulkan SDK $SDK_VERSION already present at $SDK_ROOT — skipping install."
+	echo "Vulkan SDK ${SDK_VERSION} already present at ${SDK_ROOT} - skipping install."
 	exit 0
 fi
 
 workdir="$(mktemp -d)"
-trap 'rm -rf "$workdir"' EXIT
+# ⚠ The trap MUST re-raise the status it was entered with. A bare
+# `trap 'rm -rf "$workdir"' EXIT` ends with a successful `rm`, and bash takes the
+# trap's last command status as the script's — so an aborting script exits 0 and
+# the caller sees a green step. That is not hypothetical: it is exactly how the
+# first cg-v4.7.2-r5 attempt reported "Setup Vulkan SDK: success" with no SDK
+# installed, and only the compile 30 seconds later said otherwise. On a step whose
+# entire purpose is to fail closed, a swallowed exit status is the worst possible
+# defect.
+trap 'rc=$?; rm -rf "$workdir"; exit "$rc"' EXIT
 archive="$workdir/vulkan-sdk.zip"
 
-echo "Downloading LunarG Vulkan SDK $SDK_VERSION…"
+echo "Downloading LunarG Vulkan SDK ${SDK_VERSION}..."
 # --fail so an HTML error page never reaches the verifier; --retry for CDN flakiness.
 curl --fail --location --silent --show-error --retry 3 --retry-delay 5 \
 	--output "$archive" "$SDK_URL"
@@ -70,10 +86,10 @@ curl --fail --location --silent --show-error --retry 3 --retry-delay 5 \
 #   exits non-zero on a mismatch and `set -e` turns that into a failed job, so the
 #   failure mode is closed by construction: there is no path from a bad download to
 #   a running installer. Keep this step above the unzip, always.
-echo "Verifying sha256…"
+echo "Verifying sha256..."
 if ! printf '%s  %s\n' "$SDK_SHA256" "$archive" | shasum -a 256 --check --status; then
 	{
-		echo "::error::Vulkan SDK digest mismatch — refusing to unpack or run the installer."
+		echo "::error::Vulkan SDK digest mismatch - refusing to unpack or run the installer."
 		echo "  url      $SDK_URL"
 		echo "  expected $SDK_SHA256"
 		echo "  actual   $(shasum -a 256 "$archive" | cut -d ' ' -f 1)"
@@ -96,5 +112,19 @@ fi
 # Same invocation as upstream's script — unattended, licenses accepted, default
 # target (~/VulkanSDK/$SDK_VERSION). Only the provenance of the bytes has changed.
 "$installer" --accept-licenses --default-answer --confirm-command install
+
+# ⚠ Postcondition, not decoration. LunarG's installer is a GUI app run headless and
+# its exit code is not something to stake a release on; SCons does not look for "an
+# installer that returned 0", it looks for a MoltenVK.xcframework under a versioned
+# directory (platform_methods.get_mvk_sdk_path). Assert the thing SCons will
+# actually go looking for, so a silent no-op install fails HERE, in the step that
+# owns it, rather than as "MoltenVK SDK installation directory not found" in a
+# compile step that looks unrelated.
+if [ ! -d "$SDK_ROOT" ]; then
+	echo "::error::Installer exited 0 but $SDK_ROOT does not exist." >&2
+	echo "The SDK was not installed where SCons looks for it." >&2
+	ls -la "$HOME/VulkanSDK" 2>/dev/null || echo "  ($HOME/VulkanSDK does not exist)" >&2
+	exit 1
+fi
 
 echo "Vulkan SDK $SDK_VERSION installed to $SDK_ROOT."
