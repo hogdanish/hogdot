@@ -1,0 +1,5 @@
+# the website specification — https://specification.website/mcp/
+# declared globally in ~/.config/codex/config.toml with enabled = false; this turns it on
+# for hogdot, where the web export and godotwebgpu.com are the surfaces it applies to.
+[mcp_servers.website-spec]
+enabled = true
