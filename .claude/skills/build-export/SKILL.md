@@ -925,7 +925,22 @@ reappears, something is building without `CCACHE_DIR` reaching it.
 - ~~A `cg-v4.7.2-r3` release has not been cut~~ — stale twice over: **r3 was cut and pinned**
   (game repo `engine.env`, 2026-08-30 morning), and **r4** followed the same day carrying the
   2026-08-30 optimization pass (shader-enumerating baker, translate_ms instrumentation, BGL
-  lifetime fixes, flag-gated runtime overrides).
+  lifetime fixes, flag-gated runtime overrides). **`cg-v4.7.2-r5`** followed 2026-09-01 at
+  `52bef3108e` — the first release with **nine** assets (eight of them checksum-listed): the
+  debug-symbol sidecar and `build-manifest.txt` joined the six. It is the release that made a
+  stalled editor post-mortemable.
+- ~~Whether the `-g2` editor's link fits a 16 GB runner, and the sidecar's actual size~~ — both
+  settled by r5's build; the table under "Symbolizing a stalled editor" carries the numbers.
+  ⚠ **The symbolization itself is now PROVEN against a shipped binary, not a repro.** Run on
+  r5's own `editor-linux-x86_64.tar.gz` + sidecar in an x86_64 container: with the sidecar moved
+  away every address answers `No symbol matches` / `No line number information available`; laid
+  beside the binary, with no `add-symbol-file` and no load-bias arithmetic, the same addresses
+  resolve to `WorkerThreadPool::wait_for_group_task_completion(long)` at
+  `core/object/worker_thread_pool.cpp:727`, `_process_task` at `:57`, `_thread_function` at
+  `:186` and `wait_for_task_completion` at `:403` — i.e. exactly the main-thread waiter and the
+  two worker functions the WEB-01 dump named as `?? ()`. A corrupted sidecar produces
+  `warning: … does not match … (CRC mismatch)` and falls back to no line info, so a mismatched
+  pair warns instead of inventing names.
 - ~~The ~24 % web `.wasm` growth flagged above is unbisected~~ — closed by r3's zip sizes
   (the game's W30 register; a bisect is not owed). The profiled `production=yes` release wasm
   is 36.9 MB raw / 8.95 MB wire; the 45.6 MB figure was the unprofiled local template.
