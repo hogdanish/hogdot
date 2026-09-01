@@ -727,6 +727,27 @@ scons in `/usr/bin/time -v` and brackets it with `df`, then folds `peak rss`, `b
 expires in 90 days and "does a `-g2` editor still fit a hosted runner" is exactly the question a
 future incident asks. Read the manifest before touching either lever above.
 
+**First measurement, 2026-09-01, cold `-g2` build on `ubuntu-24.04` (job 99700410256):**
+
+| Quantity | Measured | Against the assumption |
+| --- | ---: | --- |
+| Peak RSS (largest process; the link) | **5,479,960 kB ≈ 5.2 GiB** | Fits 16 GB with 3× headroom. **`linkflags=-Wl,--no-keep-memory` is not needed** — that lever is now parked, not pending. |
+| Build wall (cold, `-j4`) | **43 m 15 s** | vs. ~8 min for the same editor without symbols. |
+| Disk free after the build | **88 GB** of 145 GB | ⚠ The "~12 GB free on a hosted runner" premise was **wrong**: `/` is 145 GB with **85 GB already free before** the reclaim step. The build used ~19 GB. The reclaim step is insurance, not a precondition. |
+| Shipped editor | **162,905,928 B** | r4's was 162,905,800 B, so `.gnu_debuglink` costs **+128 bytes** — the container repro's 112 was close but not exact. The shipped tarball is 87,450,258 B, unchanged in shape. |
+| Sidecar, uncompressed | **1,888,578,536 B ≈ 1.76 GiB** | Nobody had a figure. It is **11.6× the editor itself**. |
+| Sidecar, as shipped `.tar.gz` | **557,036,862 B ≈ 531 MiB** | ⚠ See the warning below — this invalidates a consumer-side assumption. |
+
+⚠⚠ **The sidecar is 531 MiB compressed and 1.76 GiB unpacked, and any consumer plan that treats it
+as a small on-demand fetch needs re-checking against those numbers.** CommonGrounds' recorded
+design is to fetch and digest-verify it *inside* `export-watchdog.sh`'s `dump()`, within a 120 s
+whole-fetch bound sitting inside a 240 s diagnostic→kill window. 531 MiB in 120 s requires ~4.4
+MB/s sustained end-to-end — release downloads on a hosted runner normally beat that comfortably,
+but it is no longer the rounding error the plan assumed, and the **untar needs ~1.8 GB of free
+disk in the export job** on top of it. Neither is a blocker; both must be budgeted deliberately
+rather than discovered. The alternative shape (adding it to the always-downloaded asset list) now
+means paying 531 MiB on **every** web-export run, which this measurement argues firmly against.
+
 ⚠ **The post-action cannot fail.** `make_debug_linuxbsd` drives all three tools through bare
 `os.system()` and discards their exit codes, so a broken objcopy would leave SCons reporting
 success while shipping an unstripped editor with no sidecar. The job's `Verify the symbol split`

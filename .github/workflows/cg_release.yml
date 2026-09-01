@@ -123,18 +123,20 @@ jobs:
             libwayland-dev libwayland-bin libdigest-sha-perl time
 
       - name: Reclaim runner disk
-        # ⚠ A precondition of `debug_symbols=yes` below, not housekeeping. A
-        # GitHub-hosted ubuntu-24.04 runner leaves ~12 GB free on `/`, and `-g2`
-        # inflates the object tree several-fold — the fork's own
-        # `linux-editor-llvm-sanitizers` SCons cache is 772 MB against 118 MB for
-        # the same editor built without symbols. The SCons CacheDir then keeps a
-        # second copy of every derived file, so 12 GB is not headroom a debug
-        # editor build can be assumed to fit in — and an ENOSPC surfaces as a
-        # baffling linker or Python error 25 minutes into a release, which is a
-        # bad way to learn it. What is deleted is preinstalled image
-        # ballast (Android NDK, .NET, GHC, CodeQL) that a C++ SCons build never
-        # opens. `df` on both sides so a future incident can see the headroom the
-        # build actually had rather than the headroom we assumed it had.
+        # Cheap insurance, NOT the precondition this comment used to claim.
+        #
+        # ⚠ The "~12 GB free on a hosted runner" premise was wrong, and the `df`
+        # bracket is what caught it. MEASURED 2026-09-01 on the first `-g2`
+        # release build: `/` is **145 GB with 85 GB already available** before
+        # this step runs; the step frees 22 GB more (60G used -> 38G), and the
+        # whole `-g2` build then consumed ~19 GB, finishing with 88 GB spare.
+        # So a debug editor fits a stock runner with enormous room and this step
+        # is not load-bearing. It is kept because `ubuntu-24.04` is a rolling
+        # label whose image contents float, it costs ~75 s, and it deletes only
+        # preinstalled ballast (Android NDK, .NET, GHC, CodeQL) that a C++ SCons
+        # build never opens — but do not re-derive a disk *constraint* from its
+        # presence. There isn't one. Keep the `df` on both sides: it is the only
+        # reason the original claim was ever falsified.
         run: |
           set -euo pipefail
           df -h /
