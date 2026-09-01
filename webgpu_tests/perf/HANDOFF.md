@@ -91,6 +91,9 @@ carried the same two defects.
 `[CGPERF] baked=331/355`, `encoder_splits=0`, no `Invalid …` or device-lost messages, 60 fps
 (the game's cap) in menu and world with ~190 draws and ~49 render passes per frame.
 
+Ethan's own playtest on this build: smooth at the 60 fps cap, and close to 120 fps most of the
+time with the cap raised to 120.
+
 Two things for the CommonGrounds agent to chase:
 
 - After entering the world the counters read `baked_wgsl_hit=594, baked_wgsl_miss=581,
