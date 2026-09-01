@@ -850,41 +850,48 @@ String ShaderRD::_version_get_origin_hint(const Version *p_version) {
 	// which are what a BaseMaterial3D feature set is actually recognizable by.
 	const String origin = p_version->name.is_empty() ? String("runtime") : p_version->name;
 
+	// ⚠ This block is NOT a list of `uniform` declarations. ShaderCompiler emits the
+	// material's non-sampler uniforms as bare members of the MaterialUniforms UBO the stage
+	// template wraps around them ("highp vec4 m_albedo;"), and routes sampler uniforms to
+	// the stage globals instead — so parse declarations, not keywords: for each
+	// semicolon-terminated statement the name is the last identifier outside any
+	// parentheses and before any array suffix.
 	constexpr int MAX_UNIFORM_NAMES = 16;
 	Vector<String> uniform_names;
 	const char *data = p_version->uniforms.get_data();
 	if (data != nullptr) {
 		int i = 0;
+		int paren_depth = 0;
+		bool in_array_suffix = false;
+		String last_identifier;
 		while (data[i] != 0 && uniform_names.size() < MAX_UNIFORM_NAMES) {
-			if (!_shader_rd_is_ident_char(data[i])) {
+			const char c = data[i];
+			if (c == '(') {
+				paren_depth++;
 				i++;
-				continue;
-			}
-			const int token_start = i;
-			while (_shader_rd_is_ident_char(data[i])) {
+			} else if (c == ')') {
+				paren_depth = MAX(0, paren_depth - 1);
 				i++;
-			}
-			if (String::utf8(&data[token_start], i - token_start) != "uniform") {
-				continue;
-			}
-			// The declaration's name is the last identifier before its terminator, which
-			// skips past any precision or type qualifier ("uniform highp sampler2D tex;").
-			String last_identifier;
-			while (data[i] != 0) {
-				if (_shader_rd_is_ident_char(data[i])) {
-					const int name_start = i;
-					while (_shader_rd_is_ident_char(data[i])) {
-						i++;
-					}
-					last_identifier = String::utf8(&data[name_start], i - name_start);
-				} else if (data[i] == ';' || data[i] == '[' || data[i] == '{' || data[i] == ':') {
-					break;
-				} else {
+			} else if (c == ';') {
+				if (!last_identifier.is_empty()) {
+					uniform_names.push_back(last_identifier);
+				}
+				last_identifier = String();
+				in_array_suffix = false;
+				i++;
+			} else if (c == '[') {
+				in_array_suffix = true;
+				i++;
+			} else if (_shader_rd_is_ident_char(c)) {
+				const int name_start = i;
+				while (_shader_rd_is_ident_char(data[i])) {
 					i++;
 				}
-			}
-			if (!last_identifier.is_empty()) {
-				uniform_names.push_back(last_identifier);
+				if (paren_depth == 0 && !in_array_suffix) {
+					last_identifier = String::utf8(&data[name_start], i - name_start);
+				}
+			} else {
+				i++;
 			}
 		}
 	}

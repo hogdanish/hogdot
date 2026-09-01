@@ -416,8 +416,13 @@ shader baker's.
 `ShaderRD::version_set_name()` carries the material's `shader_set_path_hint()` path onto the
 version (set *before* `version_set_code()`, which is what starts the compile that reads the cache);
 a version with no path — every `StandardMaterial3D` built at runtime — falls back to up to 16
-declared uniform names, which is what a `BaseMaterial3D` feature set is actually recognizable by.
-`print_verbose` only, and the whole hint is built inside an `is_print_verbose_enabled()` guard.
+declared uniform names, which is what a `BaseMaterial3D` feature set is actually recognizable by
+(`m_albedo,…,m_normal_scale,…` is the normal-mapped one; `m_clearcoat` is another). ⚠ **The
+version's `uniforms` block holds no `uniform` keyword to parse** — `ShaderCompiler` emits the
+non-sampler uniforms as bare members of the `MaterialUniforms` UBO the stage template wraps around
+them, and routes sampler uniforms into the stage globals instead, so the digest parses
+declarations. `print_verbose` only, and the whole hint is built inside an
+`is_print_verbose_enabled()` guard.
 
 ⚠ **The baked cache only hits when the editor and the export template are built from the same
 commit** — `GODOT_VERSION_HASH` is part of every cache path (RL-055). Commit first, then build
