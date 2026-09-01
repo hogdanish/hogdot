@@ -116,6 +116,52 @@ plan built on this table is `.claude/work/plans/ROADMAP.md` — enter every port
 - Find the source SHAs for any path with
   `git log --oneline 4.6.2-stable..webgpu/webgpu-4.6.2 -- <path>`.
 
+## The `WorkerThreadPool` export deadlock — no candidate to backport (checked 2026-09-01)
+
+CommonGrounds' headless web export intermittently deadlocks in `WorkerThreadPool` during
+`savepack` (their audit WEB-01: 19 threads, none running, main thread on a condvar inside a
+~30-frame export stack while `WorkerThread 0/1` block in `pthread_mutex_lock`). **Upstream has no
+fix for hogdot to take.** Re-verified against current sources; do not re-derive this from scratch.
+
+- Upstream's own fix for exactly this shape is **`ae564feb2a`** (PR
+  [#120072](https://github.com/godotengine/godot/pull/120072), 2026-06-07) — *"Fix a deadlock in
+  `WorkerThreadPool`"*. Its message describes this stall verbatim: while the main thread waits in
+  `wait_for_group_task_completion()` the `MessageQueue` stops being serviced, and
+  `ResourceLoader::_load_complete_inner` needs to push a callable onto it and wait, which can then
+  never complete. It patched both wait functions to flush the queue while spinning on `try_wait()`.
+- ⚠ **It was reverted** by `b527505338` (PR
+  [#120250](https://github.com/godotengine/godot/pull/120250), 2026-06-12) — together with
+  `7ab8328204` — for regressions in 4.7.rc2 (node-path error spam
+  [#120223](https://github.com/godotengine/godot/issues/120223), texture load corruption
+  [#120228](https://github.com/godotengine/godot/issues/120228)). hpvb: *"a better approach is
+  needed. For 4.7 we should drop this one."* All three commits are ancestors of `main`, so the fork
+  carries the reverted (unfixed) state deliberately and correctly. **Do not re-apply `ae564feb2a`**
+  — it is a known-broken patch, not an available fix.
+- The four 4.7-cycle `ResourceLoader` threading fixes (`f63ab5fbd9`, `374102cfbe`, `b88a62f805`,
+  `8cf4c5d9b2`) are **all already ancestors of `main`**; `resource_loader.cpp` carries
+  `b88a62f805`'s `thread_waiting_on` cycle detection in-tree.
+- `git log 4.7.2-stable..upstream/4.7` touches `worker_thread_pool.{cpp,h}`,
+  `resource_loader.{cpp,h}` and `editor_export_platform.{cpp,h}` **zero times**;
+  `..upstream/master` (to 2026-08-31) carries only style and argument-plumbing commits
+  (`1c45c14d7f`, `a3088fecf1`, `06a7feabc8`, `7bcda31d0f`, `00120405f4`). There is no re-land of
+  #120072 and no open upstream PR for it.
+- ⚠ **No open upstream issue tracks the deadlock the revert left behind.** The revert closed the
+  regressions it caused and nothing tracks the original. A report carrying CommonGrounds'
+  19-thread dump would be the first concrete reproduction since it was called "rare" — worth
+  filing once the symbolized stack exists.
+- Two fork-local suspects were checked and **both rule themselves out**: `main`'s 16-line local
+  change to `worker_thread_pool.cpp` (from `57be40c524`) sits entirely inside the `#else` of
+  `#ifdef THREADS_ENABLED`, so it is not compiled into a threaded linuxbsd editor; and
+  `shader_baker_export_plugin.cpp` calls `wait_for_task_completion` from the main thread during
+  export — structurally the exact hazard — but its `_is_active()` returns `false` with no
+  RendererRD driver running, and a `--headless` export has none, so it queues no tasks in CI.
+  ⚠ **That second one becomes live in a GUI-editor export**, and is the first place to look if the
+  stall ever appears outside headless CI.
+- ⚠ **No speculative tuning.** Worker counts, retry counts and kill points are not levers here and
+  changing them is forbidden — the containment lives in the consumer's watchdog, and the next step
+  is a symbolized stack from a real stall (which is what the debug-symbol sidecar exists for —
+  **`build-export`**).
+
 ## Reference material
 
 - [slice-log.md](references/slice-log.md) — **living, append-only.** One entry per slice as it lands, with
