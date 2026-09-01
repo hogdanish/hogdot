@@ -18,7 +18,7 @@
 
 import { createServer } from 'http';
 import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync } from 'fs';
-import { join, extname } from 'path';
+import { join, extname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 
@@ -108,12 +108,94 @@ function comparePngs(baseline, current, threshold) {
 
 // ─── Screenshot Capture ───────────────────────────────────────────────────────
 
-async function captureScreenshots(baseUrl) {
-    let chromium, firefox;
+export async function launchBrowsers(playwright, isCI) {
+    const browsers = [];
+    const failures = [];
+
+    // Chrome documents a supported Linux headless WebGPU path over Vulkan.
+    // Firefox remains headed under Xvfb and uses Mesa's software Vulkan adapter.
     try {
-        const pw = await import('playwright');
-        chromium = pw.chromium;
-        firefox = pw.firefox;
+        const chrome = await playwright.chromium.launch({
+            headless: isCI,
+            args: isCI ? [
+                '--no-sandbox',
+                '--use-angle=vulkan',
+                '--enable-features=Vulkan',
+                '--disable-vulkan-surface',
+                '--enable-unsafe-webgpu',
+            ] : [],
+        });
+        browsers.push({ name: 'chromium', browser: chrome });
+        console.log('  Chromium: launched');
+    } catch (e) {
+        failures.push(`chromium: ${e.message}`);
+        console.log(`  Chromium: unavailable (${e.message})`);
+    }
+
+    try {
+        const ff = await playwright.firefox.launch({
+            headless: false,
+            firefoxUserPrefs: {
+                'dom.webgpu.enabled': true,
+                'gfx.webgpu.ignore-blocklist': true,
+                'gfx.webrender.all': true,
+                'layers.acceleration.force-enabled': true,
+            },
+        });
+        browsers.push({ name: 'firefox', browser: ff });
+        console.log('  Firefox: launched');
+    } catch (e) {
+        failures.push(`firefox: ${e.message}`);
+        console.log(`  Firefox: unavailable (${e.message})`);
+    }
+
+    if (isCI && browsers.length !== 2) {
+        // A partial launch cannot prove the advertised Chrome + Firefox gate.
+        // Close any browser that did launch before failing the job.
+        await Promise.allSettled(browsers.map(({ browser }) => browser.close()));
+        throw new Error(`CI requires Chromium and Firefox; ${failures.join('; ')}`);
+    }
+
+    return browsers;
+}
+
+export function assertCompleteCaptures(captures, browserNames = ['chromium', 'firefox'], scenes = SCENES) {
+    const expected = new Set(browserNames.flatMap(browser => scenes.map(scene => `${browser}/${scene}`)));
+    const successful = new Map();
+    const errors = [];
+
+    for (const capture of captures) {
+        const key = `${capture.browser}/${capture.scene}`;
+        if (!expected.has(key)) {
+            errors.push(`unexpected ${key}`);
+            continue;
+        }
+        if (capture.error || !capture.data) {
+            errors.push(`${key}: ${capture.error || 'no screenshot data'}`);
+            continue;
+        }
+        successful.set(key, (successful.get(key) || 0) + 1);
+    }
+
+    for (const key of expected) {
+        const count = successful.get(key) || 0;
+        if (count !== 1 && !errors.some(error => error.startsWith(`${key}:`))) {
+            errors.push(`${key}: expected one screenshot, found ${count}`);
+        }
+    }
+
+    if (errors.length > 0 || captures.length !== expected.size) {
+        const countError = captures.length === expected.size
+            ? []
+            : [`expected ${expected.size} capture results, found ${captures.length}`];
+        throw new Error(`Incomplete screenshot run: ${[...countError, ...errors].join('; ')}`);
+    }
+}
+
+async function captureScreenshots(baseUrl) {
+    let playwright;
+    try {
+        playwright = await import('playwright');
     } catch {
         console.error('ERROR: Playwright not installed.');
         console.error('  npm install playwright');
@@ -121,34 +203,7 @@ async function captureScreenshots(baseUrl) {
         process.exit(1);
     }
 
-    const browsers = [];
-
-    // Try to launch Chrome with WebGPU
-    try {
-        const chrome = await chromium.launch({
-            headless: false,
-            args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan,UseSkiaRenderer'],
-        });
-        browsers.push({ name: 'chromium', browser: chrome });
-        console.log('  Chromium: launched');
-    } catch (e) {
-        console.log(`  Chromium: unavailable (${e.message})`);
-    }
-
-    // Try to launch Firefox with WebGPU
-    try {
-        const ff = await firefox.launch({
-            headless: false,
-            firefoxUserPrefs: {
-                'dom.webgpu.enabled': true,
-                'gfx.webgpu.force-enabled': true,
-            },
-        });
-        browsers.push({ name: 'firefox', browser: ff });
-        console.log('  Firefox: launched');
-    } catch (e) {
-        console.log(`  Firefox: unavailable (${e.message})`);
-    }
+    const browsers = await launchBrowsers(playwright, process.env.CI === 'true');
 
     if (browsers.length === 0) {
         console.error('ERROR: No browsers available. Install with:');
@@ -232,6 +287,26 @@ async function main() {
         if (cap.data) {
             writeFileSync(join(CURRENT_DIR, cap.filename), cap.data);
         }
+    }
+
+    // Always leave a machine-readable execution report, including on a failed
+    // completeness gate. The artifact upload then preserves the exact failure.
+    const captureReport = {
+        timestamp: new Date().toISOString(),
+        expected: SCENES.length * 2,
+        captured: captures.filter(cap => cap.data).length,
+        results: captures.map(cap => ({
+            browser: cap.browser,
+            scene: cap.scene,
+            filename: cap.filename,
+            status: cap.data ? 'captured' : 'error',
+            error: cap.error,
+        })),
+    };
+    writeFileSync(join(SCREENSHOTS_DIR, 'report.json'), JSON.stringify(captureReport, null, 2));
+
+    if (process.env.CI === 'true') {
+        assertCompleteCaptures(captures);
     }
 
     if (UPDATE_BASELINES) {
@@ -342,7 +417,9 @@ async function main() {
     process.exit(failed > 0 ? 1 : 0);
 }
 
-main().catch((e) => {
-    console.error('Fatal:', e);
-    process.exit(1);
-});
+if (process.argv[1] && resolve(process.argv[1]) === __filename) {
+    main().catch((e) => {
+        console.error('Fatal:', e);
+        process.exit(1);
+    });
+}

@@ -58,4 +58,12 @@ screenshots/
 
 ## CI integration
 
-Add `?autorun` query param or use the Playwright runner directly. The test exits with code 1 on failure for CI integration.
+Run the Playwright runner under an X server on Linux:
+
+```bash
+xvfb-run --auto-servernum node screenshot_tests.mjs --update-baselines
+```
+
+CI requires headed Chromium and Firefox because their Linux headless WebGPU paths do not expose the
+same usable adapters. It exits nonzero unless all four scenes produce screenshots in both browsers
+(8/8), and always writes `screenshots/report.json` after capture so a failed run is diagnosable.

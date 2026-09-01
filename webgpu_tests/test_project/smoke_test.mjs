@@ -1,7 +1,7 @@
 /**
- * WebGPU Smoke Test — Headless Browser Validation
+ * WebGPU Smoke Test — Browser Validation
  *
- * Serves the exported Godot WebGPU project in headless Chrome and validates:
+ * Serves the exported Godot WebGPU project in headed Chrome and validates:
  * 1. WebGPU device initializes without errors
  * 2. No shader compilation failures (SPIR-V → WGSL conversion errors)
  * 3. No device-lost events

@@ -7,10 +7,25 @@ var total_frames := 0
 var meshes: Array[MeshInstance3D] = []
 var fps_label: Label
 
-const MESH_COUNT := 60000
+const DEFAULT_MESH_COUNT := 60000
 const MATERIAL_COUNT := 10  # Shared materials — creates large batchable groups
 
+var mesh_count: int = DEFAULT_MESH_COUNT
+
+
+func _web_smoke_int(property: String, default_value: int) -> int:
+	if not OS.has_feature("web"):
+		return default_value
+	var value: Variant = JavaScriptBridge.eval(
+		"Number(window.sceneSmokeConfig?.%s || 0)" % property, true
+	)
+	return int(value) if value != null and float(value) > 0.0 else default_value
+
 func _ready() -> void:
+	mesh_count = _web_smoke_int("batching_meshes", DEFAULT_MESH_COUNT)
+	if mesh_count != DEFAULT_MESH_COUNT:
+		print("[SCENE-SMOKE] batching meshes=%d materials=%d" % [mesh_count, MATERIAL_COUNT])
+
 	# Live FPS overlay
 	var canvas := CanvasLayer.new()
 	add_child(canvas)
@@ -49,11 +64,11 @@ func _ready() -> void:
 	var box := BoxMesh.new()
 	box.size = Vector3(1, 1, 1)
 
-	# Spawn MESH_COUNT instances, each assigned one of the shared materials.
+	# Spawn mesh_count instances, each assigned one of the shared materials.
 	# After sort: same shader -> same material -> same geometry = consecutive = batchable.
 	var cols := 100
-	var rows := MESH_COUNT / cols
-	for i in MESH_COUNT:
+	var rows := mesh_count / cols
+	for i in mesh_count:
 		var m := MeshInstance3D.new()
 		m.mesh = box
 		m.set_surface_override_material(0, materials[i % MATERIAL_COUNT])
@@ -63,7 +78,7 @@ func _ready() -> void:
 		add_child(m)
 		meshes.append(m)
 
-	print("[SceneH] Spawned %d instances with %d shared materials (batch size ~%d)" % [MESH_COUNT, MATERIAL_COUNT, MESH_COUNT / MATERIAL_COUNT])
+	print("[SceneH] Spawned %d instances with %d shared materials (batch size ~%d)" % [mesh_count, MATERIAL_COUNT, mesh_count / MATERIAL_COUNT])
 
 func _process(delta: float) -> void:
 	total_frames += 1
@@ -74,7 +89,7 @@ func _process(delta: float) -> void:
 
 	var live_fps := 1.0 / delta if delta > 0 else 0.0
 	if fps_label:
-		fps_label.text = "FPS: %.0f  [%d instances, %d materials]  t=%.1fs" % [live_fps, MESH_COUNT, MATERIAL_COUNT, total_frames * delta]
+		fps_label.text = "FPS: %.0f  [%d instances, %d materials]  t=%.1fs" % [live_fps, mesh_count, MATERIAL_COUNT, total_frames * delta]
 
 	if total_frames <= warmup_frames:
 		return
@@ -101,7 +116,7 @@ func _report_results() -> void:
 
 	print("")
 	print("=== SCENE H RESULTS (Instance Batching) ===")
-	print("Mesh instances: %d (%d shared materials, batch ~%d)" % [MESH_COUNT, MATERIAL_COUNT, MESH_COUNT / MATERIAL_COUNT])
+	print("Mesh instances: %d (%d shared materials, batch ~%d)" % [mesh_count, MATERIAL_COUNT, mesh_count / MATERIAL_COUNT])
 	print("Frames measured: %d (after %d warmup)" % [frame_times.size(), warmup_frames])
 	print("Mean frame time: %.2f ms (%.1f fps)" % [mean, 1000.0 / mean])
 	print("Median frame time: %.2f ms (%.1f fps)" % [median, 1000.0 / median])
