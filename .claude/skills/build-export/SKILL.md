@@ -625,7 +625,17 @@ scenes emitted no GPU, shader, or device-lost error, but a first capture at ten 
 nominal deadline and returned blank. All eight exports also emitted the now-removed dangling-profiler
 autoload error. A later isolated full-load software-adapter control lost the WebGPU device in both scenes,
 so merely waiting longer was rejected in favor of the explicit smoke profiles above.
-Hosted proof of the source-compatible **16/16 scene matrix** is still owed.
+Run `33505889510` proved the source-compatible **16/16 scene matrix**: exactly 8/8 in Chromium and
+8/8 in Firefox (`gh run view 33505889510 --job 99849704446 --log`). It also exposed that the next
+producer step had never been part of that proof. It installed the template under stale hard-coded
+`4.6.2.dev` while the built editor expected `4.7.2.stable`, ignored both the copy and export exits,
+ran the SPIR-V dump under `--headless` even though shader compilation needs a renderer, and let both
+empty uploads warn. The build job therefore went green while downstream consumers failed because
+`spirv-dump` and `webgpu-export` did not exist. The fixed workflow aliases the built dlink release
+template to both tracked custom-template paths, fails the headless export closed, runs the Mobile
+coverage scene separately under Xvfb, asserts the HTML and a non-empty SPIR-V set, and makes both
+uploads fail on missing files. `check_webgpu_ci_contracts.py` rejects each known-bad shape. A green
+rerun with both downstream consumers is the remaining artifact-closure proof.
 `runner.yml` triggers on `branches: ['**', '!dependabot/**']` only, so
 `cg-v*` tag pushes never start the matrix and a Dependabot branch push does not run the whole
 matrix a second time on top of its own PR (on the push event the `sources-changed` gate does not

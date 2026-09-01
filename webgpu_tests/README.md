@@ -87,10 +87,12 @@ End-to-end validation: exports the test project, serves it in headless Chrome, v
 source ~/emsdk/emsdk_env.sh
 scons platform=web target=template_release dlink_enabled=yes webgpu=yes opengl3=no threads=no -j$(sysctl -n hw.ncpu)
 
-# Install template (macOS — adjust path for Linux)
-mkdir -p ~/Library/Application\ Support/Godot/export_templates/4.6.2.stable
-cp bin/godot.web.template_release.wasm32.nothreads.dlink.zip \
-   ~/Library/Application\ Support/Godot/export_templates/4.6.2.stable/web_nothreads_release.zip
+# The test preset validates both custom paths. Alias the dlink release build to
+# both names for this release-only smoke export; no versioned install is needed.
+install -m 0644 bin/godot.web.template_release.wasm32.nothreads.dlink.zip \
+  bin/godot.web.template_debug.wasm32.nothreads.zip
+install -m 0644 bin/godot.web.template_release.wasm32.nothreads.dlink.zip \
+  bin/godot.web.template_release.wasm32.nothreads.zip
 
 # Export
 bin/godot.macos.editor.arm64 --headless --path webgpu_tests/test_project \
@@ -277,4 +279,7 @@ node webgpu_tests/shader_corpus/validate_spirv_dump.mjs /tmp/spirv_dump/ --updat
 
 **Smoke test timeout** — The engine has 2 minutes to start and report PASS. If it hangs, check Chrome console output with `VERBOSE=1 node smoke_test.mjs ./export/`.
 
-**Export fails with "No export template found"** — Template must be installed at the path matching the editor's version string. Check `bin/godot --version` and install to the corresponding `export_templates/<version>/` directory.
+**Export fails with "No export template found"** — The tracked test preset uses custom paths under
+`bin/`; both must exist even for a release export. Create the two aliases in the smoke-test recipe
+above. If a preset instead leaves its custom paths empty, install its defaults under the exact
+directory the editor reports, never a hard-coded engine version.

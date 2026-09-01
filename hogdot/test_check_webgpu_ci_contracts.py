@@ -36,7 +36,25 @@ class WebGpuCiContractsTest(unittest.TestCase):
                 f"--scenes {scene_selection} "
                 "--timeout 180000\n"
                 "  - run: xvfb-run --auto-servernum node screenshot_tests.mjs\n"
-                "  - if-no-files-found: error\n"
+                "  - run: install template bin/godot.web.template_debug.wasm32.nothreads.zip\n"
+                "  - run: install template bin/godot.web.template_release.wasm32.nothreads.zip\n"
+                "  - run: GODOT_DUMP_SPIRV=/tmp/spirv_dump timeout 120 \\\n"
+                "      xvfb-run --auto-servernum bin/godot.linuxbsd.editor.x86_64 "
+                "--rendering-method mobile --quit-after 10\n"
+                "  - run: test -f webgpu_tests/test_project/export/index.html\n"
+                "  - run: 'test \"${#spirv_files[@]}\" -gt 0'\n"
+                "  - name: Upload SPIR-V dump\n"
+                "    with:\n"
+                "      name: spirv-dump\n"
+                "      if-no-files-found: error\n"
+                "  - name: Upload WebGPU export\n"
+                "    with:\n"
+                "      name: webgpu-export\n"
+                "      if-no-files-found: error\n"
+                "  - name: Upload screenshots\n"
+                "    with:\n"
+                "      name: screenshot-comparison\n"
+                "      if-no-files-found: error\n"
                 '  - run: if [ "${{ needs.screenshot-comparison.result }}" != "success" ]; then\n',
                 encoding="utf-8",
             )
@@ -68,16 +86,63 @@ class WebGpuCiContractsTest(unittest.TestCase):
 
         self.assertTrue(any("WebGPU emsdk pins must match" in error for error in errors))
 
-    def test_screenshot_artifact_must_fail_when_files_are_missing(self) -> None:
+    def test_required_artifacts_must_fail_when_files_are_missing(self) -> None:
+        tests_workflow = self.root / ".github/workflows/webgpu_tests.yml"
+        contents = tests_workflow.read_text(encoding="utf-8")
+        for artifact_name in ("spirv-dump", "webgpu-export", "screenshot-comparison"):
+            with self.subTest(artifact_name=artifact_name):
+                marker = f"name: {artifact_name}\n      if-no-files-found: error"
+                tests_workflow.write_text(
+                    contents.replace(marker, f"name: {artifact_name}\n      if-no-files-found: warn"),
+                    encoding="utf-8",
+                )
+
+                errors = check_contracts(self.root)
+
+                self.assertTrue(
+                    any(f"artifact `{artifact_name}` must set `if-no-files-found: error`" in error for error in errors)
+                )
+
+    def test_template_setup_must_not_hard_code_an_old_engine_version(self) -> None:
         tests_workflow = self.root / ".github/workflows/webgpu_tests.yml"
         contents = tests_workflow.read_text(encoding="utf-8")
         tests_workflow.write_text(
-            contents.replace("if-no-files-found: error", "if-no-files-found: warn"), encoding="utf-8"
+            contents + "  - run: mkdir -p ~/.local/share/godot/export_templates/4.6.2.dev\n",
+            encoding="utf-8",
         )
 
         errors = check_contracts(self.root)
 
-        self.assertTrue(any("missing `if-no-files-found: error`" in error for error in errors))
+        self.assertTrue(any("must not hard-code the engine version directory" in error for error in errors))
+
+    def test_test_project_export_must_not_ignore_failure(self) -> None:
+        tests_workflow = self.root / ".github/workflows/webgpu_tests.yml"
+        contents = tests_workflow.read_text(encoding="utf-8")
+        tests_workflow.write_text(
+            contents + '  - run: --export-release "WebGPU" export/index.html || true\n',
+            encoding="utf-8",
+        )
+
+        errors = check_contracts(self.root)
+
+        self.assertTrue(any("fail-open" in error and "export/index.html" in error for error in errors))
+
+    def test_spirv_dump_requires_a_windowed_mobile_renderer(self) -> None:
+        tests_workflow = self.root / ".github/workflows/webgpu_tests.yml"
+        contents = tests_workflow.read_text(encoding="utf-8")
+        tests_workflow.write_text(
+            contents.replace(
+                "xvfb-run --auto-servernum bin/godot.linuxbsd.editor.x86_64",
+                "bin/godot.linuxbsd.editor.x86_64 --headless",
+            ),
+            encoding="utf-8",
+        )
+
+        errors = check_contracts(self.root)
+
+        self.assertTrue(
+            any("missing `xvfb-run --auto-servernum bin/godot.linuxbsd.editor.x86_64`" in error for error in errors)
+        )
 
     def test_scene_smoketest_must_export_selected_scenes(self) -> None:
         tests_workflow = self.root / ".github/workflows/webgpu_tests.yml"

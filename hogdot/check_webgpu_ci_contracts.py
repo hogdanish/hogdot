@@ -24,6 +24,7 @@ TRACKED_BENCHMARK_SCENES = (
     "benchmark_shadows",
     "benchmark_batching",
 )
+REQUIRED_ARTIFACTS = ("spirv-dump", "webgpu-export", "screenshot-comparison")
 
 
 def _read_pin(root: Path, relative_path: Path) -> tuple[str | None, list[str]]:
@@ -71,12 +72,47 @@ def check_contracts(root: Path) -> list[str]:
             "--editor-bin ../../bin/godot.linuxbsd.editor.x86_64",
             "--timeout 180000",
             "xvfb-run --auto-servernum node screenshot_tests.mjs",
-            "if-no-files-found: error",
+            "bin/godot.web.template_debug.wasm32.nothreads.zip",
+            "bin/godot.web.template_release.wasm32.nothreads.zip",
+            "GODOT_DUMP_SPIRV=/tmp/spirv_dump timeout 120",
+            "xvfb-run --auto-servernum bin/godot.linuxbsd.editor.x86_64",
+            "--rendering-method mobile --quit-after 10",
+            "test -f webgpu_tests/test_project/export/index.html",
+            'test "${#spirv_files[@]}" -gt 0',
             'if [ "${{ needs.screenshot-comparison.result }}" != "success" ]; then',
         )
         for fragment in required_fragments:
             if fragment not in tests_workflow:
                 errors.append(f".github/workflows/webgpu_tests.yml: missing `{fragment}`")
+
+        if re.search(r"export_templates/\d+\.\d+\.\d+\.(?:dev|stable)", tests_workflow):
+            errors.append(
+                ".github/workflows/webgpu_tests.yml: template setup must not hard-code the engine version directory"
+            )
+
+        fail_open_fragments = (
+            "web_nothreads_release.zip || true",
+            '--export-release "WebGPU" export/index.html || true',
+        )
+        for fragment in fail_open_fragments:
+            if fragment in tests_workflow:
+                errors.append(f".github/workflows/webgpu_tests.yml: fail-open `{fragment}` is forbidden")
+
+        for artifact_name in REQUIRED_ARTIFACTS:
+            marker = f"name: {artifact_name}"
+            block_start = tests_workflow.find(marker)
+            if block_start < 0:
+                errors.append(f".github/workflows/webgpu_tests.yml: missing artifact `{artifact_name}`")
+                continue
+            remainder = tests_workflow[block_start + len(marker) :]
+            next_step = re.search(r"\n\s*-\s+name:", remainder)
+            block_end = block_start + len(marker) + next_step.start() if next_step is not None else len(tests_workflow)
+            artifact_block = tests_workflow[block_start:block_end]
+            if "if-no-files-found: error" not in artifact_block:
+                errors.append(
+                    ".github/workflows/webgpu_tests.yml: artifact "
+                    f"`{artifact_name}` must set `if-no-files-found: error`"
+                )
 
         for browser in ("chrome", "firefox"):
             browser_flag = f"--browser {browser}"

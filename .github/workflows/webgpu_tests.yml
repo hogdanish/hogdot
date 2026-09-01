@@ -184,21 +184,32 @@ jobs:
           mkdir -p /tmp/spirv_dump
           mkdir -p webgpu_tests/test_project/export
 
-          # Install WebGPU template (editor looks for web_nothreads_release.zip)
-          mkdir -p ~/.local/share/godot/export_templates/4.6.2.dev
-          cp bin/godot.web.template_release.wasm32.nothreads.dlink.zip \
-             ~/.local/share/godot/export_templates/4.6.2.dev/web_nothreads_release.zip || true
+          # The tracked preset validates both custom template paths even for a
+          # release export. Alias the one dlink release template built above to
+          # those paths; this avoids a base-version-specific install directory.
+          install -m 0644 bin/godot.web.template_release.wasm32.nothreads.dlink.zip \
+            bin/godot.web.template_debug.wasm32.nothreads.zip
+          install -m 0644 bin/godot.web.template_release.wasm32.nothreads.dlink.zip \
+            bin/godot.web.template_release.wasm32.nothreads.zip
 
-          # Run editor headless to import project and compile all shaders
-          # GODOT_DUMP_SPIRV causes all compiled SPIR-V to be written to disk
+          bin/godot.linuxbsd.editor.x86_64 \
+            --headless --path webgpu_tests/test_project \
+            --export-release "WebGPU" export/index.html
+
+          # Shader compilation is lazy and --headless creates no renderer.
+          # Run the coverage scene with Mobile under Xvfb to produce the dump.
           GODOT_DUMP_SPIRV=/tmp/spirv_dump timeout 120 \
-            bin/godot.linuxbsd.editor.x86_64 \
-              --headless --path webgpu_tests/test_project \
-              --export-release "WebGPU" export/index.html || true
+            xvfb-run --auto-servernum bin/godot.linuxbsd.editor.x86_64 \
+              --path webgpu_tests/test_project \
+              --rendering-method mobile --quit-after 10
 
           echo "SPIR-V files dumped:"
           ls -la /tmp/spirv_dump/ | head -50
-          echo "Total: $(ls /tmp/spirv_dump/*.spv 2>/dev/null | wc -l) files"
+          shopt -s nullglob
+          spirv_files=(/tmp/spirv_dump/*.spv)
+          echo "Total: ${#spirv_files[@]} files"
+          test -f webgpu_tests/test_project/export/index.html
+          test "${#spirv_files[@]}" -gt 0
 
       - name: Upload SPIR-V dump
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -206,6 +217,7 @@ jobs:
           name: spirv-dump
           path: /tmp/spirv_dump/
           retention-days: 7
+          if-no-files-found: error
 
       - name: Upload WebGPU export
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -213,6 +225,7 @@ jobs:
           name: webgpu-export
           path: webgpu_tests/test_project/export/
           retention-days: 7
+          if-no-files-found: error
 
   # ═══════════════════════════════════════════════════════════════════════════════
   # SPIR-V Validation: Validate ALL engine SPIR-V through Tint
