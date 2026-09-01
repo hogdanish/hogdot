@@ -721,6 +721,12 @@ a **symbol-table-only** sidecar: drop the `-s` *without* `-g`, which costs nothi
 and still names every frame, but needs a fork-local `SConstruct`/`platform/linuxbsd/SCsub` patch
 and gives no line numbers. Neither has been needed.
 
+⚠ **Both of those numbers are MEASURED every release, not assumed.** The `linux-editor` job wraps
+scons in `/usr/bin/time -v` and brackets it with `df`, then folds `peak rss`, `build wall` and
+`disk free` into that asset's `build-manifest.txt` fragment — a durable copy, because the run log
+expires in 90 days and "does a `-g2` editor still fit a hosted runner" is exactly the question a
+future incident asks. Read the manifest before touching either lever above.
+
 ⚠ **The post-action cannot fail.** `make_debug_linuxbsd` drives all three tools through bare
 `os.system()` and discards their exit codes, so a broken objcopy would leave SCons reporting
 success while shipping an unstripped editor with no sidecar. The job's `Verify the symbol split`

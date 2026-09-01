@@ -120,7 +120,7 @@ jobs:
           sudo apt-get install -y build-essential pkg-config libx11-dev \
             libxcursor-dev libxinerama-dev libgl1-mesa-dev libglu1-mesa-dev \
             libasound2-dev libpulse-dev libudev-dev libxi-dev libxrandr-dev \
-            libwayland-dev libwayland-bin libdigest-sha-perl
+            libwayland-dev libwayland-bin libdigest-sha-perl time
 
       - name: Reclaim runner disk
         # ⚠ A precondition of `debug_symbols=yes` below, not housekeeping. A
@@ -183,10 +183,29 @@ jobs:
         # `add-symbol-file` and no PIE load-bias arithmetic, and the embedded
         # CRC means a sidecar from the wrong build is a loud warning rather than
         # confidently wrong function names.
+        #
+        # ⚠ `/usr/bin/time -v` and the `df` bracket are the record for the two
+        # numbers `-g2` puts in doubt and nothing else in this run would answer:
+        # whether the debug object tree fits the runner's disk, and whether the
+        # link's peak RSS fits its 16 GB. GNU time's "Maximum resident set size"
+        # is `ru_maxrss` over RUSAGE_CHILDREN — the largest single process in the
+        # tree, which on a `-g2` build is the link, exactly the process in
+        # question. Read them out of the log before touching any lever; the
+        # recorded first lever if the link does NOT fit is
+        # `linkflags=-Wl,--no-keep-memory`, which needs no engine patch.
         run: |
-          scons platform=linuxbsd target=editor \
+          set -euo pipefail
+          df -h /
+          /usr/bin/time -v -o "$RUNNER_TEMP/build-time.txt" \
+            scons platform=linuxbsd target=editor \
             debug_symbols=yes separate_debug_symbols=yes \
             "cache_path=${{ github.workspace }}/.scons_cache/" redirect_build_objects=no
+          echo "--- resource usage of the -g2 build ---"
+          cat "$RUNNER_TEMP/build-time.txt"
+          echo "--- disk after the -g2 build (objects + SCons CacheDir) ---"
+          df -h /
+          df --output=avail -k / | tail -n 1 > "$RUNNER_TEMP/disk-avail-kb.txt"
+          du -sh bin .scons_cache 2>/dev/null || true
           ls -l bin/
 
       - name: Verify the symbol split
@@ -276,6 +295,13 @@ jobs:
             echo "scons:         $(python -m pip show scons | awk '/^Version:/ { print $2 }')"
             echo "editor:        $(cat dist/editor-version.txt)"
             echo "scons flags:   target=editor debug_symbols=yes separate_debug_symbols=yes"
+            # ⚠ Durable copy of the two numbers `-g2` puts in doubt. The run log
+            # expires; this asset does not, and the next person asking "does a
+            # debug editor still fit a hosted runner" should not have to re-run a
+            # release to find out.
+            echo "peak rss:      $(awk -F': ' '/Maximum resident set size/ { print $2 }' "$RUNNER_TEMP/build-time.txt") kB (largest process in the build tree; the link)"
+            echo "build wall:    $(awk -F': ' '/Elapsed \(wall clock\) time/ { print $2 }' "$RUNNER_TEMP/build-time.txt")"
+            echo "disk free:     $(cat "$RUNNER_TEMP/disk-avail-kb.txt") kB on / after the build"
             echo
             echo "### editor-linux-x86_64.debugsymbols.tar.gz"
             echo "sidecar for:   godot.linuxbsd.editor.x86_64, via .gnu_debuglink (gdb checks the CRC)"
