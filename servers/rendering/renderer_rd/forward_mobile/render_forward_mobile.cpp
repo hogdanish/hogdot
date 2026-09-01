@@ -1715,7 +1715,8 @@ void RenderForwardMobile::_render_shadow_append(RID p_framebuffer, const PagedAr
 void RenderForwardMobile::_render_shadow_process() {
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	if (scene_state.instance_buffer[RENDER_LIST_SECONDARY].get_size(0u) > 0u) {
-		rd->buffer_flush(scene_state.instance_buffer[RENDER_LIST_SECONDARY]._get(0u));
+		// Every shadow pass appended to the secondary list; flush exactly what was filled.
+		rd->buffer_flush(scene_state.instance_buffer[RENDER_LIST_SECONDARY]._get(0u), 0, render_list[RENDER_LIST_SECONDARY].elements.size() * sizeof(SceneState::InstanceData));
 	}
 
 	//render shadows one after the other, so this can be done un-barriered and the driver can optimize (as well as allow us to run compute at the same time)
@@ -2262,7 +2263,7 @@ void RenderForwardMobile::_fill_instance_data(RenderListType p_render_list, uint
 	}
 
 	if (p_update_buffer && element_total > 0u) {
-		RenderingDevice::get_singleton()->buffer_flush(scene_state.instance_buffer[p_render_list]._get(0u));
+		RenderingDevice::get_singleton()->buffer_flush(scene_state.instance_buffer[p_render_list]._get(0u), 0, (p_offset + element_total) * sizeof(SceneState::InstanceData));
 	}
 }
 

@@ -280,6 +280,14 @@ struct WGPipelineWrapper {
 	// Uint32 variants and select the correct one at draw time.
 	WGPURenderPipeline render_handle_u16 = nullptr;
 	bool is_strip = false;
+	// Deferred creation (wgpuDeviceCreateRenderPipelineAsync): the handles stay null until the
+	// callback fires. `pending` counts outstanding async creations (2 for a strip primitive).
+	uint32_t pending = 0;
+	bool failed = false;
+	bool freed = false; // pipeline_free() ran while pending; the last callback deletes.
+	double async_t0 = 0.0;
+	CharString label;
+	bool used_baked_wgsl = false;
 
 	WGPipelineWrapper() : render_handle(nullptr) {}
 };
@@ -416,6 +424,10 @@ struct WGCommandBuffer {
 		WGFramebuffer *framebuffer = nullptr;
 		uint32_t current_subpass = 0;
 		WGPipelineWrapper *current_pipeline = nullptr;
+		// The bound pipeline has no handle (deferred creation in flight, or failed): draws are
+		// dropped until a usable pipeline is bound. Never expected when callers honor
+		// pipeline_is_ready(); a safety net against feeding Dawn a null object.
+		bool pipeline_unavailable = false;
 		WGPUIndexFormat current_index_format = WGPUIndexFormat_Uint32;
 		// Origin and extent of the pass's render area, in attachment coordinates. The origin is
 		// non-zero whenever a pass targets a sub-rect of a shared texture -- every positional

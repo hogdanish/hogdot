@@ -922,10 +922,15 @@ void RendererCanvasRenderRD::canvas_render_items(RID p_to_render_target, Item *p
 	state.prev_instance_data_index = state.instance_data_index;
 
 	state.instance_data = nullptr;
-	if (state.instance_data_index > 0) {
-		// If there was any remaining instance data, it must be flushed.
+	if (state.instance_data_index > state.instance_data_flush_from) {
+		// If there was any remaining instance data, it must be flushed — only what THIS canvas
+		// wrote. Canvases rendered earlier in the frame share the buffer (see _new_batch) and
+		// were flushed at their own end; re-flushing from 0 made the upload quadratic in the
+		// number of SubViewports per frame (5 MB/frame at 162 of them, measured 2026-09-01).
 		RID buf = state.instance_buffers._get(0);
-		RD::get_singleton()->buffer_flush(buf);
+		RD::get_singleton()->buffer_flush(buf, state.instance_data_flush_from * sizeof(InstanceData), (state.instance_data_index - state.instance_data_flush_from) * sizeof(InstanceData));
+	}
+	if (state.instance_data_index > 0) {
 		state.instance_data_index = 0;
 	}
 }
@@ -3254,6 +3259,7 @@ RendererCanvasRenderRD::Batch *RendererCanvasRenderRD::_new_batch(bool &r_batch_
 			if (!must_remap) {
 				state.instance_data = state.prev_instance_data;
 				state.instance_data_index = state.prev_instance_data_index;
+				state.instance_data_flush_from = state.instance_data_index;
 			}
 			state.prev_instance_data = nullptr;
 			state.prev_instance_data_index = 0;
@@ -3296,7 +3302,7 @@ void RendererCanvasRenderRD::_add_to_batch(bool &r_batch_broken, Batch *&r_curre
 	memcpy(&state.instance_data[state.instance_data_index], &state.intermediary_instance_data, sizeof(InstanceData));
 	state.instance_data_index++;
 	if (state.instance_data_index >= state.max_instances_per_buffer) {
-		RD::get_singleton()->buffer_flush(r_current_batch->instance_buffer);
+		RD::get_singleton()->buffer_flush(r_current_batch->instance_buffer, state.instance_data_flush_from * sizeof(InstanceData), (state.max_instances_per_buffer - state.instance_data_flush_from) * sizeof(InstanceData));
 		state.instance_data = nullptr;
 		_allocate_instance_buffer();
 		state.instance_data_index = 0;
@@ -3309,6 +3315,7 @@ void RendererCanvasRenderRD::_add_to_batch(bool &r_batch_broken, Batch *&r_curre
 void RendererCanvasRenderRD::_allocate_instance_buffer() {
 	state.instance_buffers.prepare_for_upload();
 	state.instance_data = reinterpret_cast<InstanceData *>(state.instance_buffers.map_raw_for_upload(0));
+	state.instance_data_flush_from = 0;
 }
 
 void RendererCanvasRenderRD::_prepare_batch_texture_info(RID p_texture, TextureState &p_state, TextureInfo *p_info) {

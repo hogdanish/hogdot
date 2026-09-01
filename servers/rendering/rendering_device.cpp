@@ -1094,7 +1094,7 @@ Error RenderingDevice::_buffer_update(Buffer *p_buffer, RID p_buffer_id, uint32_
 
 		memcpy(dst_data + p_offset, p_data, p_size);
 		direct_copy_count++;
-		buffer_flush(p_buffer_id);
+		buffer_flush(p_buffer_id, p_offset, p_size);
 		return OK;
 	}
 
@@ -1468,12 +1468,12 @@ uint8_t *RenderingDevice::buffer_persistent_map_advance(RID p_buffer) {
 	return driver->buffer_persistent_map_advance(buffer->driver_id, frames_drawn);
 }
 
-void RenderingDevice::buffer_flush(RID p_buffer) {
+void RenderingDevice::buffer_flush(RID p_buffer, uint32_t p_offset, uint32_t p_size) {
 	ERR_RENDER_THREAD_GUARD();
 
 	Buffer *buffer = _get_buffer_from_owner(p_buffer);
 	ERR_FAIL_NULL_MSG(buffer, "Buffer argument is not a valid buffer of any type.");
-	driver->buffer_flush(buffer->driver_id);
+	driver->buffer_flush(buffer->driver_id, p_offset, p_size);
 }
 
 RID RenderingDevice::storage_buffer_create(uint32_t p_size_bytes, Span<uint8_t> p_data, BitField<StorageBufferUsage> p_usage, BitField<BufferCreationBits> p_creation_bits) {
@@ -5360,6 +5360,21 @@ bool RenderingDevice::render_pipeline_is_valid(RID p_pipeline) {
 	_THREAD_SAFE_METHOD_
 
 	return render_pipeline_owner.owns(p_pipeline);
+}
+
+void RenderingDevice::pipeline_creation_set_deferred(bool p_deferred) {
+	driver->pipeline_creation_set_deferred(p_deferred);
+}
+
+bool RenderingDevice::render_pipeline_is_ready(RID p_pipeline) {
+	_THREAD_SAFE_METHOD_
+
+	RenderPipeline *pipeline = render_pipeline_owner.get_or_null(p_pipeline);
+	if (pipeline == nullptr) {
+		// Not a render pipeline (a compute pipeline in a shared hash map): nothing is deferred.
+		return true;
+	}
+	return driver->pipeline_is_ready(pipeline->driver_id);
 }
 
 RID RenderingDevice::compute_pipeline_create(RID p_shader, const Vector<PipelineSpecializationConstant> &p_specialization_constants) {

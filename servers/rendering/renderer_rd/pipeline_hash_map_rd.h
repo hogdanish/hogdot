@@ -157,7 +157,15 @@ public:
 		// Holding local_mutex across the call is safe: the creation function reaches this class
 		// again only through add_compiled_pipeline(), which takes compiled_queue_mutex instead.
 		if (!RD::get_singleton()->is_multithreaded_resource_creation_supported()) {
+			// A non-blocking request (p_high_priority == false) comes from a caller that draws
+			// with a fallback until the pipeline exists — the forward-mobile ubershader — so the
+			// driver may build it asynchronously; get_pipeline() keeps answering "not yet" until
+			// pipeline_is_ready(). A blocking request stays synchronous. On WebGPU this is what
+			// turns a ~130 ms first-use stall (Dawn compiling in the GPU process) into ubershader
+			// frames.
+			RD::get_singleton()->pipeline_creation_set_deferred(!p_high_priority);
 			(creation_object->*creation_function)(p_key);
+			RD::get_singleton()->pipeline_creation_set_deferred(false);
 			return;
 		}
 
@@ -220,6 +228,10 @@ public:
 				return RID();
 			}
 		} else {
+			if (!p_wait_for_compilation && e->value().is_valid() && !RD::get_singleton()->render_pipeline_is_ready(e->value())) {
+				// Deferred creation still in flight; the caller falls back (see compile_pipeline).
+				return RID();
+			}
 			return e->value();
 		}
 	}

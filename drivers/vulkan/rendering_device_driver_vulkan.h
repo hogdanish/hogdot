@@ -266,7 +266,7 @@ public:
 	virtual void buffer_unmap(BufferID p_buffer) override final;
 	virtual uint8_t *buffer_persistent_map_advance(BufferID p_buffer, uint64_t p_frames_drawn) override final;
 	virtual uint64_t buffer_get_dynamic_offsets(Span<BufferID> p_buffers) override final;
-	virtual void buffer_flush(BufferID p_buffer) override final;
+	virtual void buffer_flush(BufferID p_buffer, uint64_t p_offset = 0, uint64_t p_size = 0) override final;
 	virtual uint64_t buffer_get_device_address(BufferID p_buffer) override final;
 
 	/*****************/

@@ -2139,7 +2139,7 @@ uint64_t RenderingDeviceDriverVulkan::buffer_get_dynamic_offsets(Span<BufferID> 
 	return mask;
 }
 
-void RenderingDeviceDriverVulkan::buffer_flush(BufferID p_buffer) {
+void RenderingDeviceDriverVulkan::buffer_flush(BufferID p_buffer, uint64_t p_offset, uint64_t p_size) {
 	BufferDynamicInfo *buf_info = (BufferDynamicInfo *)p_buffer.id;
 
 	VkMemoryPropertyFlags mem_props_flags;

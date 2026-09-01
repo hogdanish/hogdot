@@ -121,6 +121,13 @@ class RenderingDeviceDriverWebGPU : public RenderingDeviceDriver {
 	FragmentDensityMapCapabilities fdm_capabilities;
 	WGPULimits device_limits = WGPU_LIMITS_INIT;
 	bool timestamp_supported = false;
+	// Split the command encoder (finish + submit + new encoder) before every render pass whose
+	// attachments carry both TextureBinding and RenderAttachment usage. Off by default: it was
+	// damage control for a validation error (5f5efee119) and it cost one queue submit per render
+	// pass — 65 per frame on a 40-SubViewport scene. See the perf ledger, 2026-09-01.
+	bool encoder_isolation = false;
+	// RDD::pipeline_creation_set_deferred — render_pipeline_create() uses the async API while set.
+	bool deferred_pipeline_creation = false;
 	bool has_texture_formats_tier1 = false;
 	bool has_rw_storage_textures = false; // readonly-and-readwrite-storage-textures
 
@@ -294,7 +301,9 @@ public:
 	/// Return dynamic offsets for buffers. Stub — returns 0.
 	virtual uint64_t buffer_get_dynamic_offsets(Span<BufferID> p_buffers) override final;
 	/// Flush a buffer's shadow CPU data to the GPU via wgpuQueueWriteBuffer.
-	virtual void buffer_flush(BufferID p_buffer) override final;
+	virtual void buffer_flush(BufferID p_buffer, uint64_t p_offset = 0, uint64_t p_size = 0) override final;
+	virtual void pipeline_creation_set_deferred(bool p_deferred) override final;
+	virtual bool pipeline_is_ready(PipelineID p_pipeline) override final;
 	/// Direct queue write bypassing staging buffers (for skeleton/bone updates).
 	virtual void buffer_write_direct(BufferID p_buffer, uint64_t p_offset, uint64_t p_size, const void *p_data) override final;
 	/// WebGPU: initiate async buffer map so it completes by next frame.

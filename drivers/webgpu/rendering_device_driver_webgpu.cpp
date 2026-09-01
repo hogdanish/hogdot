@@ -405,6 +405,26 @@ static bool _cgperf_timestamps_requested() {
 // no re-export, which is the only thing that makes an A/B on ONE template cheap.
 // ⚠ The project setting is registered from a web-only driver, so it never appears in
 // the editor's Project Settings dialog — write it into project.godot by hand.
+// Same shape as _webgpu_runtime_overrides_requested: a project setting a web-only driver
+// registers (so it never shows in the editor dialog) plus a URL switch for a no-export A/B.
+static bool _webgpu_encoder_isolation_requested() {
+	const int from_url = MAIN_THREAD_EM_ASM_INT({
+		var g = (typeof window != 'undefined') ? window : globalThis;
+		if (!g.location || !g.location.search) {
+			return 0;
+		}
+		var p = new URLSearchParams(g.location.search);
+		if (p.has('webgpu_encoder_isolation')) {
+			return 1;
+		}
+		return 0;
+	});
+	if (from_url != 0) {
+		return true;
+	}
+	return GLOBAL_DEF("rendering/rendering_device/webgpu_encoder_isolation", false);
+}
+
 static bool _webgpu_runtime_overrides_requested() {
 	const int from_url = MAIN_THREAD_EM_ASM_INT({
 		var g = (typeof window != 'undefined') ? window : globalThis;
@@ -433,6 +453,66 @@ static bool _runtime_overrides_enabled = false;
 static void _timestamp_readback_callback(WGPUMapAsyncStatus p_status, WGPUStringView p_message, void *p_userdata1, void *p_userdata2);
 
 // Fence work-done callback: fires when wgpuQueueSubmit work completes on GPU.
+// Mirrored from begin_segment() for static callbacks that have no driver instance.
+static uint32_t _cgperf_frames_drawn_static = 0;
+
+// Release everything a pipeline wrapper owns and delete it. Shared by pipeline_free() and the
+// deferred-creation callback (which owns the delete when the wrapper was freed while pending).
+static void _pipeline_wrapper_destroy(WGPipelineWrapper *p_pw) {
+	if (p_pw->type == WGPipelineWrapper::RENDER) {
+		if (p_pw->render_handle) {
+			wgpuRenderPipelineRelease(p_pw->render_handle);
+		}
+		if (p_pw->render_handle_u16) {
+			wgpuRenderPipelineRelease(p_pw->render_handle_u16);
+		}
+	} else if (p_pw->type == WGPipelineWrapper::COMPUTE && p_pw->compute_handle) {
+		wgpuComputePipelineRelease(p_pw->compute_handle);
+	}
+	for (int i = 0; i < 6; i++) {
+		if (p_pw->specialized_modules[i]) {
+			wgpuShaderModuleRelease(p_pw->specialized_modules[i]);
+		}
+	}
+	delete p_pw;
+}
+
+// wgpuDeviceCreateRenderPipelineAsync completion. userdata2 != nullptr marks the Uint16 strip
+// variant. Fires from wgpuInstanceProcessEvents (fence_wait, once per frame) or spontaneously.
+static void _render_pipeline_async_callback(WGPUCreatePipelineAsyncStatus p_status, WGPURenderPipeline p_pipeline, WGPUStringView p_message, void *p_userdata1, void *p_userdata2) {
+	WGPipelineWrapper *pw = (WGPipelineWrapper *)p_userdata1;
+	if (!pw) {
+		if (p_pipeline) {
+			wgpuRenderPipelineRelease(p_pipeline);
+		}
+		return;
+	}
+	const bool is_u16 = p_userdata2 != nullptr;
+	pw->pending = pw->pending > 0 ? pw->pending - 1 : 0;
+	if (p_status != WGPUCreatePipelineAsyncStatus_Success || !p_pipeline) {
+		pw->failed = true;
+		ERR_PRINT(vformat("WebGPU: deferred render pipeline creation failed for '%s': %s", String(pw->label.get_data()), String::utf8(p_message.data, p_message.length)));
+		if (p_pipeline) {
+			wgpuRenderPipelineRelease(p_pipeline);
+		}
+	} else if (pw->freed) {
+		wgpuRenderPipelineRelease(p_pipeline);
+	} else if (is_u16) {
+		pw->render_handle_u16 = p_pipeline;
+	} else {
+		pw->render_handle = p_pipeline;
+	}
+	if (pw->pending == 0) {
+		// The wall time from request to usable pipeline — the latency the ubershader covered.
+		const double now = _cgperf_now_ms();
+		const String ready_label = String(pw->label.get_data()) + ":ready";
+		_cgperf_push_compile("render", ready_label.utf8().get_data(), pw->async_t0, now - pw->async_t0, 0.0, pw->used_baked_wgsl, _cgperf_frames_drawn_static);
+		if (pw->freed) {
+			_pipeline_wrapper_destroy(pw);
+		}
+	}
+}
+
 static void _fence_work_done_callback(WGPUQueueWorkDoneStatus p_status, WGPUStringView p_message, void *p_userdata1, void *p_userdata2) {
 	WGFence *fence = (WGFence *)p_userdata1;
 	if (!fence) {
@@ -1657,6 +1737,7 @@ void RenderingDeviceDriverWebGPU::_check_capabilities() {
 	// one shader's translations across two keys and make `has_override_declarations`
 	// depend on creation order.
 	_runtime_overrides_enabled = _webgpu_runtime_overrides_requested();
+	encoder_isolation = _webgpu_encoder_isolation_requested();
 	if (_runtime_overrides_enabled) {
 		print_line("WebGPU: runtime override preservation ENABLED — spec constants stay as @id(N) overrides instead of being frozen. Check __cgPerf counters.override_translate_fallback for shaders that had to degrade.");
 	}
@@ -1857,6 +1938,10 @@ RDD::BufferID RenderingDeviceDriverWebGPU::buffer_create(uint64_t p_size, BitFie
 	desc.size = aligned_size;
 	desc.usage = buf->usage;
 	desc.mappedAtCreation = false;
+	// Label = size/usage/persistence so a page-side writeBuffer census can attribute bytes.
+	char label_buf[96];
+	snprintf(label_buf, sizeof(label_buf), "buf %llu B usage=0x%x%s%s", (unsigned long long)aligned_size, (unsigned)buf->usage, is_dynamic_persistent ? " dyn" : "", buf->is_readback ? " readback" : "");
+	desc.label = { label_buf, WGPU_STRLEN };
 
 	buf->handle = wgpuDeviceCreateBuffer(device, &desc);
 	if (buf->handle == nullptr) {
@@ -1882,6 +1967,9 @@ RDD::BufferID RenderingDeviceDriverWebGPU::buffer_create_with_data(uint64_t p_si
 	desc.size = aligned_size;
 	desc.usage = buf->usage;
 	desc.mappedAtCreation = true;
+	char label_buf[96];
+	snprintf(label_buf, sizeof(label_buf), "buf %llu B usage=0x%x init", (unsigned long long)aligned_size, (unsigned)buf->usage);
+	desc.label = { label_buf, WGPU_STRLEN };
 
 	buf->handle = wgpuDeviceCreateBuffer(device, &desc);
 	if (buf->handle == nullptr) {
@@ -2116,21 +2204,58 @@ uint64_t RenderingDeviceDriverWebGPU::buffer_get_dynamic_offsets(Span<BufferID> 
 	return mask;
 }
 
-void RenderingDeviceDriverWebGPU::buffer_flush(BufferID p_buffer) {
+void RenderingDeviceDriverWebGPU::buffer_flush(BufferID p_buffer, uint64_t p_offset, uint64_t p_size) {
 	WGBuffer *buf = (WGBuffer *)(p_buffer.id);
-	if (buf && buf->shadow_map) {
-		// Flush only the dirty range if one was set (e.g., by
-		// buffer_persistent_map_advance), otherwise fall back to full buffer.
-		uint64_t flush_offset = 0;
-		uint64_t flush_size = buf->size;
-		if (buf->dirty_end > buf->dirty_offset) {
-			flush_offset = buf->dirty_offset;
-			flush_size = buf->dirty_end - buf->dirty_offset;
-		}
-		wgpuQueueWriteBuffer(queue, buf->handle, flush_offset, buf->shadow_map + flush_offset, flush_size);
-		buf->dirty_offset = 0;
-		buf->dirty_end = 0;
+	if (!buf || !buf->shadow_map) {
+		return;
 	}
+	// The current frame slice of a dynamic persistent buffer, derived from frame_idx every
+	// time. ⚠ Not from dirty_offset/dirty_end: those are cleared by the first flush, and a
+	// canvas frame flushes the same buffer once per SubViewport — the second flush used to
+	// land at offset p_offset of the WHOLE buffer instead of the slice, so every canvas after
+	// the first drew from stale memory (caught by the perf bed's screenshot A/B, 2026-09-01).
+	uint64_t slice_begin = 0;
+	uint64_t slice_end = buf->size;
+	if (buf->is_dynamic() && buf->per_frame_size > 0 && frame_count > 1) {
+		slice_begin = (uint64_t)buf->frame_idx * buf->per_frame_size;
+		slice_end = slice_begin + buf->per_frame_size;
+	}
+	uint64_t flush_offset;
+	uint64_t flush_size;
+	if (p_size > 0) {
+		// The caller knows what it wrote (RD::_buffer_update, the canvas and forward-mobile
+		// instance uploads): move only that range inside the slice. A canvas that drew 12
+		// rects into a 2 MB instance buffer used to upload 2 MB; 40 SubViewports were ~150 MB
+		// of wgpuQueueWriteBuffer per frame and half the CPU time of a frame.
+		uint64_t begin = slice_begin + p_offset;
+		uint64_t end = begin + p_size;
+		if (end > slice_end) {
+			end = slice_end;
+		}
+		begin &= ~3ULL; // writeBuffer offsets and sizes are 4-byte quantities.
+		end = (end + 3) & ~3ULL;
+		if (end > buf->size) {
+			end = buf->size;
+		}
+		if (end <= begin) {
+			buf->dirty_offset = 0;
+			buf->dirty_end = 0;
+			return;
+		}
+		flush_offset = begin;
+		flush_size = end - begin;
+	} else if (buf->dirty_end > buf->dirty_offset) {
+		// Dirty range set by buffer_persistent_map_advance: the whole current slice.
+		flush_offset = buf->dirty_offset;
+		flush_size = buf->dirty_end - buf->dirty_offset;
+	} else {
+		// No range known: the whole slice (the whole buffer when not dynamic).
+		flush_offset = slice_begin;
+		flush_size = slice_end - slice_begin;
+	}
+	wgpuQueueWriteBuffer(queue, buf->handle, flush_offset, buf->shadow_map + flush_offset, flush_size);
+	buf->dirty_offset = 0;
+	buf->dirty_end = 0;
 }
 
 void RenderingDeviceDriverWebGPU::buffer_write_direct(BufferID p_buffer, uint64_t p_offset, uint64_t p_size, const void *p_data) {
@@ -7975,21 +8100,24 @@ void RenderingDeviceDriverWebGPU::command_copy_texture_to_buffer(CommandBufferID
 void RenderingDeviceDriverWebGPU::pipeline_free(PipelineID p_pipeline) {
 	WGPipelineWrapper *pw = (WGPipelineWrapper *)(p_pipeline.id);
 	ERR_FAIL_NULL(pw);
-	if (pw->type == WGPipelineWrapper::RENDER && pw->render_handle) {
-		wgpuRenderPipelineRelease(pw->render_handle);
-		if (pw->render_handle_u16) {
-			wgpuRenderPipelineRelease(pw->render_handle_u16);
-		}
-	} else if (pw->type == WGPipelineWrapper::COMPUTE && pw->compute_handle) {
-		wgpuComputePipelineRelease(pw->compute_handle);
+	if (pw->pending > 0) {
+		// Deferred creation in flight: the last callback releases and deletes.
+		pw->freed = true;
+		return;
 	}
-	// Release any specialized shader modules owned by this pipeline.
-	for (int i = 0; i < 6; i++) {
-		if (pw->specialized_modules[i]) {
-			wgpuShaderModuleRelease(pw->specialized_modules[i]);
-		}
-	}
-	delete pw;
+	_pipeline_wrapper_destroy(pw);
+}
+
+void RenderingDeviceDriverWebGPU::pipeline_creation_set_deferred(bool p_deferred) {
+	deferred_pipeline_creation = p_deferred;
+}
+
+bool RenderingDeviceDriverWebGPU::pipeline_is_ready(PipelineID p_pipeline) {
+	WGPipelineWrapper *pw = (WGPipelineWrapper *)(p_pipeline.id);
+	ERR_FAIL_NULL_V(pw, true);
+	// Completions are delivered by the per-frame wgpuInstanceProcessEvents in fence_wait (and
+	// spontaneously); polling here would add a JS call per draw while anything is pending.
+	return pw->pending == 0;
 }
 
 void RenderingDeviceDriverWebGPU::command_bind_push_constants(CommandBufferID p_cmd_buffer, ShaderID p_shader, uint32_t p_first_index, VectorView<uint32_t> p_data) {
@@ -8408,7 +8536,7 @@ void RenderingDeviceDriverWebGPU::command_begin_render_pass(CommandBufferID p_cm
 				break;
 			}
 		}
-		if (has_dual_usage && cmd->encoder) {
+		if (encoder_isolation && has_dual_usage && cmd->encoder) {
 			// Flush push constant ring buffer before mid-frame submit.
 			if (push_constant_shadow_dirty_start < push_constant_shadow_dirty_end) {
 				wgpuQueueWriteBuffer(queue, push_constant_ring_buffer, push_constant_shadow_dirty_start,
@@ -8627,6 +8755,7 @@ void RenderingDeviceDriverWebGPU::command_begin_render_pass(CommandBufferID p_cm
 
 	// Reset cached state — new render pass requires binding everything fresh.
 	cmd->render_state.current_pipeline = nullptr;
+	cmd->render_state.pipeline_unavailable = false;
 	cmd->render_state.current_index_buffer = nullptr;
 	cmd->render_state.current_index_offset = 0;
 	memset(cmd->render_state.current_vertex_buffers, 0, sizeof(cmd->render_state.current_vertex_buffers));
@@ -8767,6 +8896,7 @@ void RenderingDeviceDriverWebGPU::command_next_render_subpass(CommandBufferID p_
 
 	// Reset pipeline state — new render pass requires re-binding everything.
 	cmd->render_state.current_pipeline = nullptr;
+	cmd->render_state.pipeline_unavailable = false;
 	cmd->render_state.current_index_buffer = nullptr;
 	cmd->render_state.current_index_offset = 0;
 	memset(cmd->render_state.current_vertex_buffers, 0, sizeof(cmd->render_state.current_vertex_buffers));
@@ -8855,6 +8985,16 @@ void RenderingDeviceDriverWebGPU::command_bind_render_pipeline(CommandBufferID p
 	if (cmd->render_state.current_pipeline == pw) {
 		return; // Pipeline already bound, skip redundant call.
 	}
+	if (pw->render_handle == nullptr) {
+		// Deferred creation still in flight, or failed. Callers poll pipeline_is_ready() before
+		// binding, so reaching this means a blocking request met a deferred pipeline; drop this
+		// pipeline's draws for the frame rather than hand Dawn a null object.
+		ERR_PRINT_ONCE(vformat("WebGPU: pipeline '%s' bound before its deferred creation completed; its draws are skipped until it is ready.", String(pw->label.get_data())));
+		cmd->render_state.current_pipeline = nullptr;
+		cmd->render_state.pipeline_unavailable = true;
+		return;
+	}
+	cmd->render_state.pipeline_unavailable = false;
 
 	wgpuRenderPassEncoderSetPipeline(cmd->render_encoder, pw->render_handle);
 	wgpuRenderPassEncoderSetStencilReference(cmd->render_encoder, pw->stencil_reference);
@@ -8883,47 +9023,6 @@ void RenderingDeviceDriverWebGPU::command_bind_render_uniform_sets(CommandBuffer
 	if (pipeline_shader != cmd->bound_shader) {
 		cmd->invalidate_bind_groups();
 		cmd->bound_shader = pipeline_shader;
-	}
-
-	// Diagnostic: detect the sync-scope conflict that's causing the
-	// "includes writable usage and another usage in the same synchronization
-	// scope" validation error. This fires whenever a bound texture's parent
-	// matches a framebuffer attachment's parent. Limited to a few prints so
-	// we don't spam the console after a match.
-	static int _sync_conflict_log_count = 0;
-	WGFramebuffer *_cur_fb = cmd->render_state.framebuffer;
-	if (_cur_fb && _sync_conflict_log_count < 20) {
-		for (uint32_t i = 0; i < p_set_count; i++) {
-			WGUniformSet *us = (WGUniformSet *)(p_uniform_sets[i].id);
-			if (!us) {
-				continue;
-			}
-			for (const KeyValue<uint32_t, WGTexture *> &kv : us->bound_textures) {
-				WGTexture *btex = kv.value;
-				if (!btex || !btex->view_source) {
-					continue;
-				}
-				for (uint32_t a = 0; a < _cur_fb->attachments.size(); a++) {
-					WGTexture *atex = _cur_fb->attachments[a];
-					if (!atex) {
-						continue;
-					}
-					WGPUTexture a_src = atex->gpu_handle();
-					if (a_src == btex->view_source) {
-						_sync_conflict_log_count++;
-						if (_sync_conflict_log_count >= 20) {
-							break;
-						}
-					}
-				}
-				if (_sync_conflict_log_count >= 20) {
-					break;
-				}
-			}
-			if (_sync_conflict_log_count >= 20) {
-				break;
-			}
-		}
 	}
 
 	// Task 7.5: Unpack 4-bit frame indices from p_dynamic_offsets as we walk the sets.
@@ -9020,8 +9119,28 @@ void RenderingDeviceDriverWebGPU::command_bind_render_uniform_sets(CommandBuffer
 					cmd->bound_bind_groups[set_idx] = num_dyn > 0 ? nullptr : bg_to_bind;
 				}
 			} else if (num_dyn > 0) {
-				// Non-PC set with material dynamic buffers: must always rebind because
-				// the frame_idx rotates — bypass the redundant-bind cache.
+				// Non-PC set with material dynamic buffers. The frame_idx rotates once per
+				// frame, not per draw, so "same group, same offsets" as the last bind at this
+				// index is a redundant call — consecutive draws sharing a material used to
+				// rebind it every time. last_bound_state is reset with the encoder state.
+				if (set_idx < WGCommandBuffer::MAX_BIND_GROUPS) {
+					// bound_bind_groups is what a new pass encoder clears (invalidate_bind_groups);
+					// last_bound_state deliberately survives it for the mid-pass restart path, so
+					// it cannot be the sole witness.
+					const auto &prev = cmd->last_bound_state[set_idx];
+					if (cmd->bound_bind_groups[set_idx] == bg_to_bind && prev.group == bg_to_bind && prev.dynamic_offset_count == num_dyn && num_dyn <= WGCommandBuffer::MAX_BIND_GROUP_DYN_OFFSETS) {
+						bool same = true;
+						for (uint32_t j = 0; j < num_dyn; j++) {
+							if (prev.dynamic_offsets[j] != set_dyn_offsets[j]) {
+								same = false;
+								break;
+							}
+						}
+						if (same) {
+							continue;
+						}
+					}
+				}
 				wgpuRenderPassEncoderSetBindGroup(cmd->render_encoder, set_idx, bg_to_bind, num_dyn, set_dyn_offsets);
 				perf.set_bind_group_calls++;
 				// Save full state for mid-pass restart.
@@ -9032,7 +9151,7 @@ void RenderingDeviceDriverWebGPU::command_bind_render_uniform_sets(CommandBuffer
 					for (uint32_t j = 0; j < num_dyn && j < WGCommandBuffer::MAX_BIND_GROUP_DYN_OFFSETS; j++) {
 						bs.dynamic_offsets[j] = set_dyn_offsets[j];
 					}
-					cmd->bound_bind_groups[set_idx] = nullptr;
+					cmd->bound_bind_groups[set_idx] = bg_to_bind;
 				}
 			} else {
 				// Static non-PC set — skip if already bound.
@@ -9057,6 +9176,9 @@ void RenderingDeviceDriverWebGPU::command_render_draw(CommandBufferID p_cmd_buff
 	WGCommandBuffer *cmd = (WGCommandBuffer *)(p_cmd_buffer.id);
 	ERR_FAIL_NULL(cmd);
 	ERR_FAIL_COND(!cmd->render_encoder);
+	if (cmd->render_state.pipeline_unavailable) {
+		return; // See command_bind_render_pipeline.
+	}
 
 	if (cmd->render_state.current_pipeline) {
 		_flush_push_constants(cmd, cmd->render_state.current_pipeline->shader);
@@ -9073,6 +9195,9 @@ void RenderingDeviceDriverWebGPU::command_render_draw_indexed(CommandBufferID p_
 	WGCommandBuffer *cmd = (WGCommandBuffer *)(p_cmd_buffer.id);
 	ERR_FAIL_NULL(cmd);
 	ERR_FAIL_COND(!cmd->render_encoder);
+	if (cmd->render_state.pipeline_unavailable) {
+		return; // See command_bind_render_pipeline.
+	}
 
 	WGPipelineWrapper *pw = cmd->render_state.current_pipeline;
 	if (pw) {
@@ -9100,6 +9225,9 @@ void RenderingDeviceDriverWebGPU::command_render_draw_indexed_indirect(CommandBu
 	ERR_FAIL_NULL(cmd);
 	ERR_FAIL_NULL(indirect);
 	ERR_FAIL_COND(!cmd->render_encoder);
+	if (cmd->render_state.pipeline_unavailable) {
+		return; // See command_bind_render_pipeline.
+	}
 
 	WGPipelineWrapper *pw = cmd->render_state.current_pipeline;
 	if (pw) {
@@ -9129,6 +9257,9 @@ void RenderingDeviceDriverWebGPU::command_render_draw_indirect(CommandBufferID p
 	ERR_FAIL_NULL(cmd);
 	ERR_FAIL_NULL(indirect);
 	ERR_FAIL_COND(!cmd->render_encoder);
+	if (cmd->render_state.pipeline_unavailable) {
+		return; // See command_bind_render_pipeline.
+	}
 
 	if (cmd->render_state.current_pipeline) {
 		_flush_push_constants(cmd, cmd->render_state.current_pipeline->shader);
@@ -9897,27 +10028,50 @@ RDD::PipelineID RenderingDeviceDriverWebGPU::render_pipeline_create(
 	desc.label = { _pipeline_label_cs.get_data(), WGPU_STRLEN };
 
 	const double _pipe_t0 = _cgperf_now_ms();
-	WGPURenderPipeline pipeline = wgpuDeviceCreateRenderPipeline(device, &desc);
-	_cgperf.count(CGPerfChannel::C_RENDER_PIPELINES_CREATED);
-	_cgperf_push_compile("render", _pipeline_label_cs.get_data(), _pipe_t0, _cgperf_now_ms() - _pipe_t0, 0.0, shader->used_baked_wgsl, frames_drawn);
-	if (!pipeline) {
-		if (specialized_vertex) {
-			wgpuShaderModuleRelease(specialized_vertex);
-		}
-		if (specialized_fragment) {
-			wgpuShaderModuleRelease(specialized_fragment);
-		}
-		ERR_FAIL_V_MSG(PipelineID(), "WebGPU: Failed to create render pipeline.");
-	}
-
 	WGPipelineWrapper *pw = new WGPipelineWrapper();
 	pw->type = WGPipelineWrapper::RENDER;
-	pw->render_handle = pipeline;
 	pw->shader = shader;
 	pw->specialized_modules[SHADER_STAGE_VERTEX] = specialized_vertex;
 	pw->specialized_modules[SHADER_STAGE_FRAGMENT] = specialized_fragment;
 	pw->stencil_reference = p_depth_stencil_state.front_op.reference;
 	pw->is_strip = is_strip;
+	pw->label = _pipeline_label_cs;
+	pw->used_baked_wgsl = shader->used_baked_wgsl;
+
+	if (deferred_pipeline_creation) {
+		// Deferred: the caller (PipelineHashMapRD, for a non-blocking request) draws with the
+		// ubershader until pipeline_is_ready(). Dawn compiles off its main thread and the frame
+		// that first uses the pipeline no longer waits for the compile. The descriptor is
+		// consumed synchronously by emdawnwebgpu, so the locals it points at may die here.
+		pw->pending = is_strip ? 2 : 1;
+		pw->async_t0 = _pipe_t0;
+		WGPUCreateRenderPipelineAsyncCallbackInfo cb = {};
+		cb.mode = WGPUCallbackMode_AllowSpontaneous;
+		cb.callback = _render_pipeline_async_callback;
+		cb.userdata1 = pw;
+		cb.userdata2 = nullptr;
+		wgpuDeviceCreateRenderPipelineAsync(device, &desc, cb);
+		_cgperf.count(CGPerfChannel::C_RENDER_PIPELINES_CREATED);
+		const String _async_label = _pipeline_label_str + ":async";
+		_cgperf_push_compile("render", _async_label.utf8().get_data(), _pipe_t0, _cgperf_now_ms() - _pipe_t0, 0.0, shader->used_baked_wgsl, frames_drawn);
+		if (is_strip) {
+			desc.primitive.stripIndexFormat = WGPUIndexFormat_Uint16;
+			cb.userdata2 = pw; // Marks the Uint16 variant for the callback.
+			wgpuDeviceCreateRenderPipelineAsync(device, &desc, cb);
+			_cgperf.count(CGPerfChannel::C_RENDER_PIPELINES_CREATED);
+		}
+		return PipelineID(pw);
+	}
+
+	WGPURenderPipeline pipeline = wgpuDeviceCreateRenderPipeline(device, &desc);
+	_cgperf.count(CGPerfChannel::C_RENDER_PIPELINES_CREATED);
+	_cgperf_push_compile("render", _pipeline_label_cs.get_data(), _pipe_t0, _cgperf_now_ms() - _pipe_t0, 0.0, shader->used_baked_wgsl, frames_drawn);
+	if (!pipeline) {
+		// The wrapper owns the specialized modules; destroying it releases them.
+		_pipeline_wrapper_destroy(pw);
+		ERR_FAIL_V_MSG(PipelineID(), "WebGPU: Failed to create render pipeline.");
+	}
+	pw->render_handle = pipeline;
 	if (is_strip) {
 		// Create a Uint16 variant — WebGPU bakes stripIndexFormat into the pipeline,
 		// but Godot only knows the index format at bind time.
@@ -10437,6 +10591,7 @@ void RenderingDeviceDriverWebGPU::begin_segment(uint32_t p_frame_index, uint32_t
 
 	frame_index = p_frame_index;
 	frames_drawn = p_frames_drawn;
+	_cgperf_frames_drawn_static = p_frames_drawn;
 
 	// Performance counter tracking (always-on, 1 log/sec is negligible overhead).
 	perf.frames_since_log++;
