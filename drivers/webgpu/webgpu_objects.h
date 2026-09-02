@@ -437,6 +437,30 @@ struct WGCommandBuffer {
 		uint32_t render_area_width = 0;
 		uint32_t render_area_height = 0;
 
+		// --- Encoder-owned redundant state elimination -------------------------
+		// ⚠ These track what was last handed to the CURRENT WGPURenderPassEncoder,
+		// not what the pass logically wants. Every one of them MUST be cleared
+		// whenever a new encoder is begun (a new render pass, a subpass, or the
+		// push-constant-ring restart), because a fresh encoder starts with the
+		// default full-attachment viewport and scissor and no pipeline — and the
+		// restart path deliberately does not restore the viewport or the scissor.
+		// Caching across an encoder boundary would silently skip the call that
+		// re-establishes them and draw the rest of the pass at the wrong extents.
+		//
+		// `last_set_pipeline` is the HANDLE, not the wrapper: a strip mesh selects
+		// between render_handle and render_handle_u16 per indexed draw, so the
+		// wrapper identity (current_pipeline) cannot answer "what is bound".
+		WGPURenderPipeline last_set_pipeline = nullptr;
+		bool has_last_viewport = false;
+		int32_t last_viewport[4] = {}; // x, y, w, h — the values passed, not the request.
+		bool has_last_scissor = false;
+		uint32_t last_scissor[4] = {}; // x, y, w, h AFTER the render-area clamp.
+		void reset_encoder_redundancy() {
+			last_set_pipeline = nullptr;
+			has_last_viewport = false;
+			has_last_scissor = false;
+		}
+
 		// Redundant state elimination for per-draw calls.
 		WGPUBuffer current_index_buffer = nullptr;
 		uint64_t current_index_offset = 0;

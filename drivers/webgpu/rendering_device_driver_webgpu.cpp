@@ -8336,10 +8336,19 @@ void RenderingDeviceDriverWebGPU::_flush_push_constants(WGCommandBuffer *p_cmd_b
 				p_cmd_buf->render_encoder = wgpuCommandEncoderBeginRenderPass(p_cmd_buf->encoder, &pass_desc);
 				p_cmd_buf->active_encoder = WGCommandBuffer::RENDER;
 
+				// ⚠ A new encoder means a default viewport and scissor and no pipeline. Nothing
+				// below restores the viewport or the scissor, so the caches must be dropped or
+				// the next set_viewport/set_scissor would be skipped as redundant and the rest
+				// of the pass would draw at the full-attachment extents.
+				p_cmd_buf->render_state.reset_encoder_redundancy();
+
 				// Rebind render pipeline.
 				WGPipelineWrapper *pw = p_cmd_buf->render_state.current_pipeline;
 				if (pw) {
 					wgpuRenderPassEncoderSetPipeline(p_cmd_buf->render_encoder, pw->render_handle);
+					// ⚠ The BASE handle, never the Uint16 strip variant: a strip draw after this
+					// restart must re-select its variant, and this is what makes it do so.
+					p_cmd_buf->render_state.last_set_pipeline = pw->render_handle;
 					wgpuRenderPassEncoderSetStencilReference(p_cmd_buf->render_encoder, pw->stencil_reference);
 					if (pw->shader) {
 						for (uint32_t gap_idx : pw->shader->gap_bind_group_indices) {
@@ -8784,6 +8793,7 @@ void RenderingDeviceDriverWebGPU::command_begin_render_pass(CommandBufferID p_cm
 	cmd->active_encoder = WGCommandBuffer::RENDER;
 
 	// Reset cached state — new render pass requires binding everything fresh.
+	cmd->render_state.reset_encoder_redundancy();
 	cmd->render_state.current_pipeline = nullptr;
 	cmd->render_state.pipeline_unavailable = false;
 	cmd->render_state.current_index_buffer = nullptr;
@@ -8925,6 +8935,7 @@ void RenderingDeviceDriverWebGPU::command_next_render_subpass(CommandBufferID p_
 	cmd->active_encoder = WGCommandBuffer::RENDER;
 
 	// Reset pipeline state — new render pass requires re-binding everything.
+	cmd->render_state.reset_encoder_redundancy();
 	cmd->render_state.current_pipeline = nullptr;
 	cmd->render_state.pipeline_unavailable = false;
 	cmd->render_state.current_index_buffer = nullptr;
@@ -8940,7 +8951,22 @@ void RenderingDeviceDriverWebGPU::command_render_set_viewport(CommandBufferID p_
 
 	if (p_viewports.size() > 0) {
 		const Rect2i &vp = p_viewports[0]; // WebGPU supports only one viewport.
+		// Redundant setViewport is a wasted WASM→JS→GPU-process crossing, and the engine
+		// re-issues the same rect for every draw list on a render target. The cache is
+		// per-ENCODER (see WGCommandBuffer::RenderState) — dropped whenever a new render pass
+		// or a mid-pass restart begins, because those reset the viewport to the attachment.
+		WGCommandBuffer::RenderState &rs = cmd->render_state;
+		if (rs.has_last_viewport &&
+				rs.last_viewport[0] == vp.position.x && rs.last_viewport[1] == vp.position.y &&
+				rs.last_viewport[2] == vp.size.x && rs.last_viewport[3] == vp.size.y) {
+			return;
+		}
 		wgpuRenderPassEncoderSetViewport(cmd->render_encoder, (float)vp.position.x, (float)vp.position.y, (float)vp.size.x, (float)vp.size.y, 0.0f, 1.0f);
+		rs.has_last_viewport = true;
+		rs.last_viewport[0] = vp.position.x;
+		rs.last_viewport[1] = vp.position.y;
+		rs.last_viewport[2] = vp.size.x;
+		rs.last_viewport[3] = vp.size.y;
 	}
 }
 
@@ -8993,7 +9019,21 @@ void RenderingDeviceDriverWebGPU::command_render_set_scissor(CommandBufferID p_c
 				h = MIN(h, clamp_h - y);
 			}
 		}
+		// ⚠ The cache compares the CLAMPED values, i.e. what was actually passed — the same
+		// unclamped request against a different render area is a different scissor. Per encoder,
+		// for the same reason as the viewport above.
+		WGCommandBuffer::RenderState &rs = cmd->render_state;
+		if (rs.has_last_scissor &&
+				rs.last_scissor[0] == x && rs.last_scissor[1] == y &&
+				rs.last_scissor[2] == w && rs.last_scissor[3] == h) {
+			return;
+		}
 		wgpuRenderPassEncoderSetScissorRect(cmd->render_encoder, x, y, w, h);
+		rs.has_last_scissor = true;
+		rs.last_scissor[0] = x;
+		rs.last_scissor[1] = y;
+		rs.last_scissor[2] = w;
+		rs.last_scissor[3] = h;
 	}
 }
 
@@ -9029,6 +9069,7 @@ void RenderingDeviceDriverWebGPU::command_bind_render_pipeline(CommandBufferID p
 	wgpuRenderPassEncoderSetPipeline(cmd->render_encoder, pw->render_handle);
 	wgpuRenderPassEncoderSetStencilReference(cmd->render_encoder, pw->stencil_reference);
 	cmd->render_state.current_pipeline = pw;
+	cmd->render_state.last_set_pipeline = pw->render_handle;
 	perf.set_pipeline_calls++;
 
 	// Pre-bind empty bind groups at pipeline layout gap slots.
@@ -9233,12 +9274,19 @@ void RenderingDeviceDriverWebGPU::command_render_draw_indexed(CommandBufferID p_
 	if (pw) {
 		_flush_push_constants(cmd, pw->shader);
 		// For strip topologies, ensure the pipeline variant matches the bound index format.
-		// Always select the correct variant — the format may have changed since pipeline bind.
+		// ⚠ This used to call setPipeline on EVERY indexed draw of every strip mesh, because
+		// the index format can change after the pipeline bind. It only has to change when the
+		// variant actually differs from what this encoder was last given — which the encoder
+		// cache answers exactly, including after a mid-pass restart (which rebinds the BASE
+		// handle and records it).
 		if (pw->is_strip && pw->render_handle_u16) {
 			WGPURenderPipeline needed = (cmd->render_state.current_index_format == WGPUIndexFormat_Uint16)
 					? pw->render_handle_u16
 					: pw->render_handle;
-			wgpuRenderPassEncoderSetPipeline(cmd->render_encoder, needed);
+			if (needed != cmd->render_state.last_set_pipeline) {
+				wgpuRenderPassEncoderSetPipeline(cmd->render_encoder, needed);
+				cmd->render_state.last_set_pipeline = needed;
+			}
 		}
 	}
 
@@ -9266,7 +9314,10 @@ void RenderingDeviceDriverWebGPU::command_render_draw_indexed_indirect(CommandBu
 			WGPURenderPipeline needed = (cmd->render_state.current_index_format == WGPUIndexFormat_Uint16)
 					? pw->render_handle_u16
 					: pw->render_handle;
-			wgpuRenderPassEncoderSetPipeline(cmd->render_encoder, needed);
+			if (needed != cmd->render_state.last_set_pipeline) {
+				wgpuRenderPassEncoderSetPipeline(cmd->render_encoder, needed);
+				cmd->render_state.last_set_pipeline = needed;
+			}
 		}
 	}
 

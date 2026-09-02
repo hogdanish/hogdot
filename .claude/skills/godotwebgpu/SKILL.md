@@ -261,6 +261,25 @@ Material sets with dynamic offsets are no longer rebound when unchanged. ⚠ **E
 a screenshot A/B** (`bench.mjs --screenshot`, `hold`): the first flush patch made 39 of 40 puppets
 vanish while the fps "improved". The ledger is `webgpu_tests/perf/HANDOFF.md`.
 
+### Encoder-owned redundant state (added 2026-09-01)
+
+Three per-draw calls were unconditional and are now cached on `WGCommandBuffer::RenderState`:
+
+| call | why it was unconditional | the cache |
+| --- | --- | --- |
+| `setPipeline` for the Uint16 strip variant | `command_render_draw_indexed(_indirect)` re-selected `render_handle` vs `render_handle_u16` on **every** indexed draw of a strip mesh, because the index format can change after the pipeline bind | `last_set_pipeline` holds the HANDLE, so the wrapper-identity check in `command_bind_render_pipeline` cannot answer it |
+| `setViewport` | the engine re-issues the same rect per draw list | `last_viewport` (the requested values) |
+| `setScissorRect` | same, plus the render-area clamp | `last_scissor` (the values **after** the clamp) |
+
+⚠ **All three are per-ENCODER and must be dropped whenever a new `WGPURenderPassEncoder` begins**
+— `reset_encoder_redundancy()`, called at both `BeginRenderPass` sites and at the push-constant-ring
+mid-pass restart. A fresh encoder starts with the default full-attachment viewport and scissor and
+no pipeline, and **the restart path deliberately restores neither the viewport nor the scissor**, so
+a cache surviving that boundary would skip the very call that re-establishes them and draw the rest
+of the pass at the attachment's extents. The restart also rebinds the **base** pipeline handle, and
+records exactly that, so the next strip draw re-selects its variant.
+
+
 Pipelines: on web `PipelineHashMapRD` compiles inline (RL-043), so the first draw of a new mobile
 variant waited ~130 ms for Dawn's GPU-process compile while the main thread was idle (rAF busy < 1 ms).
 `RDD::pipeline_creation_set_deferred` + `pipeline_is_ready` let non-blocking requests use
