@@ -58,10 +58,10 @@ RenderingServer *RenderingServer::create() {
 	return nullptr;
 }
 
-Array RenderingServer::_texture_debug_usage_bind() {
+TypedArray<Dictionary> RenderingServer::_texture_debug_usage_bind() {
 	List<RenderingServerTypes::TextureInfo> list;
 	texture_debug_usage(&list);
-	Array arr;
+	TypedArray<Dictionary> arr;
 	for (const RenderingServerTypes::TextureInfo &E : list) {
 		Dictionary dict;
 		dict["texture"] = E.texture;
@@ -2298,6 +2298,10 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("texture_rd_create", "rd_texture", "layer_type"), &RenderingServer::texture_rd_create, DEFVAL(RSE::TEXTURE_LAYERED_2D_ARRAY));
 	ClassDB::bind_method(D_METHOD("texture_get_rd_texture", "texture", "srgb"), &RenderingServer::texture_get_rd_texture, DEFVAL(false));
 	ClassDB::bind_method(D_METHOD("texture_get_native_handle", "texture", "srgb"), &RenderingServer::texture_get_native_handle, DEFVAL(false));
+	// ⚠ The C++ API has existed since 3.x; only the scripting bind was missing, so a
+	// tool asking `RenderingServer.has_method("texture_debug_usage")` got false and had
+	// no way at all to enumerate texture memory from a running game.
+	ClassDB::bind_method(D_METHOD("texture_debug_usage"), &RenderingServer::_texture_debug_usage_bind);
 
 	BIND_ENUM_CONSTANT(RSE::TEXTURE_TYPE_2D);
 	BIND_ENUM_CONSTANT(RSE::TEXTURE_TYPE_LAYERED);

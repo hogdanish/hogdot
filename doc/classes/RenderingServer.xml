@@ -3921,6 +3921,13 @@
 				[b]Note:[/b] If using only the rendering device renderer, it's recommend to use [method RenderingDevice.texture_create_from_extension] together with [method RenderingServer.texture_rd_create], rather than this method. This way, the texture's format and usage can be controlled more effectively.
 			</description>
 		</method>
+		<method name="texture_debug_usage">
+			<return type="Dictionary[]" />
+			<description>
+				Returns a list of every texture the rendering server currently holds, one [Dictionary] per texture with the keys [code]texture[/code] ([RID]), [code]width[/code], [code]height[/code], [code]depth[/code], [code]format[/code], [code]bytes[/code] and [code]path[/code].
+				Intended for debugging and profiling video memory use. [code]bytes[/code] is the texture's own size in VRAM, and [code]path[/code] is its resource path when it has one.
+			</description>
+		</method>
 		<method name="texture_drawable_blit_rect">
 			<return type="void" />
 			<param index="0" name="textures" type="RID[]" />

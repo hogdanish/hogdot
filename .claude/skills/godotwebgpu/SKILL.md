@@ -332,7 +332,7 @@ unchanged and byte-compatible.
 ```
 __cgPerf.version        1
 __cgPerf.build          { engine_commit, pipeline_id, threads, adapter{vendor,architecture,device,description} }
-__cgPerf.counters       live getter over the heap; 19 monotonic doubles (see the header's Counter enum)
+__cgPerf.counters       live getter over the heap; 20 monotonic doubles (see the header's Counter enum)
 __cgPerf.frames         live getter → { head, cap: 3600, stride: 13, count, buf: Float64Array }
 __cgPerf.frames_schema  13 names, fixed order, index == column
 __cgPerf.compiles       plain array, cap 512, { t, frame, kind: render|compute|module, label, ms, translate_ms, baked }
@@ -363,6 +363,18 @@ game repo reads this channel; do not restate it here.
   behind. Its `baked=0/0` is structural, not a measurement — no shader has loaded yet.
 - The **second** is emitted once, ~3 s after the first `begin_segment`, and is the only line
   carrying a true baked ratio. Same `[CGPERF] ` prefix on purpose, so one grep finds both.
+  ⚠ Its `rd_miss=` field is **not** redundant with `baked=` (added 2026-09-01). `baked_wgsl_miss`
+  counts containers that reached the driver without WGSL; `shader_rd_miss` counts `ShaderRD`
+  versions that found no container in either cache, which the driver structurally cannot see —
+  a container that never reaches it cannot be counted by it. Measured: a live boot printed a
+  `Shader cache miss for …` line and still reported `baked=335/335`. A nonzero `rd_miss` beside a
+  full `baked=` ratio means the bake is complete for what was baked and something was never baked.
+  ⚠ It is bumped on the miss itself, not inside the `is_print_verbose_enabled()` branch that
+  reports it, so it counts in a release run — the only kind the bench measures.
+  ⚠ It is the **one** counter fed from outside `drivers/webgpu/`, through
+  `cgperf_external_count()` (declared in `cgperf_channel.h`, defined beside the channel instance,
+  called from `servers/rendering/renderer_rd/shader_rd.cpp`). Keep that list short: anything the
+  driver can observe belongs on the driver side, where it costs no coupling.
 - ⚠ **The adapter's second field falls back to `architecture`.** Chrome leaves
   `GPUAdapterInfo.device` and `.description` empty for fingerprinting reasons on every platform
   measured (2026-08-30: `apple/metal-3` reports vendor and architecture, the other two `""`), so the

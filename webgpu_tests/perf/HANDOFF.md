@@ -182,3 +182,12 @@ a project opts in, or a pure removal of work.
 | `setPipeline` for the Uint16 strip variant, `setViewport` and `setScissorRect` are skipped when unchanged on the current encoder | The strip one ran on **every indexed draw of every strip mesh**. All three caches reset at every encoder boundary. |
 | Bind groups with byte-identical `(layout, entries)` are shared instead of recreated | `counters.bindgroups_created` still counts real creations only; hits are the new `counters.bindgroups_shared`. ⚠ Read the two together — `created + shared` is the number of uniform sets built, and only the ratio separates "the cache worked" from "the game built fewer sets". |
 | `thread_model = Multi-Threaded` is clamped to single-threaded on web with one `WARN_PRINT` | It used to abort in `getJsObject()` on the first frame of a threaded template, with nothing naming the setting. |
+### Two new instruments
+
+- **`RenderingServer.texture_debug_usage()`** is now bound to scripting (it was C++-only), returning
+  an array of dictionaries: `texture`, `width`, `height`, `depth`, `format`, `bytes`, `path`.
+- **`counters.shader_rd_miss`** counts every `ShaderRD` cache miss — the class the existing
+  `baked_wgsl_miss` structurally cannot see, because a container that never reaches the driver
+  cannot be counted by the driver. It is also on the second console line as `rd_miss=N`.
+  ⚠ It is bumped on the miss itself, not on the `print_verbose` that reports it, so it counts in a
+  non-verbose run too.

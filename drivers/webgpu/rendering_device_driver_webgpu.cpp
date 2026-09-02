@@ -89,6 +89,11 @@ EM_JS_DEPS(godot_webgpu_cgperf_deps, "$UTF8ToString");
 
 static CGPerfChannel _cgperf;
 
+// The one cross-module entry point onto the channel; see cgperf_channel.h.
+void cgperf_external_count(CGPerfChannel::Counter p_counter) {
+	_cgperf.count(p_counter);
+}
+
 // The page's performance.now(), not emscripten_get_now() — the two differ by
 // performance.timeOrigin on some build configurations and not others, so the
 // offset is measured once at install. See CGPerfChannel::time_origin_ms.
@@ -10852,9 +10857,15 @@ void RenderingDeviceDriverWebGPU::begin_segment(uint32_t p_frame_index, uint32_t
 		const uint32_t baked_miss = (uint32_t)_cgperf.counters[CGPerfChannel::C_BAKED_WGSL_MISS];
 		const uint32_t spv_hit = (uint32_t)_cgperf.counters[CGPerfChannel::C_SPV_WGSL_CACHE_HIT];
 		const uint32_t spv_miss = (uint32_t)_cgperf.counters[CGPerfChannel::C_SPV_WGSL_CACHE_MISS];
-		const String baked_line = vformat("[CGPERF] baked=%d/%d spv_wgsl=%d/%d engine=%s",
+		// ⚠ rd_miss is NOT redundant with baked=. It counts ShaderRD versions that
+		// found no compiled container in either cache — the class the driver cannot
+		// see, because such a container never reaches it. A boot can print
+		// `baked=335/335` and a nonzero rd_miss in the same session; that pair means
+		// the bake is complete for what was baked and something was never baked.
+		const uint32_t rd_miss = (uint32_t)_cgperf.counters[CGPerfChannel::C_SHADER_RD_MISS];
+		const String baked_line = vformat("[CGPERF] baked=%d/%d spv_wgsl=%d/%d engine=%s rd_miss=%d",
 				baked_hit, baked_hit + baked_miss, spv_hit, spv_hit + spv_miss,
-				String(GODOT_VERSION_HASH).left(12));
+				String(GODOT_VERSION_HASH).left(12), rd_miss);
 		const CharString baked_line_utf8 = baked_line.utf8();
 		EM_ASM({ console.log(UTF8ToString($0)); }, baked_line_utf8.get_data());
 	}

@@ -133,6 +133,15 @@ struct CGPerfChannel {
 		// ratio says whether a drop in creations came from the cache or from the
 		// game simply building fewer sets.
 		C_BINDGROUPS_SHARED,
+		// ShaderRD could not find a compiled container for a version in either
+		// shader cache and had to compile it. ⚠ This is a DIFFERENT class of miss
+		// from `baked_wgsl_miss`, which counts containers that reached the driver
+		// without WGSL — the driver structurally cannot see a container that never
+		// reached it at all. Measured 2026-09-01: a live boot printed a
+		// `Shader cache miss for …` line and still reported `baked=335/335`, which
+		// is why this exists. Bumped from servers/rendering/renderer_rd/shader_rd.cpp
+		// through cgperf_external_count().
+		C_SHADER_RD_MISS,
 		COUNTER_COUNT, // Must stay last.
 	};
 
@@ -208,6 +217,16 @@ struct CGPerfChannel {
 	void add(Counter p_counter, double p_amount) { counters[p_counter] += p_amount; }
 };
 
+// Bump one counter on the single channel instance from OUTSIDE drivers/webgpu/.
+// Defined in rendering_device_driver_webgpu.cpp, beside that instance.
+//
+// ⚠ The only reason this exists: some of what the channel must report happens in
+// engine code the driver cannot see. `shader_rd_miss` is the first — a container
+// that never reaches the driver cannot be counted by the driver, and that class
+// of miss was invisible to every existing counter. Keep this list short; anything
+// the driver CAN observe belongs on the driver side, where it costs no coupling.
+void cgperf_external_count(CGPerfChannel::Counter p_counter);
+
 // Newline-joined field names handed to the JS install. Kept beside the enums so
 // the two can only drift if someone edits one line and not the one below it.
 //
@@ -227,7 +246,7 @@ struct CGPerfChannel {
 	"compute_pipelines_created\nshader_modules_created\n" \
 	"bindgroup_layouts_created\nbindgroups_created\nencoder_splits\n" \
 	"translate_ms\nbindgroup_rebind_fail\noverride_translate_fallback\n" \
-	"bindgroups_shared"
+	"bindgroups_shared\nshader_rd_miss"
 
 // Drift guard. The JS side sizes its heap views from `names.length`, so a name
 // list that disagrees with its enum reads short (missing counters) or past the

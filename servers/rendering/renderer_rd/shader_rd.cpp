@@ -39,6 +39,13 @@
 #include "core/version.h"
 #include "servers/rendering/shader_include_db.h"
 
+#ifdef WEBGPU_ENABLED
+// The browser telemetry channel's one cross-module counter. A ShaderRD cache miss
+// is the class of miss the WebGPU driver structurally cannot see: the container
+// never reaches it. See CGPerfChannel::C_SHADER_RD_MISS.
+#include "drivers/webgpu/cgperf_channel.h"
+#endif
+
 #define ENABLE_SHADER_CACHE 1
 
 void ShaderRD::_add_stage(const char *p_code, StageType p_stage_type) {
@@ -630,6 +637,12 @@ bool ShaderRD::_load_from_cache(Version *p_version, int p_group) {
 	}
 
 	if (f.is_null()) {
+#ifdef WEBGPU_ENABLED
+		// ⚠ Counted on the MISS, not inside the verbose branch below. The print is
+		// the verbose rendering of this event, not the event; a release browser run
+		// — the only kind the bench measures — logs nothing and must still count.
+		cgperf_external_count(CGPerfChannel::C_SHADER_RD_MISS);
+#endif
 		if (is_print_verbose_enabled()) {
 			const String &sha1 = _version_get_sha1(p_version);
 			print_verbose(vformat("Shader cache miss for %s%s", name.path_join(group_sha256[p_group]).path_join(sha1), _version_get_origin_hint(p_version)));
