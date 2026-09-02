@@ -205,3 +205,45 @@ pack. Read at BAKE time by the export plugin, so it must be set before the expor
   export cache key, deliberately, so the two modes can never serve each other's containers.
 - It is ignored (with a warning) when `tint_convert_cli` is missing or stale, because a container
   with neither WGSL nor SPIR-V would be empty.
+
+### What r9 measured on the game (2026-09-01, 22:00)
+
+Engine `ba8e0c5ff7`, coherent set (editor + `tint_convert_cli` + all four templates, `production=yes`
+on release). Game at `deacd433`, release nothreads export, `cg bench web idle --window 20`.
+
+⚠ **Read the frame numbers as unattributed.** Seven game-side commits landed between the 20:48
+baseline (`917ca7d3`) and this measurement (`deacd433`) — including the glass-copy paper cuts, the
+crosshair's `filter_linear_mipmap` removal and water's no-screen-read tier — every one of which
+removes render passes. The `48-49 → 38-40` drop in `render_passes` p50 is theirs, not the engine's.
+The release templates also carry `production=yes` (thin LTO) where the baseline's did not. Nothing in
+the busy series below is a clean engine A/B, and none of it should be quoted as one.
+
+| measurement | baseline (20:48, game `917ca7d3`) | r9 (22:00, game `deacd433`) |
+| --- | --- | --- |
+| `web.harness.busy` p50 | 3.8 / 4.8 ms | 4.9 / 5.4 / 5.4 / 4.9 ms |
+| `render_passes` p50 | 48 / 49 | 39 / 40 / 38 / 39 |
+| `bindgroups_created` (56 s) | 25 913 / 17 095 | 24 981 / 21 326 / 22 254 / 20 747 |
+| `uncaptured_error`, `device_lost`, `bindgroup_rebind_fail` | 0 | 0 |
+| `baked_wgsl_hit` / total | 822 / 845 | 826 / 849 |
+
+**The two clean A/Bs, both at game `deacd433` with only the named setting moved:**
+
+| A/B | off | on |
+| --- | --- | --- |
+| `rendering/2d/backbuffer/max_mipmaps` `0` → `5` | `render_passes` p50 **39** | **34** (−5/frame, at a 2400×1998 canvas) |
+| `rendering/rendering_device/webgpu_wgsl_only_containers` `false` → `true` | `index.pck` **90 099 648 B**, `webgpu.cache` **73 359 016 B** in 140 entries | **27 179 360 B**, **10 438 920 B** in 139 entries |
+
+The WGSL-only saving is **62.9 MB, −69.8 % of the pack and −85.8 % of the shader cache**, and the two
+deltas agree to 200 bytes — the whole reduction is the dropped SPIR-V. `baked_wgsl_hit` is unchanged
+at 826/849, `spv_wgsl_cache_miss` unchanged at 44 (the 23 shaders whose WGSL bake fails keep their
+SPIR-V and still translate live, exactly as intended), and `uncaptured_error` is 0. ⚠ One container
+fewer appears in the WGSL-only pack (139 vs 140) with no runtime difference in any counter; unexplained,
+and worth a second look before this setting ships on.
+
+**`bindgroups_shared` was 54-68 out of 20 000-25 000 creations** — 0.3 %. The content cache is correct
+and costs almost nothing, but this workload has almost no duplicate bind groups to find: the RD layer's
+own `UniformSetCacheRD` already dedupes upstream of the driver. That is a measured negative result, not
+a pending win — do not budget for it.
+
+`shader_rd_miss` reads **2** on the game (against 22 on the fork's own coverage project), so the game's
+bake now covers all but two versions.
