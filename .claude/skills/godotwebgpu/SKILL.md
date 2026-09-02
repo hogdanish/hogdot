@@ -175,6 +175,12 @@ Four sites needed gating behind
 and reasoning: **RL-043**; the shipping guide is `.claude/work/plans/THREADS.md`.
 
 ⚠ `proxy_to_pthread=yes` and `RENDER_SEPARATE_THREAD` are unsupported and not planned.
+⚠ **`thread_model = Multi-Threaded` is CLAMPED, not fatal, since 2026-09-01.** Mainline's only guard
+is `#if !defined(THREADS_ENABLED)`, which the threaded template does not trip — so that setting used
+to spawn a render thread that aborted in `getJsObject()` on its first frame, in the browser, with
+nothing in the engine's logs naming the setting. `main/main.cpp` now forces
+`separate_thread_render = 0` under `WEB_ENABLED` with one `WARN_PRINT`. Still unsupported; now
+unsupported survivably.
 
 ⚠ **The fork's own docs were right, and the research doc's claim that they overstate the limitation is
 wrong.** `site/CORRECTNESS_AND_COMPATIBILITY.md:289` says *rendering* is main-thread-only and

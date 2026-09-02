@@ -2787,6 +2787,22 @@ Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_ph
 #if !defined(THREADS_ENABLED)
 	separate_thread_render = 0;
 #endif
+#ifdef WEB_ENABLED
+	// ⚠ Rendering is pinned to the browser's main thread, permanently and by
+	// construction: a GPUDevice is a JS object owned by one realm, a wasm pthread is
+	// a Worker with its own realm and object table, and a wgpu*() call from that
+	// worker aborts inside emdawnwebgpu's getJsObject(). No lock fixes it — it is
+	// not a data race — and no browser ships cross-realm GPUDevice sharing.
+	//
+	// The threaded template defines THREADS_ENABLED, so the guard above does not
+	// catch it: a project shipping `thread_model = Multi-Threaded` on that template
+	// would spawn a render thread and abort on its first frame. Clamp it here rather
+	// than crash there.
+	if (separate_thread_render != 0) {
+		WARN_PRINT("Multi-Threaded rendering is not supported on the web (the GPU device belongs to the main thread's realm); falling back to Single-Safe.");
+		separate_thread_render = 0;
+	}
+#endif
 	OS::get_singleton()->_separate_thread_render = separate_thread_render;
 
 	/* Determine audio and video drivers */
