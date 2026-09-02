@@ -191,3 +191,17 @@ a project opts in, or a pure removal of work.
   cannot be counted by the driver. It is also on the second console line as `rd_miss=N`.
   ⚠ It is bumped on the miss itself, not on the `print_verbose` that reports it, so it counts in a
   non-verbose run too.
+
+### One more setting: WGSL-only shader containers
+
+`rendering/rendering_device/webgpu_wgsl_only_containers` (default **false**) drops the SPIR-V
+payload from every baked container whose WGSL bake succeeded — roughly half the baked bytes in the
+pack. Read at BAKE time by the export plugin, so it must be set before the export that bakes.
+
+- ⚠ **It removes the runtime's fallback.** A stage whose baked WGSL fails to decompress has nothing
+  left to translate from and the shader fails to create, where an ordinary baked container would
+  degrade to live Tint. This is a pack-size decision, not a speed one.
+- ⚠ **The first export after flipping it re-bakes everything** — the bake state is part of the
+  export cache key, deliberately, so the two modes can never serve each other's containers.
+- It is ignored (with a warning) when `tint_convert_cli` is missing or stale, because a container
+  with neither WGSL nor SPIR-V would be empty.

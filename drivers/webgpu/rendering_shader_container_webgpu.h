@@ -54,6 +54,20 @@ public:
 	// requires the BGLs and modules of one shader to come from consistent WGSL).
 	static constexpr uint32_t FLAG_HAS_BAKED_WGSL = 0x1;
 
+	// header_data.flags bit: the SPIR-V payload of every stage was dropped at bake
+	// time because the baked WGSL covers them all. Implies FLAG_HAS_BAKED_WGSL.
+	//
+	// ⚠ There is NO fallback for a container with this bit: if its WGSL fails to
+	// decompress at runtime, the shader cannot be created at all. That is why it is
+	// off by default and behind a project setting — the trade is roughly half the
+	// baked-shader bytes in the pack against losing the safety net.
+	//
+	// ⚠ Safe only because the baker translates with `tint_convert_cli --overrides`,
+	// so a baked container's WGSL carries `@id(N) override` declarations and the
+	// driver's `has_override_declarations` path specializes at pipeline creation.
+	// A frozen bake would need the SPIR-V back to build specialized modules.
+	static constexpr uint32_t FLAG_WGSL_ONLY = 0x2;
+
 	struct HeaderData {
 		uint32_t push_constant_bind_group = NO_PUSH_CONSTANTS; // UINT32_MAX = no push constants.
 		uint32_t push_constant_binding = 0;
@@ -72,6 +86,8 @@ public:
 protected:
 	HeaderData header_data;
 	Vector<BakedStageWGSL> stage_wgsl;
+	// Bake-time request, not serialized — FLAG_WGSL_ONLY is what survives into the file.
+	bool wgsl_only = false;
 
 	// --- RenderingShaderContainer overrides ---
 
@@ -99,9 +115,16 @@ public:
 	// Store bake-time WGSL for one stage (editor side). Compresses with zstd.
 	bool bake_stage_wgsl(uint32_t p_index, const String &p_wgsl);
 	// Set FLAG_HAS_BAKED_WGSL if and only if every stage has WGSL; otherwise
-	// drop any partial bakes (all-or-nothing per shader).
+	// drop any partial bakes (all-or-nothing per shader). When wgsl_only is set and
+	// the bake succeeded, also drops every stage's SPIR-V payload and sets
+	// FLAG_WGSL_ONLY.
 	void finalize_baked_wgsl();
 	bool has_baked_wgsl() const { return (header_data.flags & FLAG_HAS_BAKED_WGSL) != 0; }
+	bool is_wgsl_only() const { return (header_data.flags & FLAG_WGSL_ONLY) != 0; }
+	// Bake-time only, set by the export plugin from the project setting
+	// `rendering/rendering_device/webgpu_wgsl_only_containers`. Read once on the main
+	// thread and pushed down, because finalize runs on a WorkerThreadPool task.
+	void set_wgsl_only(bool p_wgsl_only) { wgsl_only = p_wgsl_only; }
 	// Malloc'd, null-terminated WGSL for a stage, or nullptr when absent or
 	// corrupt. The caller owns the allocation (free()).
 	char *get_stage_wgsl_alloc(uint32_t p_index) const;

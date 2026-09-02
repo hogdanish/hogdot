@@ -854,7 +854,12 @@ bool RenderingShaderContainer::from_bytes(const PackedByteArray &p_bytes) {
 		shader.code_compression_flags = header.code_compression_flags;
 		shader.code_decompressed_size = header.code_decompressed_size;
 		shader.code_compressed_bytes.resize(header.code_compressed_size);
-		memcpy(shader.code_compressed_bytes.ptrw(), &bytes_ptr[bytes_offset], header.code_compressed_size);
+		if (header.code_compressed_size > 0) {
+			// A zero-size payload is legal — the WebGPU container can drop its SPIR-V when
+			// baked WGSL covers every stage — and `ptrw()` on an empty Vector is null, which
+			// memcpy may not be handed even with a zero count.
+			memcpy(shader.code_compressed_bytes.ptrw(), &bytes_ptr[bytes_offset], header.code_compressed_size);
+		}
 		bytes_offset = aligned_to(bytes_offset + header.code_compressed_size, alignment);
 		bytes_offset += _from_bytes_shader_extra_data(&bytes_ptr[bytes_offset], i);
 	}
@@ -952,7 +957,9 @@ PackedByteArray RenderingShaderContainer::to_bytes() const {
 		header.code_compression_flags = shader.code_compression_flags;
 		header.code_decompressed_size = shader.code_decompressed_size;
 		bytes_offset += sizeof(ShaderHeader);
-		memcpy(&bytes.ptrw()[bytes_offset], shader.code_compressed_bytes.ptr(), shader.code_compressed_bytes.size());
+		if (!shader.code_compressed_bytes.is_empty()) {
+			memcpy(&bytes.ptrw()[bytes_offset], shader.code_compressed_bytes.ptr(), shader.code_compressed_bytes.size());
+		}
 		bytes_offset = aligned_to(bytes_offset + shader.code_compressed_bytes.size(), alignment);
 		bytes_offset += _to_bytes_shader_extra_data(&bytes_ptr[bytes_offset], i);
 	}

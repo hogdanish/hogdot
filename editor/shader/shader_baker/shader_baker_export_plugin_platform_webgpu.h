@@ -57,10 +57,14 @@ class RenderingShaderContainerFormatWebGPUBaked : public RenderingShaderContaine
 	// Empty when WGSL baking is unavailable (missing or stale CLI) — containers
 	// then bake SPIR-V only.
 	String cli_path;
+	// `rendering/rendering_device/webgpu_wgsl_only_containers`, read once on the main
+	// thread: every container is finalized on a WorkerThreadPool task, so the setting
+	// is pushed down rather than looked up there.
+	bool wgsl_only = false;
 
 public:
-	explicit RenderingShaderContainerFormatWebGPUBaked(const String &p_cli_path) :
-			cli_path(p_cli_path) {}
+	RenderingShaderContainerFormatWebGPUBaked(const String &p_cli_path, bool p_wgsl_only) :
+			cli_path(p_cli_path), wgsl_only(p_wgsl_only) {}
 	virtual Ref<RenderingShaderContainer> create_container() const override;
 };
 
@@ -82,7 +86,11 @@ public:
 	virtual String get_cache_key_suffix() const override { return cache_key_suffix; }
 
 private:
-	// "wgsl-<pipeline id>" when the CLI can bake WGSL, "spv" when the bake degrades.
+	// "wgsl-<pipeline id>" when the CLI can bake WGSL, "spv" when the bake degrades,
+	// with "-wgslonly" appended when the SPIR-V is dropped. ⚠ The bake state MUST be
+	// part of this key: the export platform caches customized resources per plugin
+	// hash and never re-validates them, so without it one export in the other mode
+	// would be reused forever (the 2026-09-01 stale-container failure).
 	String cache_key_suffix;
 
 	// WebGPU has no input attachments and no subpass reads — the driver flattens

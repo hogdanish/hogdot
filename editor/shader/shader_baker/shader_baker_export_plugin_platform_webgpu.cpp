@@ -30,6 +30,7 @@
 
 #include "shader_baker_export_plugin_platform_webgpu.h"
 
+#include "core/config/project_settings.h"
 #include "core/io/dir_access.h"
 #include "core/io/file_access.h"
 #include "core/io/json.h"
@@ -113,6 +114,7 @@ Ref<RenderingShaderContainer> RenderingShaderContainerFormatWebGPUBaked::create_
 	Ref<RenderingShaderContainerWebGPUBaked> container;
 	container.instantiate();
 	container->set_cli_path(cli_path);
+	container->set_wgsl_only(wgsl_only);
 	return container;
 }
 
@@ -138,16 +140,34 @@ RenderingShaderContainerFormat *ShaderBakerExportPluginPlatformWebGPU::create_sh
 		}
 	}
 
+	// ⚠ Opt-in, and it removes the runtime's only fallback: a WGSL-only container whose
+	// baked text fails to decompress cannot create its shader at all. It is worth roughly
+	// half the baked bytes in a pack, so it is a size decision, not a speed one. Only
+	// honored when WGSL baking is actually available — a SPIR-V-only bake with its SPIR-V
+	// dropped would be an empty container.
+	bool wgsl_only = GLOBAL_DEF("rendering/rendering_device/webgpu_wgsl_only_containers", false);
+
 	if (!unavailable_reason.is_empty()) {
 		WARN_PRINT(vformat("Shader baker: baking SPIR-V only, without WGSL — %s. Rebuild the CLI with drivers/webgpu/tint_cli/build.sh to bake WGSL and remove runtime shader translation.", unavailable_reason));
 		cli_path = String();
 		cache_key_suffix = "spv";
+		if (wgsl_only) {
+			WARN_PRINT("Shader baker: 'rendering/rendering_device/webgpu_wgsl_only_containers' is on but WGSL baking is unavailable; keeping the SPIR-V (a container with neither would be empty).");
+			wgsl_only = false;
+		}
 	} else {
 		cache_key_suffix = "wgsl-" + String(TINT_BAKE_PIPELINE_ID);
-		print_line(vformat("Shader baker: baking WGSL with %s (pipeline id %s).", cli_path, String(TINT_BAKE_PIPELINE_ID)));
+		if (wgsl_only) {
+			// ⚠ Part of the cache key, not just a flag: the export platform caches
+			// customized resources by a per-plugin hash and never re-validates them, so a
+			// shared key would serve a SPIR-V-carrying container to a WGSL-only export or
+			// the reverse, forever and silently.
+			cache_key_suffix += "-wgslonly";
+		}
+		print_line(vformat("Shader baker: baking WGSL with %s (pipeline id %s)%s.", cli_path, String(TINT_BAKE_PIPELINE_ID), wgsl_only ? String(", WGSL only (SPIR-V dropped)") : String()));
 	}
 
-	return memnew(RenderingShaderContainerFormatWebGPUBaked(cli_path));
+	return memnew(RenderingShaderContainerFormatWebGPUBaked(cli_path, wgsl_only));
 }
 
 bool ShaderBakerExportPluginPlatformWebGPU::matches_driver(const String &p_driver) {

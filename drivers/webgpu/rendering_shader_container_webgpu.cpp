@@ -196,8 +196,26 @@ void RenderingShaderContainerWebGPU::finalize_baked_wgsl() {
 
 	if (all_baked) {
 		header_data.flags |= FLAG_HAS_BAKED_WGSL;
+		if (wgsl_only) {
+			// ⚠ Drops the SPIR-V for every stage. Legal only because the baker translates
+			// with `--overrides`, so this container's WGSL carries `@id(N) override`
+			// declarations and the driver specializes at pipeline creation
+			// (`has_override_declarations`) rather than by patching SPIR-V and re-running
+			// Tint. The only consumer of `WGShader::stage_spirv` is
+			// `_create_module_with_spec_constants`, which that path never reaches.
+			//
+			// ⚠ And it removes the fallback: a stage whose WGSL fails to decompress at
+			// runtime has nothing left to translate from, and the shader fails to create
+			// rather than degrading. FLAG_WGSL_ONLY is what tells the driver to say so.
+			header_data.flags |= FLAG_WGSL_ONLY;
+			for (int64_t i = 0; i < shaders.size(); i++) {
+				shaders.write[i].code_compressed_bytes = PackedByteArray();
+				shaders.write[i].code_compression_flags = 0;
+				shaders.write[i].code_decompressed_size = 0;
+			}
+		}
 	} else {
-		header_data.flags &= ~FLAG_HAS_BAKED_WGSL;
+		header_data.flags &= ~(FLAG_HAS_BAKED_WGSL | FLAG_WGSL_ONLY);
 		stage_wgsl.clear();
 	}
 }

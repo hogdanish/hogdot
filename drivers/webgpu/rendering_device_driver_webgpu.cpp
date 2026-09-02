@@ -4968,15 +4968,27 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 		// The code_compressed_bytes holds raw SPIR-V (no compression — code_decompressed_size == 0).
 		const PackedByteArray &spv_bytes = s.code_compressed_bytes;
 		if (spv_bytes.is_empty()) {
-			error_text = "WebGPU: empty SPIR-V for shader stage.";
-			break;
-		}
-		if (spv_bytes.size() % 4 != 0) {
+			// ⚠ A WGSL-only container (FLAG_WGSL_ONLY) deliberately ships no SPIR-V: its
+			// baked WGSL is the whole shader. Empty is then correct, and `use_baked_wgsl`
+			// must be true — if the baked text failed to decompress above, this container
+			// has nothing left to fall back to and the shader cannot be created at all.
+			if (!use_baked_wgsl) {
+				error_text = wg_container->is_wgsl_only()
+						? "WebGPU: a WGSL-only shader container's baked WGSL could not be used, and it carries no SPIR-V to fall back to."
+						: "WebGPU: empty SPIR-V for shader stage.";
+				break;
+			}
+		} else if (spv_bytes.size() % 4 != 0) {
 			error_text = "WebGPU: SPIR-V size must be a multiple of 4.";
 			break;
 		}
 
 		// Store raw SPIR-V for potential re-conversion with specialization constants.
+		// ⚠ Empty for a WGSL-only container. Its only consumer is
+		// _create_module_with_spec_constants, guarded by an is_empty() check at each of
+		// its three call sites — and a baked shader never reaches that path anyway,
+		// because `--overrides` WGSL sets has_override_declarations and specialization
+		// becomes WGPUConstantEntry values at pipeline creation.
 		shader->stage_spirv[(int)s.shader_stage] = spv_bytes;
 
 		// emdawnwebgpu does NOT support WGPUShaderSourceSPIRV — it's a thin wrapper

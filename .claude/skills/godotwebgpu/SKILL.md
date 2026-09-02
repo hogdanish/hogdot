@@ -218,6 +218,32 @@ FILMIC produce SDR-range output and clamp first), `Viewport.use_hdr_2d` on every
 glow SOFTLIGHT or colour adjustment. `request_hdr_output` is read only at startup;
 `DisplayServer.window_request_hdr_output()` is the runtime channel. Tell any consumer this.
 
+### WGSL-only shader containers (opt-in, added 2026-09-01)
+
+`rendering/rendering_device/webgpu_wgsl_only_containers` (default **false**) makes the shader baker
+drop every stage's SPIR-V payload from a container whose WGSL bake succeeded, and set
+`FLAG_WGSL_ONLY` (bit 1) beside `FLAG_HAS_BAKED_WGSL`. Roughly half the baked bytes in a pack.
+
+- **Why it is safe:** the only consumer of `WGShader::stage_spirv` is
+  `_create_module_with_spec_constants`, and a baked shader never reaches it — the baker translates
+  with `tint_convert_cli --overrides`, so the WGSL carries `@id(N) override` declarations,
+  `has_override_declarations` is true, and specialization becomes `WGPUConstantEntry` values at
+  pipeline creation. All three call sites are also guarded by `is_empty()`.
+- ⚠ **It removes the fallback.** A stage whose baked WGSL fails to decompress at runtime has
+  nothing left to translate from and the shader **fails to create**, where an ordinary baked
+  container would have degraded to live Tint. `FLAG_WGSL_ONLY` exists so the driver's error says
+  that rather than "empty SPIR-V for shader stage".
+- ⚠ **The bake state is part of the export cache key** (`wgsl-<pipeline id>-wgslonly`). The export
+  platform caches customized resources by a per-plugin hash and never re-validates them, so a shared
+  key would serve a SPIR-V-carrying container to a WGSL-only export, or the reverse, forever and
+  silently — the same shape as the 2026-09-01 stale-container defect.
+- The setting is honored only when WGSL baking is actually available; with a missing or stale
+  `tint_convert_cli` it warns and keeps the SPIR-V, because a container with neither is empty.
+- ⚠ Registered from the **editor** side (the export plugin), so unlike the `webgpu_*` runtime
+  settings it does appear where a project can set it — but it still only matters at bake time.
+- `HeaderData` is unchanged in size: `flags` was already a `uint32_t`. ⚠ It must stay exactly this
+  size, because `from_bytes()` parses the header extra block before it validates `format_version`.
+
 ### The SDR canvas format is the browser's, not a constant (added 2026-09-01)
 
 `_swap_chain_pick_format()` returns `navigator.gpu.getPreferredCanvasFormat()` for the SDR case
