@@ -460,8 +460,10 @@ public:
 
 	/// Create a swap chain for a browser canvas surface.
 	// Chooses the swap-chain texture format for a surface: RGBA16Float when HDR was both requested
-	// and granted by the browser, BGRA8Unorm otherwise. Called at creation and again on every
-	// resize, so an HDR toggle takes effect without recreating the surface.
+	// and granted by the browser, otherwise whatever `navigator.gpu.getPreferredCanvasFormat()`
+	// answered (bgra8unorm or rgba8unorm — the browser converts every presented frame when the two
+	// disagree). Called at creation and again on every resize, so an HDR toggle takes effect
+	// without recreating the surface.
 	WGPUTextureFormat _swap_chain_pick_format(RenderingContextDriver::SurfaceID p_surface) const;
 
 	virtual SwapChainID swap_chain_create(RenderingContextDriver::SurfaceID p_surface) override final;
@@ -471,7 +473,8 @@ public:
 	virtual FramebufferID swap_chain_acquire_framebuffer(CommandQueueID p_cmd_queue, SwapChainID p_swap_chain, bool &r_resize_required) override final;
 	/// Get the render pass associated with a swap chain.
 	virtual RenderPassID swap_chain_get_render_pass(SwapChainID p_swap_chain) override final;
-	/// Get the pixel format of a swap chain (always BGRA8Unorm for WebGPU).
+	/// Get the pixel format of a swap chain — the browser's preferred canvas format, or
+	/// RGBA16Float while HDR output is granted.
 	virtual DataFormat swap_chain_get_format(SwapChainID p_swap_chain) override final;
 	/// Always the sRGB non-linear Rec.709 space — WebGPU canvases are SDR sRGB.
 	virtual ColorSpace swap_chain_get_color_space(SwapChainID p_swap_chain) override final;

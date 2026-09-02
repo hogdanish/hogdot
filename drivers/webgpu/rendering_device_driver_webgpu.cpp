@@ -1302,6 +1302,27 @@ RenderingDeviceDriverWebGPU::~RenderingDeviceDriverWebGPU() {
 // GENERIC
 // =============================================================================
 
+// The SDR canvas format the browser asked for, resolved once. `getPreferredCanvasFormat()` is a
+// static property of the platform, not of a canvas or a device, so caching it is safe and the JS
+// crossing is paid once per process instead of once per swap-chain resize.
+//
+// ⚠ Guessing this wrong is invisible and costs a full-screen conversion on every presented frame:
+// the browser accepts either format and silently converts to the one the compositor wants. The
+// spec exists precisely so an application does not have to guess. Measured answers, 2026-09-01:
+// Chrome on Apple silicon reports `bgra8unorm` (so this changes nothing there — the old hardcoded
+// value was already right), Chrome on Android reports `rgba8unorm` (so it was wrong there).
+static WGPUTextureFormat _webgpu_preferred_canvas_format() {
+	static bool resolved = false;
+	static WGPUTextureFormat format = WGPUTextureFormat_BGRA8Unorm;
+	if (!resolved) {
+		resolved = true;
+		format = (godot_js_display_preferred_canvas_format() != 0)
+				? WGPUTextureFormat_RGBA8Unorm
+				: WGPUTextureFormat_BGRA8Unorm;
+	}
+	return format;
+}
+
 // Fill window.__cgPerf.build and emit the greppable boot line. Called from
 // initialize() once the adapter identity and the device listeners are up.
 void RenderingDeviceDriverWebGPU::_cgperf_publish_build() {
@@ -1353,12 +1374,17 @@ void RenderingDeviceDriverWebGPU::_cgperf_publish_build() {
 	// that is supposed to identify the machine a report came from. The full four
 	// fields are on __cgPerf.build.adapter regardless.
 	const String adapter_second = ident.device.is_empty() ? (ident.architecture.is_empty() ? String("unknown") : ident.architecture) : ident.device;
-	const String boot_line = vformat("[CGPERF] build engine=%s pipeline_id=%s baked=0/0 threads=%d adapter=%s/%s",
+	// canvas_fmt is the browser's own getPreferredCanvasFormat() answer, not the format finally
+	// configured: HDR can still promote it to rgba16float at the first swap_chain_resize, which the
+	// `reconfigure` event's `fmt=`/`hdr=` fields report. It is on this line because it identifies
+	// the machine's presentation path, beside the adapter, and because it is answerable at init.
+	const String boot_line = vformat("[CGPERF] build engine=%s pipeline_id=%s baked=0/0 threads=%d adapter=%s/%s canvas_fmt=%s",
 			engine_commit.left(12),
 			pipeline_id,
 			threads,
 			ident.vendor.is_empty() ? String("unknown") : ident.vendor,
-			adapter_second);
+			adapter_second,
+			_webgpu_preferred_canvas_format() == WGPUTextureFormat_RGBA8Unorm ? String("rgba8unorm") : String("bgra8unorm"));
 	const CharString boot_line_utf8 = boot_line.utf8();
 	EM_ASM({ console.log(UTF8ToString($0)); }, boot_line_utf8.get_data());
 }
@@ -4205,15 +4231,19 @@ void RenderingDeviceDriverWebGPU::command_buffer_execute_secondary(CommandBuffer
 // =============================================================================
 
 // RGBA16Float is the only swap-chain format here that can carry a colour component above 1.0, so
-// it is what "HDR enabled" means concretely. BGRA8Unorm stays the SDR resting state: 8-bit UNORM
-// cannot express an extended value, which is why chaining `extended` tone mapping unconditionally
-// at surface creation is inert until this flips.
+// it is what "HDR enabled" means concretely. The browser's preferred canvas format stays the SDR
+// resting state: 8-bit UNORM cannot express an extended value, which is why chaining `extended`
+// tone mapping unconditionally at surface creation is inert until this flips.
 WGPUTextureFormat RenderingDeviceDriverWebGPU::_swap_chain_pick_format(RenderingContextDriver::SurfaceID p_surface) const {
 	const bool hdr_requested = context_driver->surface_get_hdr_output_enabled(p_surface);
 	if (hdr_requested && godot_js_display_hdr_supported() != 0) {
 		return WGPUTextureFormat_RGBA16Float;
 	}
-	return WGPUTextureFormat_BGRA8Unorm; // Standard format for browser canvas.
+	// ⚠ Both branches below reach _wgpu_to_data_format(), which the swap chain's render pass
+	// attachment and swap_chain_get_format() are derived from — so the RD layer builds every
+	// pipeline against whichever of the two was chosen. Adding a format here without a
+	// _wgpu_to_data_format() case makes the attachment DATA_FORMAT_MAX and rejects every pipeline.
+	return _webgpu_preferred_canvas_format();
 }
 
 RDD::SwapChainID RenderingDeviceDriverWebGPU::swap_chain_create(RenderingContextDriver::SurfaceID p_surface) {

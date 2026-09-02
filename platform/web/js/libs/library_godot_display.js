@@ -478,6 +478,34 @@ const GodotDisplay = {
 	},
 
 	/*
+	 * The format the browser wants a WebGPU canvas configured with, as an enum rather than a
+	 * string: 0 = bgra8unorm (the historical hardcoded choice and the safe fallback), 1 =
+	 * rgba8unorm.
+	 *
+	 * `navigator.gpu.getPreferredCanvasFormat()` is the only way to learn which of the two the
+	 * platform can present without an extra copy; it is answerable before any canvas exists, so
+	 * the driver can call it while picking the swap-chain format. Chrome on Apple silicon
+	 * answers bgra8unorm and Android answers rgba8unorm, which is exactly the case the old
+	 * hardcoded BGRA8Unorm paid a full-screen conversion blit for on every frame.
+	 *
+	 * Returns 0 on anything unexpected -- no WebGPU, an older browser without the method -- so
+	 * the caller degrades to the format it has always used.
+	 */
+	godot_js_display_preferred_canvas_format__proxy: 'sync',
+	godot_js_display_preferred_canvas_format__sig: 'i',
+	godot_js_display_preferred_canvas_format: function () {
+		try {
+			if (typeof navigator === 'undefined' || !navigator.gpu
+				|| typeof navigator.gpu.getPreferredCanvasFormat !== 'function') {
+				return 0;
+			}
+			return (navigator.gpu.getPreferredCanvasFormat() === 'rgba8unorm') ? 1 : 0;
+		} catch (e) {
+			return 0;
+		}
+	},
+
+	/*
 	 * Whether an extended-range (HDR) canvas is worth asking for at all: this browser can express
 	 * the request, and this display claims a high dynamic range.
 	 *

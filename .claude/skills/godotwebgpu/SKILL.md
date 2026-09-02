@@ -191,7 +191,8 @@ The canvas can carry values above 1.0, and hogdot drives it. Three facts are loa
   ⚠ Chaining it into the *surface descriptor* aborts the runtime: emdawnwebgpu's
   `wgpuInstanceCreateSurface` asserts its chain is exactly the canvas selector. HDR therefore flips
   format and tone mapping together in `swap_chain_resize()` — `RGBA16Float` + `Extended` when
-  granted, `BGRA8Unorm` + the canvas default otherwise. Nothing is recreated.
+  granted, the browser's preferred canvas format + the canvas default otherwise. Nothing is
+  recreated.
 - **Detection takes two questions, not one.** `godot_js_display_hdr_supported()` (navigator.gpu +
   `(dynamic-range: high)` + a context exposing `getConfiguration`) is answerable *before*
   configuring and decides the format; `godot_js_display_hdr_granted()` adds the live tone-mapping
@@ -210,6 +211,27 @@ near zero at full SDR brightness — so a bigger assumption puts detail where th
 FILMIC produce SDR-range output and clamp first), `Viewport.use_hdr_2d` on every viewport, and no
 glow SOFTLIGHT or colour adjustment. `request_hdr_output` is read only at startup;
 `DisplayServer.window_request_hdr_output()` is the runtime channel. Tell any consumer this.
+
+### The SDR canvas format is the browser's, not a constant (added 2026-09-01)
+
+`_swap_chain_pick_format()` returns `navigator.gpu.getPreferredCanvasFormat()` for the SDR case
+instead of the `BGRA8Unorm` it hardcoded since the port began. The HDR branch is unchanged.
+
+- The glue is **`godot_js_display_preferred_canvas_format()`** in `library_godot_display.js` (0 =
+  bgra8unorm, 1 = rgba8unorm; 0 on any error, which is the old behavior), declared in
+  `platform/web/godot_js.h` beside the two HDR probes it mirrors. The driver resolves it once into a
+  file-scope static — the answer is a property of the platform, not of a canvas or a device.
+- ⚠ **Getting it wrong is invisible.** The browser accepts either format and silently converts every
+  presented frame to the one the compositor wants; nothing logs, and the cost is a full-screen blit
+  per frame. This is what the API exists to prevent.
+- ⚠ **Measured 2026-09-01: Chrome on Apple silicon answers `bgra8unorm`,** so on the machine every
+  number in this repo is taken on, the change is a no-op. It is `rgba8unorm` platforms (Android, some
+  Linux/Vulkan-backed Chrome) that were paying the conversion. Do not expect a local A/B to move.
+- The chosen format is on the boot line as `canvas_fmt=`, and the *configured* format (which HDR can
+  still promote) stays on the `reconfigure` event's `fmt=`/`hdr=` fields.
+- ⚠ Any format added here needs a `_wgpu_to_data_format()` case, or the swap chain's render-pass
+  attachment becomes `DATA_FORMAT_MAX` and every pipeline built against it is rejected for a colour
+  mask mismatch.
 
 ## Render areas are sub-rects, and the scissor clamp must respect that
 
@@ -278,8 +300,8 @@ game repo reads this channel; do not restate it here.
 ### The two release-visible console lines (D-1, D-7)
 
 ```
-[CGPERF] build engine=<sha12> pipeline_id=<stamp> baked=0/0 threads=<0|1> adapter=<vendor>/<device|architecture>
-[CGPERF] baked=<hit>/<hit+miss> spv_wgsl=<hit>/<hit+miss> engine=<sha12>
+[CGPERF] build engine=<sha12> pipeline_id=<stamp> baked=0/0 threads=<0|1> adapter=<vendor>/<device|architecture> canvas_fmt=<bgra8unorm|rgba8unorm>
+[CGPERF] baked=<hit>/<hit+miss> spv_wgsl=<hit>/<hit+miss> engine=<sha12> rd_miss=<n>
 ```
 
 - The **first** goes out at driver init, before the first frame, so a build-currency assertion can

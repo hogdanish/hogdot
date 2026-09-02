@@ -94,6 +94,10 @@ extern double godot_js_display_pixel_ratio_get();
 // 1 when this browser can request an extended-range canvas AND the display reports a high dynamic
 // range. Answerable before the canvas is configured, which is why it is separate from _granted.
 extern int godot_js_display_hdr_supported();
+// The browser's preferred WebGPU canvas format: 0 = bgra8unorm, 1 = rgba8unorm. Answerable
+// before any canvas is configured. 0 on any error, which is the format the driver hardcoded
+// before this existed. See library_godot_display.js.
+extern int godot_js_display_preferred_canvas_format();
 // 1 when the canvas is CURRENTLY configured with extended tone mapping AND the display reports a
 // high dynamic range; 0 otherwise, including on any error. See library_godot_display.js.
 extern int godot_js_display_hdr_granted();
