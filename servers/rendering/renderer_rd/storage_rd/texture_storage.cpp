@@ -31,6 +31,7 @@
 #include "texture_storage.h"
 
 #include "core/config/engine.h"
+#include "core/config/project_settings.h"
 #include "servers/rendering/renderer_rd/effects/copy_effects.h"
 #include "servers/rendering/renderer_rd/framebuffer_cache_rd.h"
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
@@ -4444,6 +4445,19 @@ void TextureStorage::_create_render_target_backbuffer(RenderTarget *rt) {
 	ERR_FAIL_COND(rt->backbuffer.is_valid());
 
 	uint32_t mipmaps_required = Image::get_image_required_mipmaps(rt->size.width, rt->size.height, Image::FORMAT_RGBA8);
+	// ⚠ Every level of this chain costs one gaussian-blur render pass on EVERY frame a canvas
+	// shader with `hint_screen_texture` and a mipmap filter is visible — eleven passes at 1080p,
+	// regardless of which LOD the shader actually reads. `rendering/2d/backbuffer/max_mipmaps`
+	// caps the chain at what the project's shaders sample (0 = the full chain, the old behavior).
+	//
+	// ⚠ The cap shortens the TEXTURE, not only the loops below, and that is deliberate: with
+	// fewer declared levels the sampler's own LOD clamp keeps a shader asking for a level past
+	// the end well defined — it reads the last generated one. Capping only the loop would leave
+	// the declared-but-never-written levels for a shader to sample.
+	const int max_mipmaps = GLOBAL_GET_CACHED(int, "rendering/2d/backbuffer/max_mipmaps");
+	if (max_mipmaps > 0 && mipmaps_required > (uint32_t)max_mipmaps) {
+		mipmaps_required = (uint32_t)max_mipmaps;
+	}
 	RD::TextureFormat tf;
 	tf.format = rt->color_format;
 	tf.width = rt->size.width;

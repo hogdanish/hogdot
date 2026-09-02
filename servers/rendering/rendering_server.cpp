@@ -3681,6 +3681,19 @@ void RenderingServer::init() {
 	GLOBAL_DEF("rendering/lights_and_shadows/positional_shadow/atlas_16_bits", true);
 
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/2d/shadow_atlas/size", PROPERTY_HINT_RANGE, "128,16384"), 2048);
+	// Longest gaussian-blur mip chain built for the canvas backbuffer, or 0 for the full chain.
+	// Every frame in which a canvas shader with `hint_screen_texture` and a mipmap filter is
+	// visible runs one blur pass per level — eleven render passes at 1080p, whatever LOD the
+	// shader actually samples. Set this to the highest LOD any such shader reads, rounded up.
+	// ⚠ The cap shortens the TEXTURE too, not just the loop, so the sampler's own LOD clamp keeps
+	// a shader that asks for more well defined: it reads the last generated level.
+	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/2d/backbuffer/max_mipmaps", PROPERTY_HINT_RANGE, "0,16,1"), 0);
+	// The same cap for the 3D screen-texture copy (`hint_screen_texture` in a spatial shader).
+	// ⚠ Loop-only: the destination is usually the shared blur texture, whose full mip chain glow
+	// and DOF also write, so the allocation cannot shrink. Levels above the cap keep whatever the
+	// blur chain last wrote (zeros on WebGPU, which zero-initializes every resource) — defined,
+	// but not a copy of the screen. Set it to the highest LOD a screen-texture shader samples.
+	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/3d/screen_texture/max_mipmaps", PROPERTY_HINT_RANGE, "0,16,1"), 0);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/2d/batching/item_buffer_size", PROPERTY_HINT_RANGE, "128,1048576,1"), 16384);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/2d/batching/uniform_set_cache_size", PROPERTY_HINT_RANGE, "256,1048576,1"), 4096);
 

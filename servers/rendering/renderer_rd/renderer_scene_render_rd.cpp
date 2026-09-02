@@ -342,6 +342,13 @@ void RendererSceneRenderRD::_render_buffers_ensure_screen_texture(const RenderDa
 			usage_bits |= can_use_storage ? RD::TEXTURE_USAGE_STORAGE_BIT : RD::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT;
 			// This needs to have mipmaps if any shader needs textureLod to work on screen_texture
 			uint32_t mipmaps_required = Image::get_image_required_mipmaps(size.x, size.y, Image::FORMAT_RGBAH);
+			// This texture exists only to receive the screen-texture copy, so unlike the shared
+			// blur texture its allocation can follow the cap exactly — declared levels then equal
+			// generated levels and the sampler's LOD clamp does the rest.
+			const int back_color_max_mipmaps = GLOBAL_GET_CACHED(int, "rendering/3d/screen_texture/max_mipmaps");
+			if (back_color_max_mipmaps > 0 && mipmaps_required > (uint32_t)back_color_max_mipmaps) {
+				mipmaps_required = (uint32_t)back_color_max_mipmaps;
+			}
 			rb->create_texture(RB_SCOPE_BUFFERS, RB_TEX_BACK_COLOR, rb->get_base_data_format(), usage_bits, RenderingDeviceCommons::TEXTURE_SAMPLES_1, { 0, 0 }, 0U, mipmaps_required);
 		}
 	}
@@ -373,9 +380,23 @@ void RendererSceneRenderRD::_render_buffers_copy_screen_texture(const RenderData
 		texture_name = RB_TEX_BACK_COLOR;
 	}
 
+	// ⚠ Every level past the base costs one make_mipmap pass per view, every frame a spatial
+	// shader with `hint_screen_texture` is visible — and on Mobile that is a raster pass.
+	// `rendering/3d/screen_texture/max_mipmaps` caps it (0 = the full chain, the old behavior).
+	//
+	// ⚠ Loop-only, unlike the 2D backbuffer cap: `texture_name` is usually RB_TEX_BLUR_0, whose
+	// full mip chain glow and DOF also write, so the allocation cannot shrink. Levels above the
+	// cap therefore keep whatever the blur chain last wrote — zeros on WebGPU, which
+	// zero-initializes every resource, so sampling them stays defined but is not a copy of the
+	// screen. Set the cap to the highest LOD any screen-texture shader samples.
+	const int max_mipmaps = GLOBAL_GET_CACHED(int, "rendering/3d/screen_texture/max_mipmaps");
+
 	for (uint32_t v = 0; v < rb->get_view_count(); v++) {
 		RID texture = rb->get_internal_texture(v);
 		int mipmaps = int(rb->get_texture_format(RB_SCOPE_BUFFERS, texture_name).mipmaps);
+		if (max_mipmaps > 0 && mipmaps > max_mipmaps) {
+			mipmaps = max_mipmaps;
+		}
 		RID dest = rb->get_texture_slice(RB_SCOPE_BUFFERS, texture_name, v, 0);
 
 		if (can_use_storage) {

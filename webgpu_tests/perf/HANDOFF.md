@@ -149,3 +149,36 @@ The game-side pass that consumed this handoff, for the record (its own numbers l
 - Still open on this side: a WGSL-only shader container for the WebGPU target (each baked version
   is ~1 MB with SPIR-V + WGSL; 19 more versions cost the game's pack ~17 MB raw), and a
   `bench.mjs`-style throttle arm for the game's own harness.
+
+## r9 — the second engine batch (2026-09-01)
+
+Contained fixes on top of `fdfcba8691`, one per commit. Everything below is either a no-op unless
+a project opts in, or a pure removal of work.
+
+### Two new project settings, both default-off
+
+| setting | default | what it does | when to set it |
+| --- | --- | --- | --- |
+| `rendering/2d/backbuffer/max_mipmaps` | `0` (unlimited, today's behavior) | Caps the canvas backbuffer's gaussian-blur mip chain. Every level costs one render pass on **every frame** a `CanvasItem` shader with `hint_screen_texture` and a mipmap filter is visible — ~11 passes at 1080p, whatever LOD the shader reads. | Set it to the highest LOD any such shader samples, rounded up. A glass blur reading LOD ≤ 3.5 needs `5`. |
+| `rendering/3d/screen_texture/max_mipmaps` | `0` (unlimited) | The same, for the 3D screen-texture copy (`hint_screen_texture` in a spatial shader), which on Mobile mips `RB_TEX_BLUR_0` with a raster pass per level. | Same rule. |
+
+- ⚠ **The 2D cap shortens the backbuffer TEXTURE, not just the loop.** That is deliberate: with
+  fewer declared levels, a shader sampling past the end reads the last generated level (the
+  sampler's own LOD clamp), which is defined. Set the cap too low and the blur gets coarser — it
+  never reads garbage.
+- ⚠ **The 3D cap is loop-only**, because the copy usually targets the shared blur texture whose
+  remaining levels glow and DOF also write. Levels above the cap keep whatever was last written
+  there (zeros on WebGPU, which zero-initializes every resource) — defined, but not a copy of the
+  screen. If a spatial shader samples above the cap it gets stale content, not a crash.
+- Both are read when the target is (re)built, i.e. on a viewport resize.
+- ⚠ These are web-visible in the editor's Project Settings dialog (unlike the `webgpu_*` ones, which
+  a web-only driver registers and which must be written into `project.godot` by hand).
+
+### Driver work, automatic
+
+| change | effect |
+| --- | --- |
+| The SDR canvas format is now `navigator.gpu.getPreferredCanvasFormat()` instead of a hardcoded `BGRA8Unorm` | The browser was silently converting every presented frame wherever the two disagreed. ⚠ Chrome on Apple silicon answers `bgra8unorm`, so this is a **no-op on the measuring machine** and only helps `rgba8unorm` platforms (Android, Vulkan-backed Chrome). The chosen format is on the boot line as `canvas_fmt=`. |
+| `setPipeline` for the Uint16 strip variant, `setViewport` and `setScissorRect` are skipped when unchanged on the current encoder | The strip one ran on **every indexed draw of every strip mesh**. All three caches reset at every encoder boundary. |
+| Bind groups with byte-identical `(layout, entries)` are shared instead of recreated | `counters.bindgroups_created` still counts real creations only; hits are the new `counters.bindgroups_shared`. ⚠ Read the two together — `created + shared` is the number of uniform sets built, and only the ratio separates "the cache worked" from "the game built fewer sets". |
+| `thread_model = Multi-Threaded` is clamped to single-threaded on web with one `WARN_PRINT` | It used to abort in `getJsObject()` on the first frame of a threaded template, with nothing naming the setting. |

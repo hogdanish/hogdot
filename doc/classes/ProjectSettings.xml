@@ -2824,6 +2824,12 @@
 			Number of solver velocity iterations. The greater the number of iterations, the more accurate the simulation will be, at the cost of CPU performance.
 			[b]Note:[/b] This needs to be at least [code]2[/code] in order for friction to work, as friction is applied using the non-penetration impulse from the previous iteration.
 		</member>
+		<member name="rendering/2d/backbuffer/max_mipmaps" type="int" setter="" getter="" default="0">
+			Maximum number of mipmap levels generated for the 2D backbuffer, or [code]0[/code] for the full chain.
+			The backbuffer's mipmaps are rebuilt with one gaussian blur pass per level on every frame in which a [CanvasItem] shader using [code]hint_screen_texture[/code] with a mipmap filter is visible — eleven passes at 1080p, no matter which level the shader actually reads. Setting this to the highest mipmap level any such shader samples (rounded up) removes the rest.
+			[b]Note:[/b] The limit shortens the backbuffer texture itself, so a shader sampling past the last generated level reads that level rather than undefined data.
+			[b]Note:[/b] This property is only read when a render target's backbuffer is (re)created, which happens when the viewport is resized.
+		</member>
 		<member name="rendering/2d/batching/item_buffer_size" type="int" setter="" getter="" default="16384">
 			Maximum number of canvas item commands that can be batched into a single draw call.
 		</member>
@@ -2855,6 +2861,11 @@
 			[b]Note:[/b] This property is only read when the project starts. To toggle 2D vertex snapping at runtime, use [method RenderingServer.viewport_set_snap_2d_vertices_to_pixel] on the root [Viewport] instead.
 			[b]Note:[/b] [Control] nodes are snapped to the nearest pixel by default. This is controlled by [member gui/common/snap_controls_to_pixels].
 			[b]Note:[/b] It is not recommended to use this setting together with [member rendering/2d/snap/snap_2d_transforms_to_pixel], as movement may appear even less smooth. Prefer only enabling that setting instead.
+		</member>
+		<member name="rendering/3d/screen_texture/max_mipmaps" type="int" setter="" getter="" default="0">
+			Maximum number of mipmap levels generated for the 3D screen texture, or [code]0[/code] for the full chain.
+			The screen-texture copy regenerates its mipmap chain, one pass per level per view, on every frame in which a spatial shader using [code]hint_screen_texture[/code] is visible. Setting this to the highest mipmap level any such shader samples (rounded up) removes the rest.
+			[b]Note:[/b] Unlike [member rendering/2d/backbuffer/max_mipmaps], this limits only the generation, not the allocation: the copy usually targets the shared blur texture, whose remaining levels other effects also write. Levels above the limit keep whatever was last written to them rather than a copy of the screen.
 		</member>
 		<member name="rendering/anti_aliasing/quality/msaa_2d" type="int" setter="" getter="" default="0">
 			Sets the number of multisample antialiasing (MSAA) samples to use for 2D/Canvas rendering (as a power of two). MSAA is used to reduce aliasing around the edges of polygons. A higher MSAA value results in smoother edges but can be significantly slower on some hardware, especially integrated graphics due to their limited memory bandwidth. This has no effect on shader-induced aliasing or texture aliasing.
