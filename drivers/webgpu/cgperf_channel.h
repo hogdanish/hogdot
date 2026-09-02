@@ -126,6 +126,13 @@ struct CGPerfChannel {
 		// delete, so an A/B whose win looks small should read this first. Zero with
 		// the flag on is what "the prototype held" looks like.
 		C_OVERRIDE_TRANSLATE_FALLBACK,
+		// A uniform_set_create found a bind group with a byte-identical
+		// (layout, entries) already live and shared it instead of creating a
+		// second one. ⚠ Read it BESIDE bindgroups_created, never instead of it:
+		// created + shared is the number of uniform sets built, and only the
+		// ratio says whether a drop in creations came from the cache or from the
+		// game simply building fewer sets.
+		C_BINDGROUPS_SHARED,
 		COUNTER_COUNT, // Must stay last.
 	};
 
@@ -219,7 +226,8 @@ struct CGPerfChannel {
 	"device_lost\nuncaptured_error\nrender_pipelines_created\n" \
 	"compute_pipelines_created\nshader_modules_created\n" \
 	"bindgroup_layouts_created\nbindgroups_created\nencoder_splits\n" \
-	"translate_ms\nbindgroup_rebind_fail\noverride_translate_fallback"
+	"translate_ms\nbindgroup_rebind_fail\noverride_translate_fallback\n" \
+	"bindgroups_shared"
 
 // Drift guard. The JS side sizes its heap views from `names.length`, so a name
 // list that disagrees with its enum reads short (missing counters) or past the

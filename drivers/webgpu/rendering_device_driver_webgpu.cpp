@@ -6525,6 +6525,141 @@ void RenderingDeviceDriverWebGPU::shader_destroy_modules(ShaderID p_shader) {
 // UNIFORM SET
 // =============================================================================
 
+// =============================================================================
+// Content-addressed bind group cache
+// =============================================================================
+//
+// A WGPUBindGroup is immutable, so two of them built from the same layout and the
+// same entry list are indistinguishable to every consumer — and CommonGrounds
+// creates tens of thousands per minute, most of them duplicates (the same material
+// UBO + the same textures + the same samplers, once per instance, per frame, per
+// SubViewport). `wgpuDeviceCreateBindGroup` is a WASM→JS→GPU-process crossing plus
+// a JS object allocation, which is the cost model this backend exists to fight.
+//
+// ⚠ The bytes are the key, and they are only a valid key because the slot RETAINS
+// every handle it names (see WGBindGroupCacheSlot). Handles are addresses; an
+// address released to zero references can be recycled by emdawnwebgpu's object
+// table, and a byte compare against a recycled address is an ABA test. Retaining
+// makes it an identity test.
+//
+// ⚠ Entries are compared in ORDER, not as a set. WebGPU treats them as a set, so
+// two differently-ordered but equivalent lists miss each other. That costs a
+// creation, never a wrong group, and uniform_set_create builds its list in a fixed
+// order for a given shader anyway.
+static uint32_t _bind_group_content_hash(WGPUBindGroupLayout p_layout, const LocalVector<WGPUBindGroupEntry> &p_entries) {
+	uint32_t h = hash_murmur3_buffer(&p_layout, (int)sizeof(p_layout));
+	if (!p_entries.is_empty()) {
+		// Every WGPUBindGroupEntry in uniform_set_create is `= {}`-initialized, so
+		// the padding is zero and a raw-bytes hash (and the memcmp below) are exact.
+		h = hash_murmur3_buffer(p_entries.ptr(), (int)(p_entries.size() * sizeof(WGPUBindGroupEntry)), h);
+	}
+	return hash_fmix32(h ^ (uint32_t)p_entries.size());
+}
+
+static bool _bind_group_content_equal(const WGBindGroupCacheSlot *p_slot, WGPUBindGroupLayout p_layout, const LocalVector<WGPUBindGroupEntry> &p_entries) {
+	if (p_slot->layout != p_layout || p_slot->entries.size() != p_entries.size()) {
+		return false;
+	}
+	if (p_entries.is_empty()) {
+		return true;
+	}
+	return memcmp(p_slot->entries.ptr(), p_entries.ptr(), p_entries.size() * sizeof(WGPUBindGroupEntry)) == 0;
+}
+
+WGPUBindGroup RenderingDeviceDriverWebGPU::_bind_group_shared_acquire(WGPUBindGroupLayout p_layout, const LocalVector<WGPUBindGroupEntry> &p_entries, WGBindGroupCacheSlot **r_slot) {
+	*r_slot = nullptr;
+	const uint32_t key = _bind_group_content_hash(p_layout, p_entries);
+
+	HashMap<uint32_t, LocalVector<WGBindGroupCacheSlot *>>::Iterator bucket = bind_group_content_cache.find(key);
+	if (bucket != bind_group_content_cache.end()) {
+		for (WGBindGroupCacheSlot *slot : bucket->value) {
+			if (_bind_group_content_equal(slot, p_layout, p_entries)) {
+				// One reference per sharer, on top of the slot's own.
+				wgpuBindGroupAddRef(slot->handle);
+				slot->share_count++;
+				_cgperf.count(CGPerfChannel::C_BINDGROUPS_SHARED);
+				*r_slot = slot;
+				return slot->handle;
+			}
+		}
+	}
+
+	WGPUBindGroupDescriptor bg_desc = {};
+	bg_desc.layout = p_layout;
+	bg_desc.entryCount = p_entries.size();
+	bg_desc.entries = p_entries.is_empty() ? nullptr : p_entries.ptr();
+	WGPUBindGroup bg = wgpuDeviceCreateBindGroup(device, &bg_desc);
+	// ⚠ Only real creations are counted, so a consumer watching bindgroups_created
+	// sees the cache's win directly; the hits are counted separately above.
+	_cgperf.count(CGPerfChannel::C_BINDGROUPS_CREATED);
+	if (bg == nullptr) {
+		return nullptr;
+	}
+
+	WGBindGroupCacheSlot *slot = memnew(WGBindGroupCacheSlot);
+	slot->key = key;
+	slot->layout = p_layout;
+	slot->entries = p_entries;
+	slot->handle = bg;
+	slot->share_count = 1;
+	// Retain everything the key names — the whole reason the byte compare is sound.
+	wgpuBindGroupLayoutAddRef(p_layout);
+	for (const WGPUBindGroupEntry &e : slot->entries) {
+		if (e.buffer != nullptr) {
+			wgpuBufferAddRef(e.buffer);
+		}
+		if (e.sampler != nullptr) {
+			wgpuSamplerAddRef(e.sampler);
+		}
+		if (e.textureView != nullptr) {
+			wgpuTextureViewAddRef(e.textureView);
+		}
+	}
+	wgpuBindGroupAddRef(bg); // The slot's own reference; the create's goes to the caller.
+	bind_group_content_cache[key].push_back(slot);
+	*r_slot = slot;
+	return bg;
+}
+
+void RenderingDeviceDriverWebGPU::_bind_group_shared_release(WGBindGroupCacheSlot *p_slot) {
+	if (p_slot == nullptr) {
+		return;
+	}
+	ERR_FAIL_COND(p_slot->share_count == 0);
+	p_slot->share_count--;
+	if (p_slot->share_count > 0) {
+		return;
+	}
+
+	HashMap<uint32_t, LocalVector<WGBindGroupCacheSlot *>>::Iterator bucket = bind_group_content_cache.find(p_slot->key);
+	if (bucket != bind_group_content_cache.end()) {
+		for (uint32_t i = 0; i < bucket->value.size(); i++) {
+			if (bucket->value[i] == p_slot) {
+				bucket->value.remove_at(i);
+				break;
+			}
+		}
+		if (bucket->value.is_empty()) {
+			bind_group_content_cache.remove(bucket);
+		}
+	}
+
+	for (const WGPUBindGroupEntry &e : p_slot->entries) {
+		if (e.buffer != nullptr) {
+			wgpuBufferRelease(e.buffer);
+		}
+		if (e.sampler != nullptr) {
+			wgpuSamplerRelease(e.sampler);
+		}
+		if (e.textureView != nullptr) {
+			wgpuTextureViewRelease(e.textureView);
+		}
+	}
+	wgpuBindGroupLayoutRelease(p_slot->layout);
+	wgpuBindGroupRelease(p_slot->handle);
+	memdelete(p_slot);
+}
+
 RDD::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_create(VectorView<BoundUniform> p_uniforms, ShaderID p_shader, uint32_t p_set_index, int p_linear_pool_index) {
 	WGShader *shader = (WGShader *)(p_shader.id);
 	ERR_FAIL_NULL_V(shader, UniformSetID());
@@ -6979,19 +7114,20 @@ RDD::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_create(VectorView<Bou
 		}
 	}
 
-	WGPUBindGroupDescriptor bg_desc = {};
-	bg_desc.layout = layout;
-	bg_desc.entryCount = entries.size();
-	bg_desc.entries = entries.size() > 0 ? entries.ptr() : nullptr;
-
-	WGPUBindGroup bg = wgpuDeviceCreateBindGroup(device, &bg_desc);
-	_cgperf.count(CGPerfChannel::C_BINDGROUPS_CREATED);
+	// ⚠ Content cache, not a create. `entries` is finished at this point and is the
+	// whole identity of the bind group, so an identical (layout, entries) pair reuses
+	// the group another uniform set already built. Everything else on WGUniformSet —
+	// cached_entries, bound_textures, dynamic_buffers, source_shader, rebind_cache —
+	// stays per-set and is untouched by the sharing.
+	WGBindGroupCacheSlot *shared_slot = nullptr;
+	WGPUBindGroup bg = _bind_group_shared_acquire(layout, entries, &shared_slot);
 	if (bg == nullptr) {
 		delete us;
 		ERR_FAIL_V_MSG(UniformSetID(), "WebGPU: wgpuDeviceCreateBindGroup failed.");
 	}
 
 	us->handle = bg;
+	us->shared_slot = shared_slot;
 	// Cache entries and source shader for potential BGL rebinding.
 	us->cached_entries.resize(entries.size());
 	for (uint32_t i = 0; i < entries.size(); i++) {
@@ -7368,6 +7504,10 @@ void RenderingDeviceDriverWebGPU::uniform_set_free(UniformSetID p_uniform_set) {
 	if (us->handle) {
 		wgpuBindGroupRelease(us->handle);
 	}
+	// ⚠ After the handle release, and unconditionally: the slot holds its own
+	// reference plus one per sharer, so a shared group outlives whichever set is
+	// freed first and dies only with the last one.
+	_bind_group_shared_release(us->shared_slot);
 	delete us;
 }
 
@@ -10833,6 +10973,11 @@ void RenderingDeviceDriverWebGPU::set_object_name(ObjectType p_type, ID p_driver
 		case OBJECT_TYPE_UNIFORM_SET: {
 			WGUniformSet *us = (WGUniformSet *)(p_driver_id.id);
 			if (us && us->handle) {
+				// ⚠ The bind group may be SHARED with other uniform sets whose
+				// (layout, entries) were byte-identical, so the last name wins for
+				// all of them. Diagnostic only — a label reaches no rendering
+				// decision — but do not read a shared group's label as proof of
+				// which set is bound.
 				wgpuBindGroupSetLabel(us->handle, label);
 			}
 		} break;

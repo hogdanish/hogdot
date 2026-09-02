@@ -261,6 +261,35 @@ Material sets with dynamic offsets are no longer rebound when unchanged. ⚠ **E
 a screenshot A/B** (`bench.mjs --screenshot`, `hold`): the first flush patch made 39 of 40 puppets
 vanish while the fps "improved". The ledger is `webgpu_tests/perf/HANDOFF.md`.
 
+### Bind groups are content-addressed and shared (added 2026-09-01)
+
+`uniform_set_create` no longer creates a `WGPUBindGroup` unconditionally. The finished
+`(layout, entries)` pair is hashed (murmur3 over the raw bytes) and resolved in
+`bind_group_content_cache`; an identical live pair hands back the existing group with a fresh
+reference. A WebGPU bind group is immutable, so two built from the same layout and entry list are
+indistinguishable to everything downstream.
+
+- ⚠ **The slot retains everything it keys on** — the layout and every entry's buffer, sampler and
+  texture view. Handles are addresses, and an address released to zero references can be recycled by
+  emdawnwebgpu's object table; without the retain the byte compare would be an ABA test, which is
+  RL-052's rebind-cache failure one level down.
+- ⚠ **Entries compare in ORDER.** WebGPU treats them as a set, so a differently-ordered equivalent
+  list misses. That costs a creation, never a wrong group.
+- **Refcounting:** the slot holds one reference plus one per sharer, so a shared group outlives
+  whichever uniform set is freed first and dies with the last. `uniform_set_free` releases
+  `us->handle` and then the slot, unconditionally.
+- **`counters.bindgroups_created` still counts real creations only**, which is what makes the win
+  readable; the hits are `counters.bindgroups_shared`. ⚠ Read the two together — `created + shared`
+  is the number of uniform sets built, and only the ratio distinguishes "the cache worked" from "the
+  game built fewer sets".
+- Everything else on `WGUniformSet` stays per-set: `cached_entries`, `bound_textures`,
+  `dynamic_buffers`, `source_shader` and the `rebind_cache`. The rebind path
+  (`_get_compatible_bind_group`) is untouched, including its deliberately-uncached failure branch.
+- ⚠ Sets that build their own texture views (`temp_views`, the `rw_storage` shadow views) get a
+  unique address per set and therefore never share. That is a miss, not a bug.
+- ⚠ `set_object_name` on a shared group is last-writer-wins. Labels are diagnostic; do not read one
+  as proof of which uniform set is bound.
+
 ### Encoder-owned redundant state (added 2026-09-01)
 
 Three per-draw calls were unconditional and are now cached on `WGCommandBuffer::RenderState`:
@@ -297,7 +326,7 @@ unchanged and byte-compatible.
 ```
 __cgPerf.version        1
 __cgPerf.build          { engine_commit, pipeline_id, threads, adapter{vendor,architecture,device,description} }
-__cgPerf.counters       live getter over the heap; 18 monotonic doubles (see the header's Counter enum)
+__cgPerf.counters       live getter over the heap; 19 monotonic doubles (see the header's Counter enum)
 __cgPerf.frames         live getter → { head, cap: 3600, stride: 13, count, buf: Float64Array }
 __cgPerf.frames_schema  13 names, fixed order, index == column
 __cgPerf.compiles       plain array, cap 512, { t, frame, kind: render|compute|module, label, ms, translate_ms, baked }

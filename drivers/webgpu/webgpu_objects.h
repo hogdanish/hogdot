@@ -296,8 +296,32 @@ struct WGPipelineWrapper {
 // Uniform Set (Bind Group)
 // =============================================================================
 
+// One entry of the driver's content-addressed bind group cache. Several uniform
+// sets whose (layout, entries) are byte-identical share one WGPUBindGroup rather
+// than each creating its own — a WebGPU bind group is immutable, so two identical
+// ones are indistinguishable to everything downstream.
+//
+// ⚠ The slot RETAINS everything it keys on: the layout, and every entry's buffer,
+// sampler and texture view. Without that, a resource released to zero references
+// can have its emdawnwebgpu handle address recycled while this slot still names
+// it, and the next uniform set that happens to be handed the recycled address
+// would byte-match a slot built for a dead resource. That is the RL-052 rebind
+// cache failure exactly, one level down. Retaining is what makes the byte compare
+// an identity test instead of an ABA test.
+struct WGBindGroupCacheSlot {
+	uint32_t key = 0; // Hash bucket, kept so the slot can erase itself.
+	WGPUBindGroupLayout layout = nullptr;
+	LocalVector<WGPUBindGroupEntry> entries;
+	WGPUBindGroup handle = nullptr;
+	uint32_t share_count = 0; // Live uniform sets pointing here.
+};
+
 struct WGUniformSet {
 	WGPUBindGroup handle = nullptr;
+	// Non-owning back-pointer into the driver's content cache; nullptr when this
+	// set's bind group was created outside it. uniform_set_free decrements the
+	// slot's share_count through this.
+	WGBindGroupCacheSlot *shared_slot = nullptr;
 	uint32_t set_index = 0;
 	LocalVector<WGPUTextureView> temp_views; // Re-dimensioned views for Cube↔2D fixups.
 	// Shadow textures/views for read_write storage texture splits.

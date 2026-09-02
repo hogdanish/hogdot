@@ -235,6 +235,20 @@ class RenderingDeviceDriverWebGPU : public RenderingDeviceDriver {
 	// in place when it has gone stale. The ONLY legal way to read that field.
 	WGShader *_resolve_source_shader(WGUniformSet *p_us);
 
+	// --- Content-addressed bind group cache -------------------------------
+	// Uniform sets whose (layout, entries) are byte-identical share one
+	// WGPUBindGroup. Bucketed by a murmur3 of the same bytes; a bucket is
+	// resolved by exact comparison, so a hash collision costs a memcmp and
+	// never a wrong group. See WGBindGroupCacheSlot for why the slot retains
+	// every resource it names.
+	HashMap<uint32_t, LocalVector<WGBindGroupCacheSlot *>> bind_group_content_cache;
+	// Returns a bind group for (layout, entries) — an existing one with a fresh
+	// reference, or a newly created one. `r_slot` receives the slot the caller
+	// must release in uniform_set_free. Returns nullptr only when creation failed.
+	WGPUBindGroup _bind_group_shared_acquire(WGPUBindGroupLayout p_layout, const LocalVector<WGPUBindGroupEntry> &p_entries, WGBindGroupCacheSlot **r_slot);
+	// Drops one sharer; frees the slot and everything it retains at zero.
+	void _bind_group_shared_release(WGBindGroupCacheSlot *p_slot);
+
 	// --- Pixel Format Mapping ---
 	// TODO: Move to dedicated pixel_formats_webgpu.h/cpp when ready.
 
