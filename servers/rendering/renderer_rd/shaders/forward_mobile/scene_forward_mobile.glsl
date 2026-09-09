@@ -16,7 +16,6 @@
 #undef USE_LIGHTMAP
 #endif
 
-
 #define SHADER_IS_SRGB false
 #define SHADER_SPACE_FAR 0.0
 
@@ -888,7 +887,6 @@ void main() {
 #ifdef LIGHTMAP_DISABLED
 #undef USE_LIGHTMAP
 #endif
-
 
 /* Varyings */
 
