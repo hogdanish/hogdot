@@ -380,7 +380,7 @@ game repo reads this channel; do not restate it here.
 ### The two release-visible console lines (D-1, D-7)
 
 ```
-[CGPERF] build engine=<sha12> pipeline_id=<stamp> baked=0/0 threads=<0|1> adapter=<vendor>/<device|architecture> canvas_fmt=<bgra8unorm|rgba8unorm> browser=<name>/<engine>/<version> userfs=<persistent|session> persisted=<-1|0|1> wgsl_cache=<entries>/<n>KiB
+[CGPERF] build engine=<sha12> pipeline_id=<stamp> baked=0/0 threads=<0|1> adapter=<vendor>/<device|architecture> canvas_fmt=<bgra8unorm|rgba8unorm> browser=<name>/<engine>/<version> userfs=<persistent|session> persisted=<-2|-1|0|1> wgsl_cache=<entries>/<n>KiB
 [CGPERF] baked=<hit>/<hit+miss> spv_wgsl=<hit>/<hit+miss> engine=<sha12> rd_miss=<n>
 ```
 
@@ -618,6 +618,17 @@ also the rule here. Two mechanics are load-bearing and cost time to learn:
 - ⚠ **Give the page time to die.** The report is sent, the page navigates to `about:blank` (which is
   what fires `pagehide`), and only then may the browser be killed — 20 s here. Kill it sooner and the
   IndexedDB reconcile is still running, which looks exactly like a cache that does not work.
+- ⚠ **A fresh Firefox profile opens an onboarding tab**, which can take focus from the measured one.
+  A backgrounded tab throttles `requestAnimationFrame`, and on web rAF **is** the engine's main
+  loop — so the run keeps reporting, just from a page that is barely running. Write
+  `browser.aboutwelcome.enabled=false` (and `trailhead.firstrun.didSeeAboutWelcome=true`) into the
+  profile's `user.js`, and cross-check every run against the bench's own `visible=1` and a steady
+  fps near the refresh rate before believing its numbers. Checked for the 2026-09-08 runs: all
+  `visible=1` at 112–120 fps, so none of them was throttled.
+- ⚠ **Set the storage permission in `user.js` too** — `permissions.default.persistent-storage` 1 to
+  grant, 2 to block. Otherwise `persist()` raises a dialog a human has to answer, which makes the
+  durability state of a run depend on whether somebody clicked, in a series measuring durable
+  storage. That happened here, and those runs had to be discarded.
 
 ## The persistent WGSL cache — `user://wgsl_cache` (added 2026-09-08)
 
@@ -757,10 +768,23 @@ Three edges, all in `platform/web/js/libs/library_godot_os.js`, all of which mad
   ⚠ So a boot-time `persist()` ships a dialog to every Firefox player for a benefit nothing here can
   measure. **It is therefore OPT-IN** — see the flag below. `persisted()`, which never prompts, still
   runs unconditionally so the state is reported.
+
+  **The controlled experiment**, Firefox 155 with the permission written into the profile's
+  `user.js` before launch (no dialog possible, no human deciding), fresh profile per arm:
+
+  | condition | `persisted` | cold `translate_ms` | warm `translate_ms` | warm hits |
+  | --- | ---: | ---: | ---: | ---: |
+  | granted (`permissions.default.persistent-storage=1` + `?webgpu_persist_storage`) | 1 | 3 823 | **349** | 339 |
+  | default — never requested | -2 | 3 762 | **336** | 339 |
+
+  Identical. ⚠ This experiment exists because the first Firefox series ran with a human answering
+  the dialog by hand, sometimes with "remember this decision" — so durable storage was granted for
+  some runs and not others, in a series whose subject *is* durable storage. Those runs were
+  discarded. **Set the permission in the profile; never let a dialog decide a condition.**
 - **The verdict is published**, because a no-cache session must say so rather than looking like slow
   hardware: `__cgPerf.build.storage.userfs_persistent` (false = `syncfs(true)` failed at boot,
   `GodotFS._idbfs` is false, `user://` is per-session RAM — a Safari private window),
-  `.storage.persisted` (-1 unanswered, 0 denied, 1 granted) and the WGSL cache's own entry count,
+  `.storage.persisted` (-2 not requested, -1 unanswered, 0 denied, 1 granted) and the WGSL cache's own entry count,
   bytes and cap. Both are on the boot line too.
 
 ⚠ **What is still open: whether visit 1 is always kept.** Measured 2026-09-08 on the shipped

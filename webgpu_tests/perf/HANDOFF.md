@@ -285,6 +285,10 @@ The **threads=yes** release template — the other shipped variant, and a differ
 because of `#ifdef THREADS_ENABLED` — behaves the same: 4 178 ms cold → **250 ms** warm, 339 entries,
 `threads=1` on the boot line.
 
+Re-confirmed on the exact artifacts handed over (`engine=74b53b9e4af4` on the boot line):
+3 158 ms cold → **241 ms** warm, and the boot line's own
+`wgsl_cache=339/1941KiB` reports the cache it loaded.
+
 ⚠ **The grant state of every number above is recorded, and it is the same one: NO durable storage.**
 `navigator.storage.persist()` was **denied** on every Chrome run (`persisted=0`) and every Safari run
 (`persisted=0`), and **never answered** on every Firefox run kept here (`persisted=-1`, a fresh
@@ -321,7 +325,7 @@ a property of Firefox.
 **Nothing to enable it.** What is worth doing:
 
 - **Read the four new fields on the build line**, appended after `canvas_fmt=`:
-  `browser=<name>/<engine>/<version> userfs=<persistent|session> persisted=<-1|0|1>
+  `browser=<name>/<engine>/<version> userfs=<persistent|session> persisted=<-2|-1|0|1>
   wgsl_cache=<entries>/<n>KiB`. `userfs=session` means the whole `user://` tree dies with the tab (a
   Safari private window) — that session cannot cache anything and must never be read as slow
   hardware. `wgsl_cache=-1/0KiB` means the cache is off for the session.
@@ -366,6 +370,19 @@ a property of Firefox.
   So: `persisted()` — which never prompts — runs at boot and publishes the state;
   `persist()` runs only with **`?webgpu_persist_storage`** in the URL. `build.storage.persisted` is
   **-2 not requested** (the default), -1 requested and unanswered, 0 denied, 1 granted.
+
+**The controlled experiment that settles it** (Firefox 155, the permission written into the profile's
+`user.js` before launch so no dialog can appear and no human decides the condition, fresh profile per
+arm, `visible=1` and 112-120 fps on all four runs):
+
+| condition | `persisted` | cold `translate_ms` | warm `translate_ms` | warm entries | warm hits |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| durable storage **granted** (`permissions.default.persistent-storage=1` + `?webgpu_persist_storage`) | 1 | 3 823 | **349** | 339 | 339 |
+| **default** — nothing requested, nothing can prompt | -2 | 3 762 | **336** | 341 | 339 |
+
+**Identical.** The cross-session cache does not need the grant, which is why asking for it at boot is
+not worth a dialog.
+
   ⚠ **This is a trade the game should make deliberately, not inherit.** Eviction protection is real
   and worth having on a site players return to; the flag is one URL parameter, and making it the
   default for everyone is a shell change. Decide it with the dialog in front of you on Firefox.

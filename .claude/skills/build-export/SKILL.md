@@ -243,6 +243,22 @@ online for a whole session in the consumer repo. `initial_memory=256` and `vulka
 still make the artifact a different one.
 ⚠ Build the loop above to prove a change *compiles* in all four variants. Build the recipe of record
 to hand anything to CommonGrounds or to quote a number.
+⚠ **`modules/register_module_types.gen.cpp` is ONE file shared by every configuration in the
+tree, and alternating a web build with a macOS editor build can leave it describing the wrong
+module set** (hit 2026-09-08). The web recipe's `build_profile` sets
+`"module_text_server_fb_enabled": true`; on macOS that module defaults to **off**. Build the web
+templates, then the editor, and the editor can compile a `register_module_types.gen.cpp` that
+registers `text_server_fb` while its library is not a target for that configuration — the failure is
+a **link** error, `Undefined symbols … initialize_text_server_fb_module`, three minutes into a build
+that looked fine. The cure is one line before each scons invocation:
+
+```bash
+rm -f modules/register_module_types.gen.cpp
+```
+
+⚠ It does not reproduce every time — whichever configuration ran last leaves the file — so a build
+set that happened to work is not evidence that the hazard is gone.
+
 ⚠ **`dlink_enabled=yes` is NOT part of it either**, whatever the imported fork documents say: it
 appends `.dlink` to `extra_suffix` (`platform/web/detect.py`), so it produces
 `godot.web.template_release.wasm32.nothreads.dlink.zip` — a name no export preset in CommonGrounds
