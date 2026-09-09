@@ -142,9 +142,11 @@ const GodotFS = {
 		// _persisted, never awaited: nothing in the boot path may block on it.
 		//
 		// persisted() is asked FIRST so an origin that already has the grant never
-		// reaches persist(). That matters on Firefox, which shows the user a
-		// permission prompt for persist() while Chrome and Safari answer from their
-		// own heuristics silently.
+		// reaches persist(). ⚠ On Firefox 155 the persist() promise NEVER SETTLED
+		// against 127.0.0.1 on a fresh profile, which is the shape of a permission
+		// doorhanger nobody clicked. Nothing here awaits it, so an unanswered request
+		// costs a session nothing — but it is why the already-granted check comes
+		// first, and why the verdict is published rather than assumed.
 		request_persistence: function () {
 			const storage = (typeof navigator !== 'undefined') ? navigator.storage : null;
 			if (!storage || typeof storage.persist !== 'function') {

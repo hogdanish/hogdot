@@ -134,8 +134,22 @@ func _ready() -> void:
 		"scale": get_viewport().scaling_3d_scale,
 		"win": "%dx%d" % [get_viewport().size.x, get_viewport().size.y],
 		"visible": _visible(),
+		"browser": _browser(),
 	})
 	_next_phase()
+
+
+## Which browser this run is in, from the engine's one classifier
+## (`GodotOS.browser_id` in library_godot_os.js), so a reading carries the browser it
+## came from. Firefox translates SPIR-V roughly 9x slower than Chrome on the same
+## machine, so a number without this is not comparable to another number.
+func _browser() -> String:
+	if not _web:
+		return "native"
+	for id: String in ["chrome", "chromium", "edge", "firefox", "safari", "opera", "samsung", "chrome_ios", "firefox_ios", "edge_ios"]:
+		if OS.has_feature("web_browser_" + id):
+			return id
+	return "other"
 
 
 ## Per-frame animation hook for subclasses (keeps `_process` owned by the harness).

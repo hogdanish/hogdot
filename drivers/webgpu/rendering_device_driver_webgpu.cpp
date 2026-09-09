@@ -955,9 +955,10 @@ static char *_translate_spirv_to_wgsl(const uint8_t *p_spv_ptr, int p_spv_size, 
 // ShaderRD::_save_to_cache stores SPIR-V, so a hit there skips glslang and still
 // pays full Tint, on the main thread, inside the frame.
 //
-// ⚠ Chrome keeps a persistent WebGPU pipeline cache of its own. Safari and Firefox
-// keep NONE, so on those two this side cache is the only thing between a returning
-// player and a completely cold translation.
+// ⚠ No browser caches the TRANSLATION for us — a browser-side WebGPU pipeline cache
+// (which Chrome has and the others are not known to) starts after WGSL exists, so it
+// can never remove a Tint run. Measured 2026-09-08 on this scene: warm Chrome with
+// this cache switched off pays the full cold translation again.
 //
 // What is stored is the Tint output EXACTLY as _spv_to_wgsl_cached returns it —
 // before _apply_common_wgsl_passes, the read_write split and the depth-sample

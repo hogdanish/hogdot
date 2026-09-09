@@ -357,8 +357,8 @@ unchanged and byte-compatible.
 
 ```
 __cgPerf.version        1
-__cgPerf.build          { engine_commit, pipeline_id, threads, adapter{vendor,architecture,device,description} }
-__cgPerf.counters       live getter over the heap; 20 monotonic doubles (see the header's Counter enum)
+__cgPerf.build          { engine_commit, pipeline_id, threads, adapter{…}, browser{…}, storage{…} }
+__cgPerf.counters       live getter over the heap; 23 monotonic doubles (see the header's Counter enum)
 __cgPerf.frames         live getter → { head, cap: 3600, stride: 13, count, buf: Float64Array }
 __cgPerf.frames_schema  13 names, fixed order, index == column
 __cgPerf.compiles       plain array, cap 512, { t, frame, kind: render|compute|module, label, ms, translate_ms, baked }
@@ -380,9 +380,16 @@ game repo reads this channel; do not restate it here.
 ### The two release-visible console lines (D-1, D-7)
 
 ```
-[CGPERF] build engine=<sha12> pipeline_id=<stamp> baked=0/0 threads=<0|1> adapter=<vendor>/<device|architecture> canvas_fmt=<bgra8unorm|rgba8unorm>
+[CGPERF] build engine=<sha12> pipeline_id=<stamp> baked=0/0 threads=<0|1> adapter=<vendor>/<device|architecture> canvas_fmt=<bgra8unorm|rgba8unorm> browser=<name>/<engine>/<version> userfs=<persistent|session> persisted=<-1|0|1> wgsl_cache=<entries>/<n>KiB
 [CGPERF] baked=<hit>/<hit+miss> spv_wgsl=<hit>/<hit+miss> engine=<sha12> rd_miss=<n>
 ```
+
+⚠ **The build line's last four fields were APPENDED 2026-09-08, never inserted.** Consumers grep
+`[CGPERF] build engine=` and read fields by name, and the position of the existing six is part of a
+release-visible contract. `wgsl_cache=-1/0KiB` means the persistent WGSL cache is off for this
+session; `userfs=session` means the whole `user://` tree dies with the tab, which is what a Safari
+private window looks like and is the difference between a known no-cache session and a mystery slow
+one.
 
 - The **first** goes out at driver init, before the first frame, so a build-currency assertion can
   key on `[CGPERF] build engine=` immediately and a device lost during boot still leaves provenance
@@ -536,9 +543,10 @@ Settings dialog** — write the line into `project.godot` by hand.
   `apple/metal-3`, exit 0, with no rendering corruption — the first evidence that path has ever
   produced. ⚠ **One run, one adapter, one browser** (Playwright's bundled Chromium on macOS/Metal);
   the run log does not distinguish which of the two templates carried it, so treat even the
-  threads/nothreads split as unproven. Nothing at all is known about Firefox, Safari, or any
-  Windows/Linux adapter. That is not enough to flip the default — it is enough to stop calling the
-  defense unexercised. The bar for flipping is `degraded_frames = 0` across more than one adapter.
+  threads/nothreads split as unproven. Nothing at all is known about TIMESTAMP QUERIES on Firefox,
+  Safari, or any Windows/Linux adapter — the 2026-09-08 cross-browser section below covers boot and
+  translation on those two, not this path. That is not enough to flip the default — it is enough to
+  stop calling the defense unexercised. The bar for flipping is `degraded_frames = 0` across more than one adapter.
 - ⚠ **`__cgPerf.ts.degraded_frames` is the number that decides whether a GPU timing is real.** It
   counts every resolve the skip path threw away. While it climbs, rendering stays correct and the
   timings quietly stop advancing — the failure mode is *stale numbers*, not an error. A nonzero value
@@ -549,6 +557,239 @@ Settings dialog** — write the line into `project.godot` by hand.
 - `ts` is a **live getter** over the heap for the same reason `counters` is: `degraded_frames` is
   bumped by a plain `double` store from C++ on a path that can run every frame, so an `EM_ASM` there
   would put a JS crossing on the per-frame path in exactly the state where the driver is struggling.
+
+## Firefox and Safari — the first measurements (2026-09-08)
+
+⚠ **This supersedes "Nothing at all is known about Firefox, Safari, or any Windows/Linux adapter"
+for those two browsers.** Everything below is one machine (M5 MacBook Pro, macOS 27 beta), one
+build, the perf bed's `world` scene exported unbaked. It is a first data point, not a survey — the
+Windows and Linux half is still unknown.
+
+| | Chrome 152 | Firefox 155.0 | Safari 27.0 |
+| --- | --- | --- | --- |
+| `navigator.gpu`, boots, renders | yes | **yes** | **yes** |
+| `GPUAdapterInfo` | `apple` / `metal-3`, device+description empty | **all four fields EMPTY** | **all four fields `"apple"`** |
+| `float32-blendable` | available | **NOT available** | available |
+| `uncaptured_error` over a full session | 0 | 0 | **1, reproducible** |
+| cold SPIR-V→WGSL, 339 stages, shipped template | 3 080 ms | 3 916 ms | 3 113 ms |
+
+- ⚠ **A retracted number, kept because the mistake is the lesson, and because the A/B that killed it
+  is worth more than the number was.** A first Firefox pass measured **37 649 ms** for that last row
+  — a 9× gap over Chrome that would have become this session's headline. It was **CPU contention,
+  and nothing else**: that run happened while four web templates were compiling at `num_jobs=4` on
+  the same machine. The controlled A/B, both arms idle, same scene, same fresh profile:
+
+  | Firefox 155 cold `translate_ms` | non-`production` template | shipped `production` template |
+  | --- | ---: | ---: |
+  | idle machine, one A/B pair | **3 804 ms** | **3 740 ms** |
+  | machine compiling four templates | 37 649 ms | not measured |
+
+  So the build flags are worth ~2 % and the background load **~10×**. **Never quote a browser
+  number taken while the machine is building.** ⚠ The corollary is more useful than the warning: a
+  contended machine multiplied Firefox's synchronous translation by ten, which is a reasonable proxy
+  for the low-end hardware the reports come from — but it must be labeled as load, never as
+  "Firefox is slow".
+- ⚠ **Safari raises a real `GPUValidationError` that no other browser does**, once per session:
+  `storageBufferCount(9) > maxStorageBuffers(8)`. Safari reports the WebGPU **spec minimum** of 8
+  storage buffers per shader stage and the forward-mobile bind group asks for 9 — the
+  push-constant ring at binding 120 in group 3 is the ninth. `maxUniformBuffers`,
+  `maxSamplersPerShaderStage`, `maxSampledTextures` and `maxStorageTextures` all pass; only the
+  storage-buffer count fails. **Something does not draw on Safari.** Not diagnosed further here;
+  it is the first hard capability gap the port has hit, and it is structural rather than a bug.
+- The adapter row is why the boot line needed a browser field at all: on Firefox
+  `adapter=unknown/unknown`, and Safari answers the literal string `apple` to all four questions,
+  so the device name prints as `Apple - apple - apple - apple`. Neither identifies an
+  implementation; `browser=` does.
+- The depth-texture blank-fallback warnings (`_warn_fallback_substitution`) fire on Firefox and
+  Safari in this scene. Not investigated.
+
+**How to reproduce without Playwright.** `webgpu_tests/scene_smoketest/open_3browsers.mjs` is the
+sanctioned three-browser tool but needs `playwright` installed, which this tree does not carry. The
+2026-09-08 runs instead served the export from a plain node server and launched the real browser
+binary, letting the PAGE report itself back over HTTP — no automation driving the window, which is
+also the rule here. Two mechanics are load-bearing and cost time to learn:
+
+- ⚠ **Pin the server port.** The origin is part of the IndexedDB partition key, so `listen(0)` makes
+  every run a different origin and `user://` can never survive one. A whole first attempt at the
+  two-session measurement reported "the cache does not persist" for exactly this reason.
+- ⚠ **Safari has no CLI profile flag**, so isolation comes from the origin instead: a port that
+  Safari has never seen is a fresh partition, which makes run 1 genuinely cold without touching any
+  other browsing data. `open_3browsers.mjs` uses three ports for the same reason.
+- ⚠ **Give the page time to die.** The report is sent, the page navigates to `about:blank` (which is
+  what fires `pagehide`), and only then may the browser be killed — 20 s here. Kill it sooner and the
+  IndexedDB reconcile is still running, which looks exactly like a cache that does not work.
+
+## The persistent WGSL cache — `user://wgsl_cache` (added 2026-09-08)
+
+The in-memory `_spv_to_wgsl_cache` lives for the process lifetime, and in a browser **the tab is the
+process**. Every visit paid Tint again for every shader the export bake did not serve. The engine's
+own `user://shader_cache` does not close that gap: `ShaderRD::_save_to_cache` stores **SPIR-V**, so a
+hit there skips glslang and still pays full Tint, on the main thread, inside the frame.
+
+⚠ **No browser caches the TRANSLATION.** A browser-side WebGPU pipeline cache — Chrome has one; the
+others are not known to — starts *after* WGSL exists, so it can never remove a Tint run. Measured
+2026-09-08: a warm Chrome profile with `?webgpu_no_wgsl_cache` pays the full cold translation again.
+The saving here is engine-side or it does not happen.
+
+**Measured 2026-09-08** — the perf bed's `world` scene exported UNBAKED (339 translated stages, the
+maximal case), shipped release `nothreads` template, idle machine, one browser profile per column,
+two consecutive sessions. Full table and method: `webgpu_tests/perf/HANDOFF.md` § r10.
+
+| `counters.translate_ms` | Chrome 152 | Firefox 155 | Safari 27 |
+| --- | ---: | ---: | ---: |
+| first visit | 3 080 | 3 916 | 3 113 |
+| warm visit | **281** | **403** | **170** |
+
+1.9 MB on disk. `spv_wgsl_cache_miss` goes 339 → **0**; a warm Chrome profile run with
+`?webgpu_no_wgsl_cache` returns to 3 299 ms, which is the control that says the win is the cache and
+not warm-up. The `threads=yes` template behaves identically (4 178 → 250 ms).
+
+- Layout: one flat directory, one file per entry, named `<build:8>-<key:16>-<size:8>.wgsl`. The
+  payload is zstd over the Tint output, behind a 32-byte header (magic, format version, build salt,
+  key, flags, raw size).
+- **The name carries everything the init scan needs**, so a cold start is one `DirAccess` listing
+  and opens nothing it is about to delete. Anything that does not parse, or names another build, is
+  removed unopened.
+- ⚠ **Deliberately NOT a directory per build.** That is the mistake `user://shader_cache` makes —
+  `GODOT_VERSION_HASH` is a path component there, so every engine rebuild orphans a whole subtree
+  (see the `engine` skill). One flat directory plus a build tag in the name cannot do that.
+- Cap and eviction: `rendering/rendering_device/webgpu_wgsl_cache_size_mb`, default **64**, `0`
+  disables. Over the cap, the coldest entries go until the store is back at 90 %. ⚠ Registered from
+  a web-only driver, so it never appears in the editor's Project Settings dialog — write it into
+  `project.godot` by hand. `?webgpu_no_wgsl_cache` in the URL turns it off for one session, which is
+  the A/B arm that needs no re-export.
+- ⚠ **A cap BELOW the working set is worse than no cache at all.** Measured 2026-09-08 with the cap
+  forced to 1 MiB against a 1.94 MB working set: session 1 stored 339 and evicted 225, ending at
+  114 entries / 998 560 B (correctly under the cap); session 2 booted with those 114, **hit zero of
+  them** and evicted 337. Entries found by the init scan are the coldest class, so each new store
+  throws one out just before it would have been asked for — classic thrash, and the session pays
+  every write for nothing. The default 64 MB is ~33× the measured need; do not tune it down without
+  measuring `wgsl_disk_hit` afterwards.
+- ⚠ **Recency is real within a session and approximate across them.** Entries found by the init scan
+  start cold, so "not used this session" is the first class evicted; within a session it is true
+  LRU. Nothing on this platform can update an access time without rewriting the file, and rewriting
+  one per hit would put the entire warm cache back through IndexedDB on every boot.
+
+### What is cached, and why the key is what it is
+
+The entry is the Tint output **exactly as `_spv_to_wgsl_cached` returns it** — before
+`_apply_common_wgsl_passes`, the `read_write` split and the depth-sample rewrite, all of which the
+two call sites run afterwards on whatever they are handed. Caching anywhere else would give a caller
+a different string on a hit than on a miss.
+
+⚠ **Poisoning is the failure mode**, so the key carries everything that decides the WGSL text
+byte-for-byte (RL-027):
+
+| part | why |
+| --- | --- |
+| the SPIR-V bytes | two murmur3 passes, as the in-memory key already did |
+| `SPV_WGSL_OVERRIDES_KEY_SALT` | the same salt, for the same reason — the two modes emit different text |
+| `GODOT_VERSION_HASH` | everything the engine can change about the SPIR-V that arrives |
+| `TINT_BAKE_PIPELINE_ID` | the pass list, the preprocessing and this driver's own source, which is already a pipeline-id input |
+
+The last two are hashed into one **build salt** that is both the file-name prefix and a header field,
+so a stale entry is caught by the listing *and* re-checked before its bytes are used. A file that
+fails any check is deleted rather than retried: a cache that can hand back the wrong text is worse
+than no cache, and the cost of being wrong is a shader that renders incorrectly with nothing in the
+console.
+
+⚠ **A frozen-retry fallback is recorded in the entry's flags.** `_spv_to_wgsl_cached` caches a
+frozen translation under the *overrides* key when the override-preserving attempt fails, and bumps
+`override_translate_fallback`. A disk hit re-bumps it from the stored flag — without that the
+counter would read 0 on every warm session while the shaders were still degraded, which is exactly
+the silence the counter exists to break.
+
+### Three new counters, and one that changed meaning
+
+| counter | means |
+| --- | --- |
+| `wgsl_disk_hit` | the persistent cache served a translation a PREVIOUS session paid for |
+| `wgsl_disk_store` | a fresh translation was written to it |
+| `wgsl_disk_evict` | an entry was dropped to stay under the cap |
+
+⚠ **`spv_wgsl_cache_hit` now counts BOTH tiers.** The two answer the same question — did Tint have
+to run — and the console line's `spv_wgsl=<hit>/<total>` ratio would otherwise silently lose every
+shader the disk served. `hit - wgsl_disk_hit` is what the in-memory cache answered. On a first-ever
+visit `wgsl_disk_hit` is 0 by construction; on a second visit of the same content it is the whole
+point. `store` climbing every boot with `hit` stuck at 0 means the writes are not surviving — read
+`build.storage` next, not the cache code.
+
+## `user://` on web actually surviving the tab (added 2026-09-08)
+
+Three edges, all in `platform/web/js/libs/library_godot_os.js`, all of which made the caches above
+(and every other `user://` write) less durable than they looked.
+
+- **`pagehide` now calls `GodotFS.sync()`.** Nothing did before — grep the directory. The engine
+  already schedules a sync on the frame after any closed `/userfs` write
+  (`OS_Web::file_access_close_callback` → `main_loop_iterate`), but a sync in flight when the tab
+  goes away loses that batch, and `idb_is_syncing` suppresses a second one, so during a compile wave
+  the newest writes are precisely the ones still queued. ⚠ **`pagehide`, not `beforeunload`** —
+  `beforeunload` does not fire on mobile Safari or on a backgrounded tab the browser discards, which
+  are the sessions that lose a cache.
+  ⚠ `GodotFS.sync(true)` **skips the in-flight guard and does not touch `_syncing`**. A page that is
+  going away cannot wait for the running sync and then start another. Two concurrent IDBFS
+  reconciles read the same in-memory tree and write the same entries, so the redundant one costs a
+  transaction, not consistency — and clearing `_syncing` from the forced path would tell the other
+  sync's owner it had finished.
+- **`navigator.storage.persist()` is now requested at boot.** Nothing asked before, so `user://` sat
+  in the browser's best-effort eviction bucket. `persisted()` is asked first, so an origin that
+  already holds the grant never reaches `persist()`.
+  ⚠ **What the three browsers actually answered, measured 2026-09-08 against `127.0.0.1`:**
+
+  | browser | `build.storage.persisted` |
+  | --- | --- |
+  | Chrome 152 | **0 — denied**, fresh profile and reused profile alike |
+  | Safari 27 | **0 — denied** |
+  | Firefox 155 | **-1 — never answered** across three visits on a fresh profile; **1 — granted** from visit 2 on a profile that had already seen the request |
+
+  ⚠ **The Firefox `-1` is the shape of a permission doorhanger nobody clicked**: the promise simply
+  never settles. It costs nothing at runtime — the cache still kept all 339 entries — but it means a
+  Firefox player probably sees a storage-permission prompt at boot, and **nobody has yet watched a
+  Firefox window during boot to confirm it.** Do that before a public launch. If it is real and
+  unwanted, gate the request rather than deleting it: without the grant `user://` stays evictable.
+  A public origin may also answer differently from localhost.
+- **The verdict is published**, because a no-cache session must say so rather than looking like slow
+  hardware: `__cgPerf.build.storage.userfs_persistent` (false = `syncfs(true)` failed at boot,
+  `GodotFS._idbfs` is false, `user://` is per-session RAM — a Safari private window),
+  `.storage.persisted` (-1 unanswered, 0 denied, 1 granted) and the WGSL cache's own entry count,
+  bytes and cap. Both are on the boot line too.
+
+⚠ **What is still open: visit 1 is kept when the machine is calm, and not always otherwise.**
+Measured 2026-09-08 on the shipped template with an idle machine and a 20 s window between the
+report and the tab closing, every browser kept all 339 entries from visit 1. Under load, and with
+that window cut to 5 s, Firefox kept 153 of 337 and Safari kept none of the first visit — with **no
+error anywhere**, because the sync callback reports success either way. The files reach the
+Emscripten FS immediately; they reach IndexedDB only through `FS.syncfs(false)`, a **whole-mount
+reconcile** whose cost grows with the mount, so during a 340-file compile wave the tail can still be
+unwritten when the tab goes. A player on a slow machine who closes the tab mid-compile is that case.
+**The fix shape, when someone spends on it:** write the WGSL cache to IndexedDB directly — a small
+async key/value store in `library_godot_os.js`, one small transaction per entry — so each entry
+commits independently of the mount. Platform-layer only, no renderer semantics, verifiable the same
+way this batch was.
+
+## Browser identity (added 2026-09-08)
+
+Nothing under `drivers/webgpu/` could tell Chrome from Safari from Firefox; `navigator.userAgent` was
+read only for OS and keyboard purposes and `GPUAdapterInfo` reports vendor and architecture, not the
+implementation.
+
+`GodotOS.browser_id()` in `library_godot_os.js` is the engine's **one** classifier, and both
+consumers read it so they cannot disagree about a session:
+
+- `OS.has_feature("web_browser_<name>")` and `OS.has_feature("web_engine_<engine>")` from GDScript —
+  names are `chrome`, `chromium`, `edge`, `firefox`, `safari`, `opera`, `samsung`, the three iOS
+  brands (`chrome_ios`, `firefox_ios`, `edge_ios`) and `other`; engines are `blink`, `gecko`,
+  `webkit`, `other`.
+- `godot_js_os_browser_id()` (declared in `platform/web/godot_js.h`) → `__cgPerf.build.browser`
+  `{name, engine, version}` and the boot line's `browser=` field.
+
+⚠ **`engine` is the load-bearing half.** On iOS every brand is WebKit, and what decides how WebGPU
+behaves is the implementation, not the badge. Brand order in the table matters: Chrome's UA contains
+`Safari`, Edge's contains `Chrome`, and Safari reports its own version as `Version/x.y`.
+
+⚠ **Report and schedule with this; NEVER relax a correctness workaround on it.** A validation-driven
+rewrite runs for every browser, because the browser that needs it is the one whose UA string the
+next release changes.
 
 ## Microbench gates — `[CGBENCH]` (added 2026-08-30, chunk 3)
 

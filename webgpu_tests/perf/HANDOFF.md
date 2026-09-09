@@ -247,3 +247,149 @@ a pending win — do not budget for it.
 
 `shader_rd_miss` reads **2** on the game (against 22 on the fork's own coverage project), so the game's
 bake now covers all but two versions.
+
+## r10 — the persistent WGSL cache, and the first Firefox and Safari numbers (2026-09-08)
+
+This batch attacks the complaint the developer's M5 cannot reproduce: **long shader compilation and
+stuttering on joining, on many machines, every time.** The bake is not the cause — on the game it is
+healthy (`baked_wgsl_hit` 826/849, `rd_miss` 2). What remained was paid on **every single session**,
+because the driver's SPIR-V→WGSL cache lived only for the process and a browser tab *is* the
+process. The engine's own `user://` shader cache does not help: it stores SPIR-V, so a hit there
+skips glslang and still pays full Tint, on the main thread, inside the frame.
+
+`user://wgsl_cache` now keeps the translated WGSL between visits. It is on by default and needs no
+export change.
+
+### The numbers
+
+Method: the perf bed's `world` scene, exported **unbaked** so every shader translates at runtime (the
+maximal case — 339 stages). One browser profile per column, sessions back to back, machine otherwise
+idle, release `nothreads` template built to the **recipe of record** (`production=yes`,
+`build_profile=hogdot/build_profile.web.gdbuild`, `initial_memory=256`).
+
+| | Chrome 152 | Firefox 155.0 | Safari 27.0 |
+| --- | ---: | ---: | ---: |
+| `translate_ms`, first visit | 3 080 ms | 3 916 ms | 3 113 ms |
+| `translate_ms`, warm visit | **281 ms** | **403 ms** | **170 ms** |
+| `first_frame_ms`, first → warm | 3 131 → 1 995 ms | 3 904 → 1 507 ms | 3 200 → 2 972 ms |
+| cache on disk when warm | 1.90 MB | 1.90 MB | 1.91 MB |
+| `uncaptured_error`, whole session | 0 | 0 | **1** (see below) |
+
+⚠ Safari's `first_frame_ms` barely moves even though its translation drops 18×: something else
+dominates its boot. Not diagnosed.
+
+The control arm: the same warm Chrome profile with `?webgpu_no_wgsl_cache` goes straight back to the
+cold number, so the win is the cache and not browser or OS warm-up.
+
+The **threads=yes** release template — the other shipped variant, and a different set of objects
+because of `#ifdef THREADS_ENABLED` — behaves the same: 4 178 ms cold → **250 ms** warm, 339 entries,
+`threads=1` on the boot line.
+
+⚠ **Two numbers this session produced and then retracted — read this before quoting anything above.**
+A first Firefox pass measured **37 649 ms** of cold translation, and a cache that kept only 153 of
+337 entries across the first visit. Both were the instrument, not the browser. The runs happened
+while four web templates were compiling on the same machine, and the harness killed the tab 5 s
+after the report instead of 20. A controlled A/B afterwards, both arms idle, isolates it:
+
+| Firefox 155 cold `translate_ms` | non-`production` template | shipped `production` template |
+| --- | ---: | ---: |
+| idle machine, one A/B pair | **3 804 ms** | **3 740 ms** |
+| machine compiling four templates | 37 649 ms | not measured |
+
+The build flags are worth ~2 %; the background load was worth **~10×**. **Never quote a browser
+number taken while the machine is building.** ⚠ And the useful half: a contended machine multiplied
+Firefox's synchronous translation by ten, which is a fair proxy for the low-end hardware the player
+reports come from — so a 37 s cold join is a thing that can happen to a real player, it just is not
+a property of Firefox.
+
+### What the game must do
+
+**Nothing to enable it.** What is worth doing:
+
+- **Read the four new fields on the build line**, appended after `canvas_fmt=`:
+  `browser=<name>/<engine>/<version> userfs=<persistent|session> persisted=<-1|0|1>
+  wgsl_cache=<entries>/<n>KiB`. `userfs=session` means the whole `user://` tree dies with the tab (a
+  Safari private window) — that session cannot cache anything and must never be read as slow
+  hardware. `wgsl_cache=-1/0KiB` means the cache is off for the session.
+  ⚠ **`cg/src/webbench/console.rs::parse_build` needs a one-line fix.** It comments that "`adapter=`
+  is last and may itself contain `/` and spaces, so it takes the rest of the line" — which stopped
+  being true in **r9**, when `canvas_fmt=` was appended after it, and is now four fields further from
+  true. `engine`, `pipeline_id`, `baked` and `threads` are parsed from the text *before* `adapter=`
+  and are unaffected, so the engine-pin currency check is fine; only the recorded `adapter` string is
+  polluted. Terminate `adapter=` at the next ` <key>=` token instead of at end-of-line.
+- **Attribute telemetry by browser.** `OS.has_feature("web_browser_firefox")`,
+  `OS.has_feature("web_engine_webkit")` and friends answer from the engine's one classifier, the
+  same one `__cgPerf.build.browser` reports, so a GDScript report and a driver report cannot
+  disagree. Names: `chrome`, `chromium`, `edge`, `firefox`, `safari`, `opera`, `samsung`,
+  `chrome_ios`, `firefox_ios`, `edge_ios`, `other`; engines: `blink`, `gecko`, `webkit`, `other`.
+  ⚠ Use them to report and to schedule, never to skip a workaround.
+- **Read three new counters** beside the old ones: `wgsl_disk_hit`, `wgsl_disk_store`,
+  `wgsl_disk_evict`. ⚠ `spv_wgsl_cache_hit` now counts **both** tiers, so
+  `spv_wgsl_cache_hit - wgsl_disk_hit` is what the in-memory cache answered. `wgsl_disk_store`
+  climbing every boot with `wgsl_disk_hit` at 0 means the writes are not surviving — read
+  `build.storage`, not the cache code.
+- **The cap is `rendering/rendering_device/webgpu_wgsl_cache_size_mb`**, default 64 MB, `0`
+  disables. The whole unbaked perf bed needs 1.90 MB; the game's baked pack should need far less, so
+  the default is nowhere near binding. ⚠ Registered from a web-only driver, so it never appears in
+  the editor's Project Settings dialog — write it into `project.godot` by hand.
+  `?webgpu_no_wgsl_cache` is the A/B arm that needs no re-export.
+  ⚠ **Do not tune the cap below the working set.** Forced to 1 MiB against the 1.94 MB set, session 1
+  stored 339 and evicted 225, ending at 114 entries under the cap — and session 2 hit **none** of
+  them and evicted 337. Entries carried in from a previous session are the coldest class, so each new
+  store throws one out just before it is asked for. A too-small cache pays every write and returns
+  nothing; measure `wgsl_disk_hit` after any change to this number.
+
+### Two things for CommonGrounds to decide
+
+- ⚠ **`navigator.storage.persist()` is now requested at boot, and Firefox needs one human look
+  before this ships.** Measured against `127.0.0.1`: **Chrome 152 denied** it (`persisted=0`) on both
+  a fresh and a reused profile, **Safari 27 denied** it, and **Firefox 155 never answered**
+  (`persisted=-1`) across three visits on a fresh profile — while an older Firefox profile that had
+  already seen the request reported granted from its second visit. **A promise that never settles is
+  the shape of a permission doorhanger nobody clicked.** It costs nothing at runtime (the cache still
+  kept all 339 entries), but a Firefox player probably sees a storage prompt at boot and **nobody has
+  watched a Firefox window during boot to confirm it.** Do that before launch; a public origin may
+  also answer differently from localhost. If the prompt is real and unwanted, gate the request rather
+  than deleting it — a denial only means `user://` stays in the evictable bucket, so the cache works
+  but is not protected.
+- ⚠ **Safari raises a real `GPUValidationError` that no other browser does**, once per session:
+  `storageBufferCount(9) > maxStorageBuffers(8)`. Safari reports the WebGPU spec **minimum** of 8
+  storage buffers per shader stage and forward-mobile asks for 9. **Something does not draw on
+  Safari.** That is a port-level capability gap, not a cache issue, and nothing here fixes it.
+
+### Two engine defects fixed on the way
+
+- **A run with only the `res://` shader cache ignored the whole baked pack, silently.**
+  `ShaderRD::_initialize_cache` returned before computing `group_sha256` when the *user* directory
+  was empty, and the grouped `initialize()` overload — the one every scene, canvas, sky and fog
+  shader uses — did not call it at all in that case. The group hash is a path component of the res
+  lookup too, so a user-directory failure took the read-only cache down with it. Measured on the
+  desktop editor with the user directory deliberately made unusable: **before, 0 cache loads and 33
+  explicit misses; after, 209 cache loads and 0 misses.** A normal desktop boot is unaffected (cold
+  boot 0 loads → warm boot 209 loads, 0 misses).
+- **`user://shader_cache` only ever grew.** `GODOT_VERSION_HASH` feeds `group_sha256`, which is a
+  path component, so every engine rebuild orphaned a whole subtree — and on web those bytes sit
+  inside the IndexedDB mount whose every sync reconciles the lot.
+  `ShaderRD::shader_cache_cleanup_on_start` was declared and read nowhere; it is now wired to a
+  prune that runs at init, deletes only group directories no live group claims, never touches
+  `res://`, and is **off in the editor**, where switching between two engine builds is a normal day.
+
+### What to chase next, biggest first
+
+1. **The Safari storage-buffer limit.** Nine storage buffers against a limit of eight is structural
+   and it is the only finding here that means something visibly renders wrong. Merging two, or moving
+   the push-constant ring to a uniform buffer on adapters that report 8, is the shape of the fix.
+2. **Make the FIRST session's cache robust, not merely usually-fine.** On the shipped template with
+   an idle machine every browser kept visit 1 whole — but a loaded machine and an abrupt tab close
+   lost part of it, because the writes reach IndexedDB only through `FS.syncfs(false)`, a
+   **whole-mount reconcile** whose cost grows with the mount. Nothing errors when the tail is
+   dropped. Writing the WGSL cache to IndexedDB directly — a small async key/value store in
+   `library_godot_os.js`, one transaction per entry — would commit each entry independently of the
+   mount. Platform-layer only, no renderer semantics, verifiable the way this batch was. A player on
+   a slow machine who alt-tabs away mid-compile is exactly the case that still loses.
+3. **Measure the BAKED pack, on all three browsers.** Every number above is the unbaked worst case,
+   chosen so the cache had something to cache. The game's bake is healthy, so its real cold cost is
+   smaller and the cache's share of it is unknown. One export, two runs per browser.
+4. Still parked and still out of scope: async ubershader precompile, Tint on a `WorkerThreadPool`
+   thread, an async canvas path. All change renderer or thread-safety assumptions and none can be
+   visually verified without a driven client.

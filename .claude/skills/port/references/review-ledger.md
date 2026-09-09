@@ -1877,3 +1877,88 @@ first two varyings now collide with `screen_position` / `prev_screen_position` i
 MOTION_VECTORS_MULTIVIEW. CommonGrounds never renders multiview and the WebGPU varying budget
 (`maxInterStageShaderVariables` 16, five user slots, RL-029) is built around 11. A fork wanting XR
 on Mobile must move that pair, not move this number back.
+
+### RL-060 — 2026-09-08 — **bug** (fixed) — a run with only the `res://` shader cache ignored the whole baked pack
+
+**Where:** `servers/rendering/renderer_rd/shader_rd.cpp` (`_initialize_cache`, and the grouped
+`initialize()` overload)
+
+**Found while:** auditing what the browser still pays after the bake is healthy, for the persistent
+WGSL cache.
+
+**What:** `_initialize_cache` returned before the `group_sha256` loop whenever the **user** directory
+was empty, and the *grouped* `initialize()` overload — the one every scene, canvas, sky and fog
+shader uses — did not call `_initialize_cache` at all in that case. But `group_sha256` is a **path
+component of the `res://` lookup too** (`<dir>/<name>/<group_sha256>/<version_sha1>.<api>.cache`), so
+a run whose user directory could not be created had no group hashes, never set
+`shader_cache_res_dir_valid`, and **silently ignored the entire exported bake** — full glslang plus,
+on WebGPU, full Tint, on the main thread. Nothing logs it: the only symptom is a slow boot.
+The user-directory branch is purely about whether this run may *write*; it had been fused with the
+hash computation that both caches read.
+
+⚠ A second, quieter half: the DirAccess-validation block's failures are `ERR_FAIL_MSG`, which
+**returns from the function**. Fused into the hash loop, one unwritable directory left every LATER
+group without a sha256 as well — so a partial user-directory failure also broke the read-only cache.
+
+**Reproduced and measured** on the macOS editor by making `user://…/shader_cache` a regular file, so
+`change_dir` and `make_dir` both fail and `RendererCompositorRD` prints `Can't create shader cache
+folder`, with `res://.godot/shader_cache` populated: **before, 0 `Loading cache for shader` and 33
+`Shader cache miss`; after, 209 loads and 0 misses.** A normal desktop boot is unchanged (cold 0
+loads → warm 209 loads, 0 misses).
+
+**Disposition:** **fixed** — every `group_sha256` is computed whenever *either* directory is set; the
+early return moved below that loop; the DirAccess validation is a second loop so its `ERR_FAIL_MSG`
+cannot truncate the hashes; the grouped overload's guard is now
+`!user.is_empty() || !res.is_empty()`, matching the ungrouped one. Shared upstream code — the
+desktop regression above is the gate.
+
+### RL-061 — 2026-09-08 — **bug** (fixed) — `shader_cache_cleanup_on_start` was dead, and the user cache only ever grew
+
+**Where:** `servers/rendering/renderer_rd/shader_rd.cpp:~1109` (the static),
+`renderer_compositor_rd.cpp` (the wiring)
+
+**Found while:** the same audit.
+
+**What:** `ShaderRD::shader_cache_cleanup_on_start` was declared in the header, defined in the `.cpp`
+and **read nowhere**. Meanwhile `GODOT_VERSION_HASH` feeds `base_sha256` feeds `group_sha256`, which
+is a path component — so every engine rebuild orphans an entire `<name>/<old group sha>/` subtree
+that nothing can ever read again. On web that tree lives inside the IDBFS mount, and
+`FS.syncfs(false)` is a **whole-mount reconcile**: the orphans are not merely wasted bytes, they are
+paid for on every sync of every later session.
+
+**Disposition:** **fixed** — the flag is wired to `_cleanup_stale_cache_groups()`, which deletes only
+`<name>/<subdir>` directories this shader's live group set does not claim.
+⚠ `user://` only (the `res://` tree is the exported bake and read-only), at `_initialize_cache` time
+only (every live group is known and nothing has compiled yet), and **off in the editor**
+(`RendererCompositorRD` passes `!is_editor_hint()`) because switching between two engine builds is a
+normal day there and each boot would delete the other build's warm cache.
+⚠ Safe because `ShaderRD` names are unique — each is the class name generated from one `.glsl` path.
+The only duplicate basenames in the tree are `renderer_rd` vs `gles3`, and GLES3 uses `ShaderGLES3`,
+a different cache. Verified: an injected orphan group directory is removed on the next boot, the live
+one survives, and the cache-load count is unchanged at 209.
+
+### RL-062 — 2026-09-08 — **blocker** (deferred) — Safari reports 8 storage buffers per stage and forward-mobile asks for 9
+
+**Where:** the forward-mobile bind-group layout, and the push-constant ring at group 3 / binding 120
+
+**Found while:** the first Safari measurements this project has taken (Safari 27.0, macOS 27 beta,
+the perf bed's `world` scene, an unbaked export).
+
+**What:** Safari raises one `GPUValidationError` per session that Chrome and Firefox never do, and it
+reproduces:
+
+```
+Resource usage limits exceeded: uniformBufferCount(2) > deviceLimits.maxUniformBuffersPerShaderStage(44)
+|| storageBufferCount(9) > maxStorageBuffers(8) || samplerCount(8) > maxSamplersPerShaderStage(22)
+|| textureCount(10) > maxSampledTexturesPerShaderStage(44) || storageTextureCount(0) > maxStorageTextures(4)
+```
+
+Only the storage-buffer clause fails: Safari reports the WebGPU spec **minimum** of 8 per shader
+stage and the layout declares 9. `counters.uncaptured_error` reads **1** on Safari and **0** on
+Chrome and Firefox over the same session. **Something does not draw on Safari**, and nothing in the
+console says which pipeline.
+
+**Disposition:** **deferred** — structural, not a bug in a hunk, and outside the scope of the session
+that found it. The fix is renderer surgery: merge two storage buffers, or move the push-constant
+ring into a uniform buffer on adapters reporting 8. ⚠ This is the port's first hard capability gap;
+`has_feature()` cannot paper over it because the limit is per shader stage, not a feature bit.

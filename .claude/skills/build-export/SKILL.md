@@ -225,6 +225,29 @@ diff below.
 section. Templates built this way are **not** byte-equivalent to a shipped CI release build, and no
 number taken on them describes the shipped artifact. Say so beside any figure.
 
+⚠ **And the omission is bigger than LTO — that loop is a COMPILE gate, not a shippable set**
+(learned 2026-09-08 by building the wrong thing first). The recipe of record for the templates
+CommonGrounds actually runs is `cg_release.yml`'s web-template matrix, and it adds four flags the
+loop above has none of:
+
+```bash
+scons platform=web target=$T arch=wasm32 webgpu=yes vulkan=no opengl3=no threads=$TH \
+      build_profile=hogdot/build_profile.web.gdbuild initial_memory=256 \
+      production=yes            # release targets ONLY; debug deliberately skips it
+```
+
+`build_profile` is the load-bearing one: it **disables engine classes**, so a template built without
+it carries classes the shipped one does not, and a defect that only appears when a class is missing
+is invisible in a locally built template. That is exactly how a stripped `Line2D` hid a reticle
+online for a whole session in the consumer repo. `initial_memory=256` and `vulkan=no` are smaller but
+still make the artifact a different one.
+⚠ Build the loop above to prove a change *compiles* in all four variants. Build the recipe of record
+to hand anything to CommonGrounds or to quote a number.
+⚠ **`dlink_enabled=yes` is NOT part of it either**, whatever the imported fork documents say: it
+appends `.dlink` to `extra_suffix` (`platform/web/detect.py`), so it produces
+`godot.web.template_release.wasm32.nothreads.dlink.zip` — a name no export preset in CommonGrounds
+references, which fails as a missing template rather than as a build error.
+
 ⚠ **The web template `.wasm` grew ~24 % somewhere between the 2026-08-20 and 2026-08-30 builds** and
 nobody has bisected it: `template_debug.nothreads` 35,420,664 → 43,906,827 bytes (the `.zip`
 9,339,405 → 11,701,202). It is **not** the `__cgPerf` ring, which is zero-init `.bss` and occupies no
