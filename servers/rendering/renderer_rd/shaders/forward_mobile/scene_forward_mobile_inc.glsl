@@ -268,10 +268,12 @@ layout(set = 0, binding = 4, std430) restrict readonly buffer SpotLights {
 }
 spot_lights;
 
+#ifndef AREA_LIGHTS_DISABLED
 layout(set = 0, binding = 5, std430) restrict readonly buffer AreaLights {
 	LightData data[];
 }
 area_lights;
+#endif
 
 layout(set = 0, binding = 6, std430) restrict readonly buffer ReflectionProbeData {
 	ReflectionData data[];
@@ -298,19 +300,23 @@ struct Lightmap {
 	uint flags;
 };
 
+#ifndef LIGHTMAP_DISABLED
 layout(set = 0, binding = 8, std140) restrict readonly buffer Lightmaps {
 	Lightmap data[];
 }
 lightmaps;
+#endif
 
 struct LightmapCapture {
 	vec4 sh[9];
 };
 
+#ifndef LIGHTMAP_DISABLED
 layout(set = 0, binding = 9, std140) restrict readonly buffer LightmapCaptures {
 	LightmapCapture data[];
 }
 lightmap_captures;
+#endif
 
 layout(set = 0, binding = 10) uniform texture2D decal_atlas;
 layout(set = 0, binding = 11) uniform texture2D decal_atlas_srgb;
@@ -327,11 +333,13 @@ global_shader_uniforms;
 
 layout(set = 0, binding = 14) uniform sampler DEFAULT_SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP;
 
+#ifndef AREA_LIGHTS_DISABLED
 layout(set = 0, binding = 15) uniform sampler2D ltc_lut1;
 
 layout(set = 0, binding = 16) uniform sampler2D ltc_lut2;
 
 layout(set = 0, binding = 17) uniform texture2D area_light_atlas;
+#endif
 
 /* Set 1: Render Pass (changes per render pass) */
 
@@ -387,7 +395,12 @@ layout(set = 1, binding = 4) uniform texture2D shadow_atlas;
 layout(set = 1, binding = 5) uniform texture2D directional_shadow_atlas;
 
 // this needs to change to providing just the lightmap we're using..
+#ifndef LIGHTMAP_DISABLED
+// ⚠ MAX_LIGHTMAP_TEXTURES * 2 is SIXTEEN sampled-texture bindings on every scene draw, against a
+// WebGPU sampled-texture spec floor of 16. Compiled out, the whole portable budget goes to
+// materials instead. See render_forward_mobile.h.
 layout(set = 1, binding = 6) uniform texture2DArray lightmap_textures[MAX_LIGHTMAP_TEXTURES * 2];
+#endif
 
 #ifdef USE_MULTIVIEW
 layout(set = 1, binding = 9) uniform texture2DArray depth_buffer;

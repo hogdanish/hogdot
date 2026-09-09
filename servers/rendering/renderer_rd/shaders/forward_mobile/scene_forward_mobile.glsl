@@ -9,6 +9,13 @@
 
 /* Include our forward mobile UBOs definitions etc. */
 #include "scene_forward_mobile_inc.glsl"
+// LIGHTMAP_DISABLED arrives in the general defines, ahead of the variant defines. Undefining
+// USE_LIGHTMAP here removes every lightmap branch below without touching one of them, so this
+// file stays diffable against upstream. See render_forward_mobile.h for why.
+#ifdef LIGHTMAP_DISABLED
+#undef USE_LIGHTMAP
+#endif
+
 
 #define SHADER_IS_SRGB false
 #define SHADER_SPACE_FAR 0.0
@@ -875,6 +882,13 @@ void main() {
 
 /* Include our forward mobile UBOs definitions etc. */
 #include "scene_forward_mobile_inc.glsl"
+// LIGHTMAP_DISABLED arrives in the general defines, ahead of the variant defines. Undefining
+// USE_LIGHTMAP here removes every lightmap branch below without touching one of them, so this
+// file stays diffable against upstream. See render_forward_mobile.h for why.
+#ifdef LIGHTMAP_DISABLED
+#undef USE_LIGHTMAP
+#endif
+
 
 /* Varyings */
 
@@ -2267,6 +2281,7 @@ void main() {
 				diffuse_light, direct_specular_light);
 	}
 
+#ifndef AREA_LIGHTS_DISABLED
 	uint area_light_count = sc_area_lights(8);
 	uvec2 area_indices = instances.data[batch_instance_index].area_lights;
 	for (uint i = 0; i < area_light_count; i++) {
@@ -2298,6 +2313,7 @@ void main() {
 #endif
 				diffuse_light, direct_specular_light);
 	}
+#endif // !AREA_LIGHTS_DISABLED
 #endif // !VERTEX_LIGHTING
 
 #endif //!defined(MODE_RENDER_DEPTH) && !defined(MODE_UNSHADED)

@@ -582,6 +582,7 @@ RID RenderForwardMobile::_setup_render_pass_uniform_set(RenderListType p_render_
 	}
 
 	/* we have limited ability to keep textures like this so we're moving this to a set we change before drawing geometry and just pushing the needed texture in */
+#ifndef RD_FORWARD_MOBILE_NO_LIGHTMAP
 	{
 		Vector<RID> textures;
 		textures.resize(scene_state.max_lightmaps * 2);
@@ -614,6 +615,7 @@ RID RenderForwardMobile::_setup_render_pass_uniform_set(RenderListType p_render_
 		RD::Uniform u(RD::UNIFORM_TYPE_TEXTURE, 6, textures);
 		uniforms.push_back(u);
 	}
+#endif // !RD_FORWARD_MOBILE_NO_LIGHTMAP
 
 	/*
 	{
@@ -2025,6 +2027,7 @@ void RenderForwardMobile::_update_render_base_uniform_set() {
 			u.append_id(RendererRD::LightStorage::get_singleton()->get_spot_light_buffer());
 			uniforms.push_back(u);
 		}
+#ifndef RD_FORWARD_MOBILE_NO_AREA_LIGHTS
 		{
 			RD::Uniform u;
 			u.binding = 5;
@@ -2032,6 +2035,7 @@ void RenderForwardMobile::_update_render_base_uniform_set() {
 			u.append_id(RendererRD::LightStorage::get_singleton()->get_area_light_buffer());
 			uniforms.push_back(u);
 		}
+#endif
 
 		{
 			RD::Uniform u;
@@ -2047,6 +2051,7 @@ void RenderForwardMobile::_update_render_base_uniform_set() {
 			u.append_id(RendererRD::LightStorage::get_singleton()->get_directional_light_buffer());
 			uniforms.push_back(u);
 		}
+#ifndef RD_FORWARD_MOBILE_NO_LIGHTMAP
 		{
 			RD::Uniform u;
 			u.binding = 8;
@@ -2061,6 +2066,7 @@ void RenderForwardMobile::_update_render_base_uniform_set() {
 			u.append_id(scene_state.lightmap_capture_buffer);
 			uniforms.push_back(u);
 		}
+#endif
 		{
 			RD::Uniform u;
 			u.binding = 10;
@@ -2101,6 +2107,7 @@ void RenderForwardMobile::_update_render_base_uniform_set() {
 			uniforms.push_back(u);
 		}
 
+#ifndef RD_FORWARD_MOBILE_NO_AREA_LIGHTS
 		{ // Lookup-table for Area Lights - Linearly transformed cosines (LTC)
 			if (ltc.lut1_texture.is_null() || ltc.lut2_texture.is_null()) {
 				Ref<Image> lut1_image;
@@ -2156,6 +2163,7 @@ void RenderForwardMobile::_update_render_base_uniform_set() {
 			u.append_id(decal_atlas);
 			uniforms.push_back(u);
 		}
+#endif // !RD_FORWARD_MOBILE_NO_AREA_LIGHTS
 
 		render_base_uniform_set = UniformSetCacheRD::get_singleton()->get_cache_vec(scene_shader.default_shader_rd, SCENE_UNIFORM_SET, uniforms);
 	}
@@ -3844,6 +3852,14 @@ RenderForwardMobile::RenderForwardMobile() {
 	{
 		//lightmaps
 		scene_state.max_lightmaps = MAX_LIGHTMAPS;
+#ifdef RD_FORWARD_MOBILE_NO_LIGHTMAP
+		// the shader half of the guard: this also `#undef`s USE_LIGHTMAP, so every lightmap
+		// branch in the mobile shader disappears without editing one of them.
+		defines += "\n#define LIGHTMAP_DISABLED\n";
+#endif
+#ifdef RD_FORWARD_MOBILE_NO_AREA_LIGHTS
+		defines += "\n#define AREA_LIGHTS_DISABLED\n";
+#endif
 		defines += "\n#define MAX_LIGHTMAP_TEXTURES " + itos(scene_state.max_lightmaps) + "\n";
 		defines += "\n#define MAX_LIGHTMAPS " + itos(scene_state.max_lightmaps) + "\n";
 

@@ -39,6 +39,26 @@
 
 namespace RendererSceneRenderImplementation {
 
+// ⚠ forward-mobile in this fork ships WITHOUT lightmaps and WITHOUT area lights, and both
+// halves — these guards and the matching `#ifdef`s in the mobile shaders — must move together.
+//
+// Why: the WebGPU spec floor is 8 storage buffers per stage. Set 0 declared eight on its own and
+// set 1's `InstanceDataBuffer` made nine, so `CreatePipelineLayout` for
+// `SceneForwardMobileShaderRD` is REFUSED on every conforming spec-floor adapter — Safari is one,
+// and no forward-mobile pipeline can be created there at all. Lightmaps own two of those buffers
+// (`Lightmaps`, `LightmapCaptures`) and area lights own one (`AreaLights`); dropping the three
+// leaves six, with headroom.
+//
+// Lightmaps also owned set 1 binding 6, an array of `MAX_LIGHTMAPS * 2` = SIXTEEN texture2DArray
+// bindings on every scene draw. The sampled-texture spec floor is also 16, so that one binding
+// consumed the entire portable budget for a feature nothing here uses.
+//
+// It costs this consumer nothing: `AreaLight3D`, `LightmapGI`, `LightmapGIData` and
+// `LightmapProbe` are already in the game's `build_profile.web.gdbuild` `disabled_classes`.
+// forward-clustered is untouched.
+#define RD_FORWARD_MOBILE_NO_LIGHTMAP
+#define RD_FORWARD_MOBILE_NO_AREA_LIGHTS
+
 class RenderForwardMobile : public RendererSceneRenderRD {
 	friend SceneShaderForwardMobile;
 
