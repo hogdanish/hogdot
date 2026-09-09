@@ -121,11 +121,16 @@ const GodotFS = {
 		_idbfs: false,
 		_syncing: false,
 		_mount_points: [],
-		// navigator.storage.persist() verdict: -1 unknown/unanswered, 0 denied, 1 granted.
-		// Without a granted bucket the browser may evict user:// — which now holds the
-		// shader and WGSL caches — at any time, so a session must be able to say which
-		// bucket it got rather than reporting a mystery slow boot.
-		_persisted: -1,
+		// navigator.storage durability, published so a session can say which bucket it
+		// got instead of reporting a mystery slow boot:
+		//   -2 not requested (the default; see request_persistence)
+		//   -1 requested and never answered — on Firefox, a dialog still on screen
+		//    0 denied
+		//    1 granted
+		// ⚠ This is NOT what decides whether the caches survive. IndexedDB persists
+		// across sessions either way; the grant only protects it from eviction under
+		// storage pressure. `_idbfs` is the flag that decides whether they work at all.
+		_persisted: -2,
 		// Bound listener, kept so deinit can remove exactly what init added.
 		_pagehide_cb: null,
 
@@ -137,37 +142,54 @@ const GodotFS = {
 			return GodotFS._persisted;
 		},
 
-		// Ask the browser to move this origin's storage out of the best-effort
-		// eviction bucket. Answered asynchronously and reported through
-		// _persisted, never awaited: nothing in the boot path may block on it.
+		// ⚠ persist() is OPT-IN, and that is a deliberate reversal. Asking at boot
+		// raises a permission dialog on Firefox — confirmed on 155.0, seen repeatedly
+		// on a real screen — and the grant buys the engine's caches NOTHING that was
+		// measurable: every 2026-09-08 measurement ran with no grant (Chrome and Safari
+		// denied it, Firefox left it unanswered) and every warm boot still restored the
+		// full cache. The grant protects user:// from eviction under storage pressure,
+		// which is worth having, but not worth a dialog on every player's first visit
+		// without someone choosing that trade deliberately.
 		//
-		// persisted() is asked FIRST so an origin that already has the grant never
-		// reaches persist(). ⚠ On Firefox 155 the persist() promise NEVER SETTLED
-		// against 127.0.0.1 on a fresh profile, which is the shape of a permission
-		// doorhanger nobody clicked. Nothing here awaits it, so an unanswered request
-		// costs a session nothing — but it is why the already-granted check comes
-		// first, and why the verdict is published rather than assumed.
+		// persisted() runs unconditionally because it NEVER prompts: the durability
+		// state is always reported, whether or not this session asked for it.
+		//
+		// Answered asynchronously and never awaited — nothing in the boot path may
+		// block on it.
 		request_persistence: function () {
 			const storage = (typeof navigator !== 'undefined') ? navigator.storage : null;
-			if (!storage || typeof storage.persist !== 'function') {
+			if (!storage || typeof storage.persisted !== 'function') {
 				return;
 			}
-			const persisted = (typeof storage.persisted === 'function')
-				? storage.persisted()
-				: Promise.resolve(false);
-			persisted.then(function (granted) {
+			const opted_in = GodotFS.persist_opted_in();
+			storage.persisted().then(function (granted) {
 				if (granted) {
 					GodotFS._persisted = 1;
 					return null;
 				}
+				if (!opted_in || typeof storage.persist !== 'function') {
+					return null;
+				}
+				GodotFS._persisted = -1;
 				return storage.persist().then(function (ok) {
 					GodotFS._persisted = ok ? 1 : 0;
 					return null;
 				});
 			}).catch(function (e) {
-				GodotFS._persisted = 0;
-				GodotRuntime.print(`Persistent storage request failed: ${e.message}`);
+				GodotRuntime.print(`Persistent storage query failed: ${e.message}`);
 			});
+		},
+
+		// Did this session ask for durable storage? `?webgpu_persist_storage` in the
+		// URL, matching the other webgpu_* switches, so an A/B needs no re-export.
+		// ⚠ There is deliberately no project setting: this runs before the engine
+		// starts, so no project setting is readable yet.
+		persist_opted_in: function () {
+			try {
+				return new URLSearchParams(window.location.search).has('webgpu_persist_storage');
+			} catch (e) {
+				return false;
+			}
 		},
 
 		// Initialize godot file system, setting up persistent paths.

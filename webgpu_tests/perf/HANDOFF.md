@@ -285,11 +285,25 @@ The **threads=yes** release template — the other shipped variant, and a differ
 because of `#ifdef THREADS_ENABLED` — behaves the same: 4 178 ms cold → **250 ms** warm, 339 entries,
 `threads=1` on the boot line.
 
+⚠ **The grant state of every number above is recorded, and it is the same one: NO durable storage.**
+`navigator.storage.persist()` was **denied** on every Chrome run (`persisted=0`) and every Safari run
+(`persisted=0`), and **never answered** on every Firefox run kept here (`persisted=-1`, a fresh
+profile each time). The warm boots hit anyway — 339, 339 and 341 entries. So **the cross-session
+cache does not depend on the durable-storage grant**, which is what the API actually says: the grant
+protects `user://` from *eviction under storage pressure*, it does not gate whether IndexedDB
+persists. `userfs_persistent` — IDBFS actually mounted — is the flag that matters, and it was true
+everywhere.
+⚠ This mattered because an earlier Firefox series ran while a human was answering the storage
+permission dialog by hand, sometimes with "remember this decision". Those runs (`persisted` going
+-1 → 1 → 1 → 1) are **not** the source of any number above; they are the retracted ones below.
+
 ⚠ **Two numbers this session produced and then retracted — read this before quoting anything above.**
-A first Firefox pass measured **37 649 ms** of cold translation, and a cache that kept only 153 of
-337 entries across the first visit. Both were the instrument, not the browser. The runs happened
-while four web templates were compiling on the same machine, and the harness killed the tab 5 s
-after the report instead of 20. A controlled A/B afterwards, both arms idle, isolates it:
+A first Firefox pass measured **37 649 ms** of cold translation, and a cache that appeared to keep
+only 153 of 337 entries across the first visit. The 37 649 ms was the machine: four web templates
+were compiling at the time. The 153/337 is **unattributable and is withdrawn without a cause** —
+that series had both a 5 s tab-close window and a human answering permission dialogs partway
+through, so neither the sync timing nor the permission state was controlled. A controlled A/B
+afterwards, both arms idle, isolates the timing half:
 
 | Firefox 155 cold `translate_ms` | non-`production` template | shipped `production` template |
 | --- | ---: | ---: |
@@ -341,17 +355,20 @@ a property of Firefox.
 
 ### Two things for CommonGrounds to decide
 
-- ⚠ **`navigator.storage.persist()` is now requested at boot, and Firefox needs one human look
-  before this ships.** Measured against `127.0.0.1`: **Chrome 152 denied** it (`persisted=0`) on both
-  a fresh and a reused profile, **Safari 27 denied** it, and **Firefox 155 never answered**
-  (`persisted=-1`) across three visits on a fresh profile — while an older Firefox profile that had
-  already seen the request reported granted from its second visit. **A promise that never settles is
-  the shape of a permission doorhanger nobody clicked.** It costs nothing at runtime (the cache still
-  kept all 339 entries), but a Firefox player probably sees a storage prompt at boot and **nobody has
-  watched a Firefox window during boot to confirm it.** Do that before launch; a public origin may
-  also answer differently from localhost. If the prompt is real and unwanted, gate the request rather
-  than deleting it — a denial only means `user://` stays in the evictable bucket, so the cache works
-  but is not protected.
+- ⚠ **Durable storage: reported always, requested only on demand — a deliberate reversal.** The
+  brief asked for `navigator.storage.persist()` at boot. It shipped that way, and it **raised a
+  permission dialog on Firefox on a real screen, repeatedly**. Two things then decided against
+  keeping it on by default: the dialog is player-visible on every Firefox first visit, and **the
+  grant buys the cache nothing measurable** — every number in this section ran with no grant (Chrome
+  and Safari denied it, Firefox left it unanswered) and every warm boot still restored the full
+  cache. The grant protects `user://` from *eviction under storage pressure*; it does not gate
+  whether IndexedDB persists.
+  So: `persisted()` — which never prompts — runs at boot and publishes the state;
+  `persist()` runs only with **`?webgpu_persist_storage`** in the URL. `build.storage.persisted` is
+  **-2 not requested** (the default), -1 requested and unanswered, 0 denied, 1 granted.
+  ⚠ **This is a trade the game should make deliberately, not inherit.** Eviction protection is real
+  and worth having on a site players return to; the flag is one URL parameter, and making it the
+  default for everyone is a shell change. Decide it with the dialog in front of you on Firefox.
 - ⚠ **Safari raises a real `GPUValidationError` that no other browser does**, once per session:
   `storageBufferCount(9) > maxStorageBuffers(8)`. Safari reports the WebGPU spec **minimum** of 8
   storage buffers per shader stage and forward-mobile asks for 9. **Something does not draw on

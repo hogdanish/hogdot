@@ -731,9 +731,13 @@ Three edges, all in `platform/web/js/libs/library_godot_os.js`, all of which mad
   reconciles read the same in-memory tree and write the same entries, so the redundant one costs a
   transaction, not consistency — and clearing `_syncing` from the forced path would tell the other
   sync's owner it had finished.
-- **`navigator.storage.persist()` is now requested at boot.** Nothing asked before, so `user://` sat
-  in the browser's best-effort eviction bucket. `persisted()` is asked first, so an origin that
-  already holds the grant never reaches `persist()`.
+- **Durable storage is now REPORTED always and REQUESTED only on demand.**
+  `navigator.storage.persisted()` runs at boot unconditionally — it never prompts — and publishes
+  the state. `navigator.storage.persist()`, which can prompt, runs **only** with
+  **`?webgpu_persist_storage`** in the URL. ⚠ There is deliberately no project setting: this code
+  runs before the engine starts, so no project setting is readable yet.
+  `build.storage.persisted` is **-2 not requested** (the default), -1 requested and unanswered,
+  0 denied, 1 granted.
   ⚠ **What the three browsers actually answered, measured 2026-09-08 against `127.0.0.1`:**
 
   | browser | `build.storage.persisted` |
@@ -742,26 +746,33 @@ Three edges, all in `platform/web/js/libs/library_godot_os.js`, all of which mad
   | Safari 27 | **0 — denied** |
   | Firefox 155 | **-1 — never answered** across three visits on a fresh profile; **1 — granted** from visit 2 on a profile that had already seen the request |
 
-  ⚠ **The Firefox `-1` is the shape of a permission doorhanger nobody clicked**: the promise simply
-  never settles. It costs nothing at runtime — the cache still kept all 339 entries — but it means a
-  Firefox player probably sees a storage-permission prompt at boot, and **nobody has yet watched a
-  Firefox window during boot to confirm it.** Do that before a public launch. If it is real and
-  unwanted, gate the request rather than deleting it: without the grant `user://` stays evictable.
-  A public origin may also answer differently from localhost.
+  ⚠ **The Firefox `-1` is a permission doorhanger nobody clicked, and that is CONFIRMED, not
+  inferred** — the repeated launches during this session raised the dialog on Ethan's screen every
+  time. The promise simply never settles while it is open.
+  ⚠ **And the grant buys the cache nothing.** Every measurement kept in this skill ran with no
+  durable grant (Chrome and Safari denied, Firefox unanswered) and every warm boot still hit the
+  full cache. The grant protects `user://` from *eviction under storage pressure*; it does not gate
+  whether IndexedDB persists. `userfs_persistent` is the flag that decides whether the cache can
+  work at all.
+  ⚠ So a boot-time `persist()` ships a dialog to every Firefox player for a benefit nothing here can
+  measure. **It is therefore OPT-IN** — see the flag below. `persisted()`, which never prompts, still
+  runs unconditionally so the state is reported.
 - **The verdict is published**, because a no-cache session must say so rather than looking like slow
   hardware: `__cgPerf.build.storage.userfs_persistent` (false = `syncfs(true)` failed at boot,
   `GodotFS._idbfs` is false, `user://` is per-session RAM — a Safari private window),
   `.storage.persisted` (-1 unanswered, 0 denied, 1 granted) and the WGSL cache's own entry count,
   bytes and cap. Both are on the boot line too.
 
-⚠ **What is still open: visit 1 is kept when the machine is calm, and not always otherwise.**
-Measured 2026-09-08 on the shipped template with an idle machine and a 20 s window between the
-report and the tab closing, every browser kept all 339 entries from visit 1. Under load, and with
-that window cut to 5 s, Firefox kept 153 of 337 and Safari kept none of the first visit — with **no
-error anywhere**, because the sync callback reports success either way. The files reach the
-Emscripten FS immediately; they reach IndexedDB only through `FS.syncfs(false)`, a **whole-mount
-reconcile** whose cost grows with the mount, so during a 340-file compile wave the tail can still be
-unwritten when the tab goes. A player on a slow machine who closes the tab mid-compile is that case.
+⚠ **What is still open: whether visit 1 is always kept.** Measured 2026-09-08 on the shipped
+template with an idle machine and a 20 s window between the report and the tab closing, **every**
+browser kept all 339 entries from visit 1. Earlier runs under build load, with that window cut to
+5 s, appeared to lose part of it — but those runs also had a human answering storage-permission
+dialogs partway through, so **they are withdrawn rather than explained**; the loss was never
+attributed. What remains true regardless is the mechanism that would produce it: the files reach the
+Emscripten FS immediately, but reach IndexedDB only through `FS.syncfs(false)`, a **whole-mount
+reconcile** whose cost grows with the mount, and its callback reports success whether or not the
+tail made it. A slow machine plus an abrupt tab close is the shape that would lose entries, and
+nothing would say so.
 **The fix shape, when someone spends on it:** write the WGSL cache to IndexedDB directly — a small
 async key/value store in `library_godot_os.js`, one small transaction per entry — so each entry
 commits independently of the mount. Platform-layer only, no renderer semantics, verifiable the same

@@ -49,9 +49,10 @@ extern void godot_js_config_canvas_id_get(char *p_ptr, int p_ptr_max);
 extern void godot_js_os_finish_async(void (*p_callback)());
 extern void godot_js_os_request_quit_cb(void (*p_callback)());
 extern int godot_js_os_fs_is_persistent();
-// navigator.storage.persist() verdict: -1 unanswered/unsupported, 0 denied, 1 granted.
-// Without the grant, user:// — which holds the shader and WGSL caches — sits in the
-// browser's best-effort eviction bucket and can be cleared at any time.
+// Storage durability: -2 not requested (the default), -1 requested and unanswered,
+// 0 denied, 1 granted. ⚠ NOT what decides whether user:// survives a session —
+// IndexedDB persists either way, and the grant only protects it from eviction under
+// storage pressure. godot_js_os_fs_is_persistent() is the flag that decides that.
 extern int godot_js_os_fs_storage_persisted();
 extern void godot_js_os_fs_sync(void (*p_callback)());
 // "<name>|<engine>|<version>" from the engine's one browser classifier
