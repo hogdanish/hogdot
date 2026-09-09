@@ -131,8 +131,10 @@ nice -n 10 scons platform=web target=template_debug webgpu=yes opengl3=no thread
      num_jobs=4 cpp_compiler_launcher=ccache c_compiler_launcher=ccache \
      import_env_vars=HOME,CCACHE_DIR,CCACHE_CONFIGPATH,EM_CACHE
 
-# the eventual release template (adds dlink_enabled; spend LTO only here, via production=yes)
-scons platform=web target=template_release dlink_enabled=yes webgpu=yes opengl3=no threads=no
+# a GDExtension-capable template (dlink). Since 2026-09-09 the release channel
+# builds all four of these beside the four ordinary ones; see "The dlink templates".
+# ⚠ Slower than its non-dlink twin: the whole engine becomes a wasm SIDE_MODULE.
+scons platform=web target=template_release dlink_enabled=yes webgpu=yes opengl3=no threads=yes
 
 # ⚠ threads=yes is supported as of 2026-08-10 and both templates ship. Same command,
 #   threads=yes — cold 7m34s, warm relink ~1m, same num_jobs=4 memory law.
@@ -259,10 +261,12 @@ rm -f modules/register_module_types.gen.cpp
 ⚠ It does not reproduce every time — whichever configuration ran last leaves the file — so a build
 set that happened to work is not evidence that the hazard is gone.
 
-⚠ **`dlink_enabled=yes` is NOT part of it either**, whatever the imported fork documents say: it
-appends `.dlink` to `extra_suffix` (`platform/web/detect.py`), so it produces
-`godot.web.template_release.wasm32.nothreads.dlink.zip` — a name no export preset in CommonGrounds
-references, which fails as a missing template rather than as a build error.
+⚠ **`dlink_enabled=yes` is not part of that loop either, and it is a different artifact, not a
+flag you can add to a template a preset already names.** It appends `.dlink` to `extra_suffix`
+(`platform/web/detect.py`), so it writes `godot.web.template_release.wasm32.nothreads.dlink.zip` —
+a preset pointed at the non-dlink name simply does not find it, which fails as a missing template
+rather than as a build error. Since 2026-09-09 the release channel ships all four dlink templates
+as their own assets; see "The dlink templates" below.
 
 ⚠ **The web template `.wasm` grew ~24 % somewhere between the 2026-08-20 and 2026-08-30 builds** and
 nobody has bisected it: `template_debug.nothreads` 35,420,664 → 43,906,827 bytes (the `.zip`
@@ -828,6 +832,7 @@ steps** (a tag-scoped save is unreachable dead weight against the 10 GiB cache q
 | `editor-linux-x86_64.tar.gz` | `godot.linuxbsd.editor.x86_64` + `tint_convert_cli` — the baker pair, same commit (RL-055 + the tint pipeline-id stamp), must stay beside each other. |
 | `editor-macos-arm64.tar.gz` | `godot.macos.editor.arm64` + `tint_convert_cli` (since r2, 6.A.4) — the Mac dev editor as a pinned asset instead of an mtime in `bin/`. Built on `macos-15` with the Vulkan SDK step REQUIRED (the editor links `-lMoltenVK`; matches the local recipe above), via the pinned `hogdot/install-vulkan-sdk-macos.sh`. arm64 only. |
 | `web-template_{release,debug}.{threads,nothreads}.wasm32.zip` | The four production templates: `webgpu=yes vulkan=no opengl3=no initial_memory=256 build_profile=hogdot/build_profile.web.gdbuild`, `production=yes` on release only (the prod-web-build recipe: debug skips exactly that flag). |
+| `web-template_{release,debug}.{threads,nothreads}.dlink.wasm32.zip` | The same four builds plus `dlink_enabled=yes` — GDExtension-capable, added 2026-09-09. Nothing selects them by default. See "The dlink templates". |
 | `editor-linux-x86_64.debugsymbols.tar.gz` | The linuxbsd editor's separated DWARF (`godot.linuxbsd.editor.x86_64.debugsymbols`). Diagnostic-only; nothing needs it to build or export. See "Symbolizing a stalled editor" below. |
 | `checksums.txt` | sha256 per asset; also in the release body. |
 | `build-manifest.txt` | Runner image + toolchain per asset (see "Reproducibility" below); also in the release body, folded into a `<details>`. |
@@ -839,6 +844,145 @@ upstream's godot-build composite sets to `gh`), the emsdk pin, and the build pro
 ⚠ **The game downloads assets by name** (`web-export.yml`: an explicit list, each verified against
 an `HOGDOT_SHA256_*` pin in `engine.env`), so adding an asset to a release is safe and removing or
 renaming one is not.
+
+### The dlink templates (added 2026-09-09)
+
+**Four more web assets, `dlink_enabled=yes` on top of each existing row.** `dlink_enabled` builds
+the engine as an emscripten `SIDE_MODULE` behind a small `MAIN_MODULE` runtime, which is the only
+shape a **GDExtension** can link against in a browser. Their consumer is CommonGrounds' Rust
+simulation core; nothing selects them today, which is exactly why adding them is cheap.
+
+| Release asset | `bin/` name the preset points at | scons |
+| --- | --- | --- |
+| `web-template_release.threads.dlink.wasm32.zip` | `godot.web.template_release.wasm32.dlink.zip` | `production=yes threads=yes dlink_enabled=yes` |
+| `web-template_release.nothreads.dlink.wasm32.zip` | `godot.web.template_release.wasm32.nothreads.dlink.zip` | `production=yes threads=no dlink_enabled=yes` |
+| `web-template_debug.threads.dlink.wasm32.zip` | `godot.web.template_debug.wasm32.dlink.zip` | `threads=yes dlink_enabled=yes` |
+| `web-template_debug.nothreads.dlink.wasm32.zip` | `godot.web.template_debug.wasm32.nothreads.dlink.zip` | `threads=no dlink_enabled=yes` |
+
+⚠ **The suffix order is `.nothreads.dlink`, not `.dlink.nothreads`** — `SConstruct` appends
+`.nothreads` first and `extra_suffix` (which `platform/web/detect.py` prefixes with `.dlink`) after
+it. Copy the names above rather than deriving them.
+
+⚠ **`timeout-minutes` on the `web-template` job went 120 -> 180 for these.** A dlink build links a
+~50 MB side module on top of a second module and is the slowest leg in the workflow. The four
+non-dlink legs are untouched.
+
+**`EXPORT_ALL=1` had to go, and this is the whole reason.** `platform/web/SCsub` used to pass
+`-sEXPORT_ALL=1` on every dlink build. `EXPORT_ALL` does one thing: it adds `Module['X'] = X` for
+every JS symbol. With `-pthread` and `ALLOW_MEMORY_GROWTH`, emscripten's `growableHeap` pass
+(`tools/acorn-optimizer.mjs`) rewrites every read of a `HEAPxx` view into `(growMemViews(), HEAPxx)`
+— including the ten it just added at module-factory top level. `MODULARIZE` runs that factory in
+**every pthread worker** (`isPthread && Godot()`), before the worker has been handed `wasmMemory`,
+so `growMemViews()` dereferences `undefined.buffer`, every worker throws
+`TypeError: Cannot read properties of undefined (reading 'buffer')`, and the engine never reaches
+`main`. A `dlink_enabled=yes threads=yes` template built before this change does not boot at all.
+
+⚠ **Exactly one symbol was load-bearing, and it is `loadDynamicLibrary`.** `engine.js` guards the
+extension preload with `if (gdextensionLibs.length > 0 && !rtenv['loadDynamicLibrary'])` and
+rejects with *"GDExtension libraries are not supported by this engine version"* — the same line a
+plain non-dlink template prints, which makes the failure look like a wrong template rather than a
+missing export. `detect.py` now adds `loadDynamicLibrary` to `EXPORTED_RUNTIME_METHODS` for every
+dlink build. MEASURED: the first template built without `EXPORT_ALL` booted, ran its pthread
+workers and fetched the extension's `.wasm`, and still refused to register it, because of this one
+name. Nothing else the fork's JS reads off the module was lost: of the 7,771 `Module['X']` exports
+`EXPORT_ALL` was adding, `loadDynamicLibrary` is the only one `platform/web/js/**` touches
+(`callMain`, `copyToFS`, `initConfig`, `locateFile` and `request_quit` survive on their own).
+
+Everything else about the flag was dead weight:
+
+- The heap views the engine's own JS uses are requested **by name** through
+  `EXPORTED_RUNTIME_METHODS` in `detect.py` (`callMain`, `cwrap`, plus the ten `HEAP*`), and
+  emscripten's `shouldExportHeap` honors that list whether or not `EXPORT_ALL` is set.
+- `MAIN_MODULE=1` implies `LINKABLE`, so the main module is linked `--export-dynamic` and the side
+  module resolves every symbol regardless.
+- MEASURED on emcc 6.0.9, on the real `template_release threads=yes dlink_enabled=yes` artifact
+  against the one built from the same commit with the flag: **`godot.wasm` and the 40,886,563-byte
+  `godot.side.wasm` are byte-identical**, the ten bad exports go 10 -> 0, and `godot.js` drops
+  2,221,834 -> 862,390 bytes (-61 %, -137,846 in the zip). A minimal emcc repro says the same at
+  both `-O1` and `-O3`. The only cost is that emscripten runs `wasm-ld` twice in `LINKABLE` mode
+  when `EXPORT_ALL` is off (`tools/link.py`), which is cheap here because the main module is one
+  translation unit.
+- BOOT PROOF, Chrome 153 / metal-3 / WebGPU Forward Mobile, the gdext 0.5.5 hello extension on
+  **both** dlink release templates, with no post-link patch of any kind. Threads, over COOP/COEP:
+  `Initialize godot-rust (API v4.7.stable.official, runtime v4.7.2.stable.custom_build)`,
+  `Build configuration: Emscripten 6.0.9-git, multi-threaded, GDExtension support.`,
+  `ready HelloSim=true threads=true | rust 5M sin 29.51 ms | done frames=120`, and zero
+  `Cannot read properties of undefined` in any worker. Nothreads, over plain HTTP:
+  `single-threaded, GDExtension support.`, `ready HelloSim=true threads=false | rust 5M sin
+  21.70 ms | done frames=120`. ⚠ The extension must match the template: a `-pthread` build against
+  a nothreads engine fails at instantiate with `"env" "memory": mismatch in shared state of
+  memory`, which is loud, not silent.
+
+⚠ **`detect.py`'s `__emscripten_thread_crashed` workaround still skips dlink builds, but for a new
+reason** — `--export-dynamic`, not `EXPORT_ALL`. The comment there says so; keep the two in step.
+
+⚠ **The alternative fix is a post-link rewrite of the exported `index.js`, and it is NOT what
+shipped.** Rewriting the ten statements into lazy getters
+(`Object.defineProperty(Module,"HEAP32",{get:()=>(growMemViews(),HEAP32)})`) also boots, and was
+how the defect was first proven, but it patches the game's export instead of the template and has
+to be reapplied by every consumer on every export. Keep it recorded as the fallback if a future
+emscripten emits the same shape from somewhere other than `EXPORT_ALL`.
+
+⚠ **Upstream defect, deliberately not filed.** This is an emscripten codegen problem
+(`EXPORT_ALL` + pthreads + `MODULARIZE`), in the family of godotengine/godot#105717. Emscripten's
+own docs call dynamic linking plus pthreads experimental. Fork policy is a local workaround with a
+written reason; do not open an issue or a pull request upstream.
+
+⚠ **An older emscripten cannot dodge it.** 4.0.11 (the oldest Godot 4.7 + emdawnwebgpu accepts)
+fails to compile `drivers/webgpu/rendering_device_driver_webgpu.cpp`: the driver tracks current
+Dawn's four-parameter `WGPUQueueWorkDoneCallback`. The fork is on 6.0.x or nothing.
+
+**The emsdk pin stays `6.0.8`.** A GDExtension is a side module and the template is its main
+module, so the two must be built by the **same** emscripten; the consumer reads the release body's
+`emsdk pin` row and refuses a mismatch. The proving runs used 6.0.9 locally; the shipped pair is
+proven on 6.0.8 by the consumer, and only a failure there moves this pin — in its own session,
+across all three files at once, as the Emscripten decision record requires.
+
+**`GDExtension` being in `disabled_classes` does not block an extension.** The vendored
+`hogdot/build_profile.web.gdbuild` disables the `GDExtension` class, and a dlink template built
+with that profile still loads and runs a Rust GDExtension: the loader constructs the object
+directly, so the build profile only removes its `ClassDB` exposure. Do not "fix" the profile — it
+is a synced copy of the game's and editing it here creates drift.
+
+**Proving a dlink template locally, in about fifteen minutes.** A CI release is the wrong
+instrument for a template that may not boot. MEASURED 2026-09-09 on the M5: `template_release
+threads=yes dlink_enabled=yes lto=none` is **8 m 47 s** cold at `num_jobs=4`, and a relink after a
+link-flag-only change is **5.5 s** (only the ~1.4 MB main module rebuilds; the 40 MB side module is
+untouched). The recipe:
+
+```bash
+# 1. build into a worktree, never into ~/Projects/hogdot/bin/
+git worktree add --detach <scratch>/hogdot-build HEAD
+rm -f modules/register_module_types.gen.cpp
+nice -n 10 scons platform=web target=template_release arch=wasm32 webgpu=yes vulkan=no opengl3=no \
+     threads=yes dlink_enabled=yes lto=none use_closure_compiler=no \
+     build_profile=hogdot/build_profile.web.gdbuild initial_memory=256 num_jobs=4 \
+     cpp_compiler_launcher=ccache c_compiler_launcher=ccache \
+     import_env_vars=HOME,CCACHE_DIR,CCACHE_CONFIGPATH,EM_CACHE
+
+# 2. the two static checks that catch this defect class before a browser does
+grep -c 'Module\["loadDynamicLibrary"\]' bin/godot.web.template_release.wasm32.dlink.js   # must be 1
+grep -o 'Module\["HEAP[A-Z0-9]*"\]=(growMemViews(),HEAP[A-Z0-9]*)' bin/*.dlink.js | wc -l  # must be 0
+
+# 3. export a tiny project with `variant/extensions_support=true` and
+#    `variant/thread_support=true`, serve it with COOP/COEP, and read the result
+lsof -iTCP:8799 -sTCP:LISTEN        # a live server on the port serves the OLD export, silently
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --user-data-dir=<fresh> \
+  --remote-debugging-port=9225 --enable-logging=stderr http://127.0.0.1:8799/index.html
+curl -s http://127.0.0.1:9225/json  # the page title, which the test project writes to
+```
+
+⚠ **Headless Chrome never loads the bundle** — it requests `/` and the favicon and nothing else.
+Use a headed window. ⚠ **`console.log` does not reach `--enable-logging=stderr`; errors do**, so a
+test project reports through `push_error` or `document.title`. ⚠ **Do not delete the directory a
+running `http.server` is serving** — it stays up and answers every request with a 500 from
+`os.getcwd()`, which reads like a broken export.
+
+**One dlink row, then hands off.** This fork's whole responsibility is producing the four templates
+and naming them in the release body. The extension crate, its emscripten flags, the
+`.gdextension` file, `variant/extensions_support=true` in the export preset, and the COOP/COEP
+serving a threads build needs are all the consumer's, and are recorded in CommonGrounds' `gdext`
+skill. Do not grow a second dlink row here for a consumer-side variation.
 
 ### Symbolizing a stalled editor
 

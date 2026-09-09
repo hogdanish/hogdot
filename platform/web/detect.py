@@ -288,7 +288,8 @@ def configure(env: "SConsEnvironment"):
         env.Append(LINKFLAGS=["-sWASM_MEM_MAX=2048MB"])
         if not env["dlink_enabled"]:
             # Workaround https://github.com/emscripten-core/emscripten/issues/21844#issuecomment-2116936414.
-            # Not needed (and potentially dangerous) when dlink_enabled=yes, since we set EXPORT_ALL=1 in that case.
+            # Not needed when dlink_enabled=yes: MAIN_MODULE=1 implies LINKABLE, which links the main
+            # module with --export-dynamic, so the symbol is exported without being named here.
             env["EXPORTED_FUNCTIONS"] += ["__emscripten_thread_crashed"]
 
     elif env["proxy_to_pthread"]:
@@ -309,6 +310,11 @@ def configure(env: "SConsEnvironment"):
         env.Append(LINKFLAGS=["-sSIDE_MODULE=2"])
         env.Append(CCFLAGS=["-fvisibility=hidden"])
         env.Append(LINKFLAGS=["-fvisibility=hidden"])
+        # `engine.js` refuses to preload a GDExtension unless the runtime carries
+        # `Module["loadDynamicLibrary"]`, so it has to be exported by name. It used to
+        # arrive with everything else through `-sEXPORT_ALL=1`, which cannot be used
+        # with threads (platform/web/SCsub says why).
+        env["EXPORTED_RUNTIME_METHODS"] += ["loadDynamicLibrary"]
         env.extra_suffix = ".dlink" + env.extra_suffix
 
     env.Append(LINKFLAGS=["-sWASM_BIGINT"])
