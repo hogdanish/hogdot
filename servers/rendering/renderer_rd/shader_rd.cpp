@@ -36,6 +36,7 @@
 #include "core/object/worker_thread_pool.h"
 #include "core/os/os.h"
 #include "core/string/string_builder.h"
+#include "core/templates/hash_set.h"
 #include "core/version.h"
 #include "servers/rendering/shader_include_db.h"
 
@@ -1149,13 +1150,69 @@ void ShaderRD::initialize(const Vector<String> &p_variant_defines, const String 
 	}
 }
 
-void ShaderRD::_initialize_cache() {
-	shader_cache_user_dir_valid = !shader_cache_user_dir.is_empty();
-	shader_cache_res_dir_valid = !shader_cache_res_dir.is_empty();
-	if (!shader_cache_user_dir_valid) {
+// Delete every group directory under this shader's own user:// cache folder that no
+// live group claims.
+//
+// GODOT_VERSION_HASH feeds base_sha256, which feeds group_sha256, which is a PATH
+// COMPONENT — so every engine rebuild orphans a whole subtree that nothing has ever
+// deleted. On web that tree lives in IndexedDB, where FS.syncfs(false) is a
+// full-mount reconcile whose cost scales with what is mounted, so the orphans are
+// not merely wasted bytes: they are paid for on every sync of a session that will
+// never read one of them.
+//
+// ⚠ user:// only. The res:// tree is the exported bake, is read-only, and a deletion
+// there would destroy the pck's own cache.
+// ⚠ Init time only, and only from _initialize_cache. Every live group of THIS shader
+// is known here and nothing has compiled yet; the same walk run mid-session could
+// delete a directory a version is about to write into.
+// ⚠ Safe because ShaderRD names are unique: each is the class name generated from one
+// .glsl path, so this shader's group set is the complete set for its directory.
+void ShaderRD::_cleanup_stale_cache_groups() {
+	HashSet<String> live_groups;
+	for (const String &group_hash : group_sha256) {
+		if (!group_hash.is_empty()) {
+			live_groups.insert(group_hash);
+		}
+	}
+	if (live_groups.is_empty()) {
+		// Nothing was hashed, so nothing can be judged stale.
 		return;
 	}
 
+	const String shader_dir = shader_cache_user_dir.path_join(name);
+	Ref<DirAccess> d = DirAccess::open(shader_dir);
+	if (d.is_null()) {
+		return;
+	}
+
+	for (const String &sub_dir : d->get_directories()) {
+		if (live_groups.has(sub_dir)) {
+			continue;
+		}
+		Ref<DirAccess> stale = DirAccess::open(shader_dir.path_join(sub_dir));
+		if (stale.is_null()) {
+			continue;
+		}
+		if (stale->erase_contents_recursive() != OK) {
+			continue;
+		}
+		if (d->remove(sub_dir) == OK) {
+			print_verbose(vformat("Removed orphaned shader cache group %s/%s.", name, sub_dir));
+		}
+	}
+}
+
+void ShaderRD::_initialize_cache() {
+	shader_cache_user_dir_valid = !shader_cache_user_dir.is_empty();
+	shader_cache_res_dir_valid = !shader_cache_res_dir.is_empty();
+
+	// ⚠ group_sha256 is computed for BOTH caches, so this loop runs whenever either
+	// directory is set. It used to return early unless the USER directory existed,
+	// which left every group hash empty in a res-dir-only run — and the group hash is
+	// a path component of the res:// lookup too, so the entire baked pck cache was
+	// ignored and the browser paid full glslang + Tint on the main thread. That is
+	// also exactly what `rendering/shader_compiler/shader_cache/enabled = false`
+	// produced, because renderer_compositor_rd.cpp gates both directories together.
 	for (const KeyValue<int, LocalVector<int>> &E : group_to_variant_map) {
 		StringBuilder hash_build;
 
@@ -1177,34 +1234,47 @@ void ShaderRD::_initialize_cache() {
 
 		group_sha256[E.key] = hash_build.as_string().sha256_text();
 
-		if (!shader_cache_user_dir.is_empty()) {
-			// Validate if it's possible to write to all the directories required by in the user directory.
-			Ref<DirAccess> d = DirAccess::open(shader_cache_user_dir);
-			if (d.is_null()) {
-				shader_cache_user_dir_valid = false;
-				ERR_FAIL_MSG(vformat("Unable to open shader cache directory at %s.", shader_cache_user_dir));
-			}
+		print_verbose("Shader '" + name + "' (group " + itos(E.key) + ") SHA256: " + group_sha256[E.key]);
+	}
 
-			if (d->change_dir(name) != OK) {
-				Error err = d->make_dir(name);
-				if (err != OK) {
-					shader_cache_user_dir_valid = false;
-					ERR_FAIL_MSG(vformat("Unable to create shader cache directory %s at %s.", name, shader_cache_user_dir));
-				}
+	if (!shader_cache_user_dir_valid) {
+		return;
+	}
 
-				d->change_dir(name);
-			}
-
-			if (d->change_dir(group_sha256[E.key]) != OK) {
-				Error err = d->make_dir(group_sha256[E.key]);
-				if (err != OK) {
-					shader_cache_user_dir_valid = false;
-					ERR_FAIL_MSG(vformat("Unable to create shader cache directory %s/%s at %s.", name, group_sha256[E.key], shader_cache_user_dir));
-				}
-			}
+	// Everything below only decides whether this run may WRITE a cache entry.
+	// ⚠ It is a second loop on purpose. Its failures return from the function, and
+	// with it fused into the hash loop above a user directory that could not be
+	// created left every LATER group without a sha256 — which then also broke the
+	// read-only res:// lookup that has nothing to do with writing.
+	for (const KeyValue<int, LocalVector<int>> &E : group_to_variant_map) {
+		// Validate if it's possible to write to all the directories required by in the user directory.
+		Ref<DirAccess> d = DirAccess::open(shader_cache_user_dir);
+		if (d.is_null()) {
+			shader_cache_user_dir_valid = false;
+			ERR_FAIL_MSG(vformat("Unable to open shader cache directory at %s.", shader_cache_user_dir));
 		}
 
-		print_verbose("Shader '" + name + "' (group " + itos(E.key) + ") SHA256: " + group_sha256[E.key]);
+		if (d->change_dir(name) != OK) {
+			Error err = d->make_dir(name);
+			if (err != OK) {
+				shader_cache_user_dir_valid = false;
+				ERR_FAIL_MSG(vformat("Unable to create shader cache directory %s at %s.", name, shader_cache_user_dir));
+			}
+
+			d->change_dir(name);
+		}
+
+		if (d->change_dir(group_sha256[E.key]) != OK) {
+			Error err = d->make_dir(group_sha256[E.key]);
+			if (err != OK) {
+				shader_cache_user_dir_valid = false;
+				ERR_FAIL_MSG(vformat("Unable to create shader cache directory %s/%s at %s.", name, group_sha256[E.key], shader_cache_user_dir));
+			}
+		}
+	}
+
+	if (shader_cache_cleanup_on_start) {
+		_cleanup_stale_cache_groups();
 	}
 }
 
@@ -1246,7 +1316,12 @@ void ShaderRD::initialize(const Vector<VariantDefine> &p_variant_defines, const 
 		}
 	}
 
-	if (!shader_cache_user_dir.is_empty()) {
+	// ⚠ Matches the ungrouped overload's guard. This one used to test the user
+	// directory alone, and this is the overload every scene, canvas, sky and fog
+	// shader uses — so a run with only a res:// cache (an exported project whose
+	// user directory could not be created) skipped cache init entirely and ignored
+	// the whole baked pck.
+	if (!shader_cache_user_dir.is_empty() || !shader_cache_res_dir.is_empty()) {
 		group_sha256.resize(max_group_id + 1);
 		_initialize_cache();
 	}
@@ -1266,6 +1341,10 @@ void ShaderRD::shaders_embedded_set_unlock() {
 
 void ShaderRD::set_shader_cache_user_dir(const String &p_dir) {
 	shader_cache_user_dir = p_dir;
+}
+
+void ShaderRD::set_shader_cache_cleanup_on_start(bool p_enable) {
+	shader_cache_cleanup_on_start = p_enable;
 }
 
 const String &ShaderRD::get_shader_cache_user_dir() {

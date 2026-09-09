@@ -196,6 +196,7 @@ private:
 	bool _load_from_cache(Version *p_version, int p_group);
 	void _save_to_cache(Version *p_version, int p_group);
 	void _initialize_cache();
+	void _cleanup_stale_cache_groups();
 	void _version_set(Version *p_version, const HashMap<String, String> &p_code, const Vector<String> &p_custom_defines);
 
 	// Diagnostic only. Builds the "(origin: ...; uniforms: ...)" suffix appended to a
@@ -292,6 +293,11 @@ public:
 	static void shaders_embedded_set_unlock();
 
 	static void set_shader_cache_user_dir(const String &p_dir);
+	// Delete user:// cache group directories that no live shader group claims. Every
+	// engine rebuild moves group_sha256, which is a path component, so without this
+	// the tree only ever grows. ⚠ Off in the editor, where switching between two
+	// engine builds is routine and each boot would delete the other's warm cache.
+	static void set_shader_cache_cleanup_on_start(bool p_enable);
 	static const String &get_shader_cache_user_dir();
 	static void set_shader_cache_res_dir(const String &p_dir);
 	static const String &get_shader_cache_res_dir();

@@ -349,6 +349,13 @@ RendererCompositorRD::RendererCompositorRD() {
 				shader_cache_user_dir = shader_cache_user_dir.path_join("shader_cache");
 				ShaderRD::set_shader_cache_user_dir(shader_cache_user_dir);
 			}
+			// Prune each shader's orphaned group directories at init. group_sha256 is a
+			// path component and GODOT_VERSION_HASH feeds it, so every engine rebuild
+			// leaves behind a subtree nothing can ever read again — permanently, and on
+			// web inside an IndexedDB mount whose every sync reconciles the lot.
+			// ⚠ Never in the editor: switching between two engine builds is a normal day
+			// there, and pruning on each boot would delete the other build's warm cache.
+			ShaderRD::set_shader_cache_cleanup_on_start(!Engine::get_singleton()->is_editor_hint());
 		}
 
 		// Check if a directory exists for the shader cache to pull shaders from as read-only. This is used on exported projects with baked shaders.

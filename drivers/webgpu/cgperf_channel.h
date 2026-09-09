@@ -142,6 +142,20 @@ struct CGPerfChannel {
 		// is why this exists. Bumped from servers/rendering/renderer_rd/shader_rd.cpp
 		// through cgperf_external_count().
 		C_SHADER_RD_MISS,
+		// The persistent user://wgsl_cache served a SPIR-V→WGSL translation that the
+		// in-memory tier did not have — i.e. work a PREVIOUS session paid for. ⚠ Read
+		// it beside spv_wgsl_cache_hit, which counts both tiers: hit minus disk_hit is
+		// what the in-memory cache answered. On a first-ever visit this is 0 by
+		// construction; on a second visit of the same content it is the whole point.
+		C_WGSL_DISK_HIT,
+		// A fresh translation was written to the persistent cache. store + hit over two
+		// boots of the same content is the pair that says the cache is round-tripping;
+		// stores climbing on every boot with hits at 0 means the writes are not
+		// surviving — check build.userfs_persistent and build.storage_persisted.
+		C_WGSL_DISK_STORE,
+		// An entry was dropped to stay under the byte cap. Nonzero with a low hit rate
+		// means the cap is too small for this project's shader set.
+		C_WGSL_DISK_EVICT,
 		COUNTER_COUNT, // Must stay last.
 	};
 
@@ -246,7 +260,8 @@ void cgperf_external_count(CGPerfChannel::Counter p_counter);
 	"compute_pipelines_created\nshader_modules_created\n" \
 	"bindgroup_layouts_created\nbindgroups_created\nencoder_splits\n" \
 	"translate_ms\nbindgroup_rebind_fail\noverride_translate_fallback\n" \
-	"bindgroups_shared\nshader_rd_miss"
+	"bindgroups_shared\nshader_rd_miss\nwgsl_disk_hit\n" \
+	"wgsl_disk_store\nwgsl_disk_evict"
 
 // Drift guard. The JS side sizes its heap views from `names.length`, so a name
 // list that disagrees with its enum reads short (missing counters) or past the

@@ -33,8 +33,13 @@
 #include "rendering_device_driver_webgpu.h"
 
 #include "core/config/project_settings.h"
+#include "core/io/compression.h"
+#include "core/io/dir_access.h"
+#include "core/io/file_access.h"
 #include "core/templates/hash_map.h"
 #include "core/templates/hashfuncs.h"
+#include "core/templates/local_vector.h"
+#include "core/templates/pair.h"
 #include "core/version.h"
 #include "drivers/webgpu/cgperf_channel.h"
 #include "drivers/webgpu/pixel_formats_webgpu.h"
@@ -940,6 +945,355 @@ static char *_translate_spirv_to_wgsl(const uint8_t *p_spv_ptr, int p_spv_size, 
 	return out;
 }
 
+// =============================================================================
+// Persistent WGSL cache — user://wgsl_cache
+// =============================================================================
+//
+// The in-memory cache above lives for the process lifetime, and in a browser the
+// TAB is the process: every visit pays Tint again for every shader the export bake
+// did not serve. The engine's own user:// shader cache does not close that gap —
+// ShaderRD::_save_to_cache stores SPIR-V, so a hit there skips glslang and still
+// pays full Tint, on the main thread, inside the frame.
+//
+// ⚠ Chrome keeps a persistent WebGPU pipeline cache of its own. Safari and Firefox
+// keep NONE, so on those two this side cache is the only thing between a returning
+// player and a completely cold translation.
+//
+// What is stored is the Tint output EXACTLY as _spv_to_wgsl_cached returns it —
+// before _apply_common_wgsl_passes, the read_write split and the depth-sample
+// rewrite, all of which the two call sites run afterwards on whatever they get.
+// Storing anything else would hand a caller a different string on a hit than on a
+// miss.
+//
+// ⚠ Poisoning is the failure mode, so the key carries everything that decides the
+// WGSL text byte-for-byte (RL-027): the SPIR-V bytes, the overrides-mode salt the
+// in-memory key already applies, the engine commit, and the Tint pipeline id — the
+// stamp that already covers the pass list, the preprocessing and the driver source.
+// The build half lives in the file NAME as well as the header, so a stale-build
+// entry is identified and deleted by the directory listing alone, with no file
+// opened, and is re-checked before its bytes are ever used.
+//
+// ⚠ Deliberately NOT keyed by a directory per build. That is the mistake the
+// engine's own shader cache makes: GODOT_VERSION_HASH is a path component of
+// user://shader_cache, so every engine rebuild orphans a whole tree that nothing
+// ever deletes, inside an IndexedDB whose full-mount reconcile cost scales with it.
+// One flat directory, a build tag in the name, and a prune at init cannot do that.
+
+static constexpr uint32_t WGSL_DISK_MAGIC = 0x4C534757; // "WGSL".
+static constexpr uint32_t WGSL_DISK_FORMAT_VERSION = 1;
+static constexpr uint32_t WGSL_DISK_HEADER_SIZE = 32;
+// The entry is a frozen-path translation stored under an overrides-mode key: the
+// override-preserving translation failed and _spv_to_wgsl_cached retried frozen.
+// ⚠ Recorded so a disk hit can bump override_translate_fallback the way the
+// translation that produced it did. Without this the counter reads 0 on every warm
+// session while the shaders are still degraded — the exact silence the counter
+// exists to break.
+static constexpr uint32_t WGSL_DISK_FLAG_FROZEN_FALLBACK = 1;
+
+static constexpr const char *WGSL_DISK_DIR = "user://wgsl_cache";
+
+struct WgslDiskEntry {
+	uint32_t bytes = 0; // On-disk size, and part of the file name.
+	uint64_t last_use = 0; // Eviction order; see _wgsl_disk_touch.
+};
+
+static bool _wgsl_disk_ready = false;
+static bool _wgsl_disk_enabled = false;
+static uint64_t _wgsl_disk_build_salt = 0;
+static uint64_t _wgsl_disk_budget_bytes = 0;
+static uint64_t _wgsl_disk_bytes = 0;
+static uint64_t _wgsl_disk_clock = 0;
+static HashMap<uint64_t, WgslDiskEntry> _wgsl_disk_index;
+
+static String _wgsl_disk_hex(uint64_t p_value, int p_digits) {
+	String s = String::num_uint64(p_value, 16);
+	while (s.length() < p_digits) {
+		s = "0" + s;
+	}
+	return s;
+}
+
+// ⚠ Not String::hex_to_int(): it signals overflow above INT64_MAX and returns 0, so
+// every key with the top bit set — half of them — would parse as the same value and
+// print an error while doing it. This one is strict about its input instead.
+static bool _wgsl_disk_parse_hex(const String &p_text, int p_digits, uint64_t &r_value) {
+	if (p_text.length() != p_digits) {
+		return false;
+	}
+	uint64_t value = 0;
+	for (int i = 0; i < p_digits; i++) {
+		const char32_t c = p_text[i];
+		uint64_t digit;
+		if (c >= '0' && c <= '9') {
+			digit = (uint64_t)(c - '0');
+		} else if (c >= 'a' && c <= 'f') {
+			digit = (uint64_t)(c - 'a') + 10;
+		} else {
+			return false;
+		}
+		value = (value << 4) | digit;
+	}
+	r_value = value;
+	return true;
+}
+
+// <build:8><key:16><size:8>.wgsl — every field the init scan needs is in the name,
+// so a cold start is one directory listing and opens nothing it is going to delete.
+static String _wgsl_disk_name(uint64_t p_key, uint32_t p_bytes) {
+	return _wgsl_disk_hex(_wgsl_disk_build_salt & 0xFFFFFFFFULL, 8) + "-" + _wgsl_disk_hex(p_key, 16) + "-" + _wgsl_disk_hex(p_bytes, 8) + ".wgsl";
+}
+
+static String _wgsl_disk_path(uint64_t p_key, uint32_t p_bytes) {
+	return String(WGSL_DISK_DIR).path_join(_wgsl_disk_name(p_key, p_bytes));
+}
+
+// Newest-wins ordering. Entries found by the init scan start at 0, so "not touched
+// this session" is the coldest class and is evicted first; within a session the
+// order is true LRU. ⚠ Cross-session recency is NOT preserved — nothing on this
+// platform can update an access time without rewriting the file, and rewriting one
+// per hit would put the whole warm cache back through IndexedDB on every boot.
+static void _wgsl_disk_touch(WgslDiskEntry &r_entry) {
+	_wgsl_disk_clock++;
+	r_entry.last_use = _wgsl_disk_clock;
+}
+
+static void _wgsl_disk_erase(uint64_t p_key, uint32_t p_bytes) {
+	DirAccess::remove_absolute(_wgsl_disk_path(p_key, p_bytes));
+	if (_wgsl_disk_bytes >= p_bytes) {
+		_wgsl_disk_bytes -= p_bytes;
+	} else {
+		_wgsl_disk_bytes = 0;
+	}
+	_wgsl_disk_index.erase(p_key);
+}
+
+// Drop coldest entries until the store is back under the cap. Called only from the
+// store path, so it never runs while a lookup holds an entry pointer.
+static void _wgsl_disk_evict_to_budget() {
+	if (_wgsl_disk_bytes <= _wgsl_disk_budget_bytes) {
+		return;
+	}
+	// Evict to 90% so a cache sitting exactly at the cap does not pay a scan per
+	// store for the rest of the session.
+	const uint64_t target = (_wgsl_disk_budget_bytes / 10) * 9;
+	LocalVector<Pair<uint64_t, uint64_t>> by_age; // (last_use, key)
+	by_age.reserve(_wgsl_disk_index.size());
+	for (const KeyValue<uint64_t, WgslDiskEntry> &E : _wgsl_disk_index) {
+		by_age.push_back(Pair<uint64_t, uint64_t>(E.value.last_use, E.key));
+	}
+	by_age.sort();
+	for (const Pair<uint64_t, uint64_t> &E : by_age) {
+		if (_wgsl_disk_bytes <= target) {
+			break;
+		}
+		const WgslDiskEntry *entry = _wgsl_disk_index.getptr(E.second);
+		if (entry == nullptr) {
+			continue;
+		}
+		_cgperf.count(CGPerfChannel::C_WGSL_DISK_EVICT);
+		_wgsl_disk_erase(E.second, entry->bytes);
+	}
+}
+
+// Is the persistent WGSL cache switched off for this session? Same two gates as the
+// other webgpu_* switches: a URL flag, so an A/B needs no re-export, and a project
+// setting. ⚠ Registered from a web-only driver, so it never appears in the editor's
+// Project Settings dialog — write the line into project.godot by hand.
+static int _wgsl_disk_budget_mb_requested() {
+	const int off_from_url = MAIN_THREAD_EM_ASM_INT({
+		var g = (typeof window != 'undefined') ? window : globalThis;
+		if (!g.location || !g.location.search) {
+			return 0;
+		}
+		var p = new URLSearchParams(g.location.search);
+		if (p.has('webgpu_no_wgsl_cache')) {
+			return 1;
+		}
+		return 0;
+	});
+	if (off_from_url != 0) {
+		return 0;
+	}
+	// 0 disables the cache. The default holds several thousand translated stages of
+	// the sizes this engine produces; the game's whole baked WGSL payload compressed
+	// to 10.4 MB, and only what the bake MISSES ever reaches this cache.
+	const int budget_mb = GLOBAL_DEF("rendering/rendering_device/webgpu_wgsl_cache_size_mb", 64);
+	return budget_mb;
+}
+
+static void _wgsl_disk_init() {
+	_wgsl_disk_ready = true;
+
+	const int budget_mb = _wgsl_disk_budget_mb_requested();
+	if (budget_mb <= 0) {
+		return;
+	}
+	_wgsl_disk_budget_bytes = (uint64_t)budget_mb * 1024 * 1024;
+
+	// The build half of the key. TINT_BAKE_PIPELINE_ID already covers the pass list,
+	// the preprocessing and this driver's own source (it is a pipeline-id input);
+	// GODOT_VERSION_HASH covers everything else the engine can change about the
+	// SPIR-V that arrives here.
+	const CharString build_tag = (String(GODOT_VERSION_HASH) + "|" + String(TINT_BAKE_PIPELINE_ID)).utf8();
+	const uint32_t salt_lo = hash_murmur3_buffer(build_tag.get_data(), build_tag.length());
+	const uint32_t salt_hi = hash_murmur3_buffer(build_tag.get_data(), build_tag.length(), 0x9E3779B9);
+	_wgsl_disk_build_salt = ((uint64_t)salt_hi << 32) | salt_lo;
+
+	if (DirAccess::make_dir_recursive_absolute(WGSL_DISK_DIR) != OK) {
+		WARN_PRINT("WebGPU: could not create user://wgsl_cache; every session will pay a full SPIR-V→WGSL translation.");
+		return;
+	}
+
+	const String live_prefix = _wgsl_disk_hex(_wgsl_disk_build_salt & 0xFFFFFFFFULL, 8) + "-";
+	uint32_t pruned = 0;
+	for (const String &file : DirAccess::get_files_at(WGSL_DISK_DIR)) {
+		// name = <build:8>-<key:16>-<size:8>.wgsl, so anything that does not parse,
+		// or that names another build, is deleted without being opened.
+		const Vector<String> parts = file.get_basename().split("-");
+		uint64_t key = 0;
+		uint64_t bytes = 0;
+		const bool parsed = file.ends_with(".wgsl") && parts.size() == 3 && file.begins_with(live_prefix) &&
+				_wgsl_disk_parse_hex(parts[1], 16, key) && _wgsl_disk_parse_hex(parts[2], 8, bytes);
+		if (!parsed || bytes <= WGSL_DISK_HEADER_SIZE || bytes > _wgsl_disk_budget_bytes) {
+			DirAccess::remove_absolute(String(WGSL_DISK_DIR).path_join(file));
+			pruned++;
+			continue;
+		}
+		WgslDiskEntry entry;
+		entry.bytes = (uint32_t)bytes;
+		entry.last_use = 0;
+		_wgsl_disk_index[key] = entry;
+		_wgsl_disk_bytes += bytes;
+	}
+
+	_wgsl_disk_enabled = true;
+	_wgsl_disk_evict_to_budget();
+	print_verbose(vformat("WebGPU: WGSL cache at %s holds %d entries, %d KiB (cap %d MiB); pruned %d stale file(s).",
+			WGSL_DISK_DIR, _wgsl_disk_index.size(), (int)(_wgsl_disk_bytes / 1024), budget_mb, pruned));
+}
+
+// Returns a malloc'd null-terminated WGSL string, or nullptr on a miss. Any file
+// that fails a check is deleted rather than retried: a cache that can hand back the
+// wrong text is worse than no cache, and the cost of being wrong is a shader that
+// renders incorrectly with nothing in the console.
+static char *_wgsl_disk_load(uint64_t p_key, bool *r_frozen_fallback) {
+	*r_frozen_fallback = false;
+	if (!_wgsl_disk_enabled) {
+		return nullptr;
+	}
+	WgslDiskEntry *entry = _wgsl_disk_index.getptr(p_key);
+	if (entry == nullptr) {
+		return nullptr;
+	}
+	const uint32_t bytes = entry->bytes;
+	Ref<FileAccess> f = FileAccess::open(_wgsl_disk_path(p_key, bytes), FileAccess::READ);
+	if (f.is_null() || f->get_length() != bytes) {
+		_wgsl_disk_erase(p_key, bytes);
+		return nullptr;
+	}
+	const uint32_t magic = f->get_32();
+	const uint32_t format_version = f->get_32();
+	const uint64_t salt = f->get_64();
+	const uint64_t key = f->get_64();
+	const uint32_t flags = f->get_32();
+	const uint32_t raw_size = f->get_32();
+	if (magic != WGSL_DISK_MAGIC || format_version != WGSL_DISK_FORMAT_VERSION || salt != _wgsl_disk_build_salt || key != p_key || raw_size == 0) {
+		_wgsl_disk_erase(p_key, bytes);
+		return nullptr;
+	}
+
+	Vector<uint8_t> compressed;
+	compressed.resize(bytes - WGSL_DISK_HEADER_SIZE);
+	if (f->get_buffer(compressed.ptrw(), compressed.size()) != (uint64_t)compressed.size()) {
+		_wgsl_disk_erase(p_key, bytes);
+		return nullptr;
+	}
+
+	char *out = (char *)malloc((size_t)raw_size + 1);
+	if (out == nullptr) {
+		return nullptr;
+	}
+	const int64_t got = Compression::decompress((uint8_t *)out, raw_size, compressed.ptr(), compressed.size(), Compression::MODE_ZSTD);
+	if (got != (int64_t)raw_size) {
+		free(out);
+		_wgsl_disk_erase(p_key, bytes);
+		return nullptr;
+	}
+	out[raw_size] = 0;
+	// ⚠ An embedded NUL would truncate the shader silently at the WGPUStringView the
+	// caller builds. Tint never emits one; a corrupt file could.
+	if (strlen(out) != (size_t)raw_size) {
+		free(out);
+		_wgsl_disk_erase(p_key, bytes);
+		return nullptr;
+	}
+
+	_wgsl_disk_touch(*entry);
+	*r_frozen_fallback = (flags & WGSL_DISK_FLAG_FROZEN_FALLBACK) != 0;
+	return out;
+}
+
+static void _wgsl_disk_store(uint64_t p_key, const char *p_wgsl, bool p_frozen_fallback) {
+	if (!_wgsl_disk_enabled || p_wgsl == nullptr) {
+		return;
+	}
+	const size_t raw_size = strlen(p_wgsl);
+	if (raw_size == 0 || raw_size > (size_t)UINT32_MAX) {
+		return;
+	}
+	// A single entry larger than the whole budget can never be kept; storing it would
+	// evict everything else and then itself.
+	Vector<uint8_t> compressed;
+	compressed.resize(Compression::get_max_compressed_buffer_size((int64_t)raw_size, Compression::MODE_ZSTD));
+	const int64_t comp_size = Compression::compress(compressed.ptrw(), (const uint8_t *)p_wgsl, (int64_t)raw_size, Compression::MODE_ZSTD);
+	if (comp_size <= 0) {
+		return;
+	}
+	const uint64_t total = (uint64_t)comp_size + WGSL_DISK_HEADER_SIZE;
+	if (total > _wgsl_disk_budget_bytes) {
+		return;
+	}
+
+	const WgslDiskEntry *existing = _wgsl_disk_index.getptr(p_key);
+	if (existing != nullptr) {
+		// Same key, different size means the previous file is stale by definition:
+		// the key covers the SPIR-V, the mode and the build.
+		_wgsl_disk_erase(p_key, existing->bytes);
+	}
+
+	Ref<FileAccess> f = FileAccess::open(_wgsl_disk_path(p_key, (uint32_t)total), FileAccess::WRITE);
+	if (f.is_null()) {
+		// A full or unavailable store is not an error the player can act on, and the
+		// translation already succeeded — degrade to the in-memory tier silently.
+		_wgsl_disk_enabled = false;
+		WARN_PRINT_ONCE("WebGPU: user://wgsl_cache is not writable; SPIR-V→WGSL results will not survive this session.");
+		return;
+	}
+	f->store_32(WGSL_DISK_MAGIC);
+	f->store_32(WGSL_DISK_FORMAT_VERSION);
+	f->store_64(_wgsl_disk_build_salt);
+	f->store_64(p_key);
+	f->store_32(p_frozen_fallback ? WGSL_DISK_FLAG_FROZEN_FALLBACK : 0u);
+	f->store_32((uint32_t)raw_size);
+	f->store_buffer(compressed.ptr(), comp_size);
+	f->close();
+
+	WgslDiskEntry entry;
+	entry.bytes = (uint32_t)total;
+	_wgsl_disk_touch(entry);
+	_wgsl_disk_index[p_key] = entry;
+	_wgsl_disk_bytes += total;
+	_cgperf.count(CGPerfChannel::C_WGSL_DISK_STORE);
+
+	// ⚠ Closing the file is what schedules the IndexedDB reconcile, not writing it:
+	// OS_Web::file_access_close_callback flags any closed /userfs write and
+	// main_loop_iterate kicks the sync on the next frame. The pagehide listener in
+	// library_godot_os.js is what saves the last batch of a compile wave when the tab
+	// goes away before that frame runs.
+
+	_wgsl_disk_evict_to_budget();
+}
+
 // Distinguishes the two translation modes inside the cache key. XOR of a fixed
 // constant is bijective, so it partitions the key space without adding any
 // collision risk the two murmur passes did not already have.
@@ -974,7 +1328,32 @@ static char *_spv_to_wgsl_cached(const uint8_t *p_spv_ptr, int p_spv_size, bool 
 		return out;
 	}
 
-	// 2. Translate with Tint.
+	// 2. Check the persistent side cache, which is what makes a SECOND visit cheap.
+	// ⚠ A disk hit counts as spv_wgsl_cache_hit as well as wgsl_disk_hit: the two
+	// tiers answer the same question — did Tint have to run — and the console line's
+	// spv_wgsl=<hit>/<total> ratio would silently lose every shader this tier served.
+	// Read wgsl_disk_hit beside it to tell which tier answered.
+	if (!_wgsl_disk_ready) {
+		_wgsl_disk_init();
+	}
+	bool disk_frozen_fallback = false;
+	char *from_disk = _wgsl_disk_load(spv_hash, &disk_frozen_fallback);
+	if (from_disk != nullptr) {
+		_spv_to_wgsl_cache_hits++;
+		_cgperf.count(CGPerfChannel::C_SPV_WGSL_CACHE_HIT);
+		_cgperf.count(CGPerfChannel::C_WGSL_DISK_HIT);
+		if (disk_frozen_fallback) {
+			// The translation this entry came from degraded, and it still is degraded.
+			_cgperf.count(CGPerfChannel::C_OVERRIDE_TRANSLATE_FALLBACK);
+			WARN_PRINT_ONCE("WebGPU: a cached override-preserving translation was a frozen-path fallback. See __cgPerf counters.override_translate_fallback for how many.");
+		}
+		// Promote into the memory tier so the rest of the session never reads the file
+		// again — a shader stage is asked for many times per boot.
+		_spv_to_wgsl_cache[spv_hash] = String(from_disk);
+		return from_disk;
+	}
+
+	// 3. Translate with Tint.
 	_spv_to_wgsl_cache_misses++;
 	_cgperf.count(CGPerfChannel::C_SPV_WGSL_CACHE_MISS);
 
@@ -988,9 +1367,11 @@ static char *_spv_to_wgsl_cached(const uint8_t *p_spv_ptr, int p_spv_size, bool 
 	// the counter is how a session says out loud that it silently degraded, because
 	// the fallback is otherwise invisible and the shader simply reverts to the
 	// per-variant specialization fan-out the flag exists to delete.
+	bool frozen_fallback = false;
 	if (!wgsl_str && p_keep_overrides) {
 		wgsl_str = _translate_spirv_to_wgsl(p_spv_ptr, p_spv_size, false);
 		if (wgsl_str) {
+			frozen_fallback = true;
 			_cgperf.count(CGPerfChannel::C_OVERRIDE_TRANSLATE_FALLBACK);
 			WARN_PRINT_ONCE("WebGPU: an override-preserving SPIR-V translation failed and fell back to the frozen path. See __cgPerf counters.override_translate_fallback for how many.");
 		}
@@ -998,6 +1379,7 @@ static char *_spv_to_wgsl_cached(const uint8_t *p_spv_ptr, int p_spv_size, bool 
 
 	if (wgsl_str) {
 		_spv_to_wgsl_cache[spv_hash] = String(wgsl_str);
+		_wgsl_disk_store(spv_hash, wgsl_str, frozen_fallback);
 	}
 
 	WEBGPU_DIAG({
@@ -1343,9 +1725,27 @@ void RenderingDeviceDriverWebGPU::_cgperf_publish_build() {
 		ident = context_driver->get_adapter_identity();
 	}
 
+	// Which browser this is, from the engine's ONE classifier
+	// (GodotOS.browser_id in library_godot_os.js), so a report can be attributed.
+	// ⚠ Nothing in this driver may branch a correctness workaround on it.
+	char browser_buf[64] = { 0 };
+	godot_js_os_browser_id(browser_buf, (int)sizeof(browser_buf));
+	const Vector<String> browser_fields = String::utf8(browser_buf).split("|", true);
+	const String browser_name = browser_fields.size() > 0 ? browser_fields[0] : String("other");
+	const String browser_engine = browser_fields.size() > 1 ? browser_fields[1] : String("other");
+	const String browser_version = browser_fields.size() > 2 ? browser_fields[2] : String();
+
+	// ⚠ Whether user:// survives the tab at all. If syncfs(true) failed at boot,
+	// GodotFS._idbfs is false, user:// is per-session RAM, and every shader and WGSL
+	// cache write is thrown away when the tab closes — a Safari private window is
+	// exactly that. Reporting it is the difference between a known no-cache session
+	// and a mystery slow one.
+	const int userfs_persistent = godot_js_os_fs_is_persistent();
+	const int storage_persisted = godot_js_os_fs_storage_persisted();
+
 	// ⚠ Newline-joined into one string: EM_ASM is a macro whose body splits on
 	// every top-level comma, and one boundary crossing beats six.
-	const String joined = engine_commit + "\n" + pipeline_id + "\n" + ident.vendor + "\n" + ident.architecture + "\n" + ident.device + "\n" + ident.description;
+	const String joined = engine_commit + "\n" + pipeline_id + "\n" + ident.vendor + "\n" + ident.architecture + "\n" + ident.device + "\n" + ident.description + "\n" + browser_name + "\n" + browser_engine + "\n" + browser_version;
 	const CharString joined_utf8 = joined.utf8();
 	MAIN_THREAD_EM_ASM({
 		var g = (typeof window != 'undefined') ? window : globalThis;
@@ -1362,7 +1762,18 @@ void RenderingDeviceDriverWebGPU::_cgperf_publish_build() {
 		b.adapter.architecture = f[3];
 		b.adapter.device = f[4];
 		b.adapter.description = f[5];
-		g.__cgPerf.build = b; }, joined_utf8.get_data(), threads);
+		b.browser = {};
+		b.browser.name = f[6];
+		b.browser.engine = f[7];
+		b.browser.version = f[8];
+		b.storage = {};
+		b.storage.userfs_persistent = ($2 != 0);
+		b.storage.persisted = $3;
+		b.storage.wgsl_cache_enabled = ($4 != 0);
+		b.storage.wgsl_cache_entries = $5;
+		b.storage.wgsl_cache_bytes = $6;
+		b.storage.wgsl_cache_budget_bytes = $7;
+		g.__cgPerf.build = b; }, joined_utf8.get_data(), threads, userfs_persistent, storage_persisted, _wgsl_disk_enabled ? 1 : 0, (int)_wgsl_disk_index.size(), (double)_wgsl_disk_bytes, (double)_wgsl_disk_budget_bytes);
 
 	// The boot line (contract §1). ⚠ Deviation D-1: `baked=` can only be 0/0 here —
 	// no shader has loaded at driver init — so a second [CGPERF] line carries the
@@ -1383,13 +1794,27 @@ void RenderingDeviceDriverWebGPU::_cgperf_publish_build() {
 	// configured: HDR can still promote it to rgba16float at the first swap_chain_resize, which the
 	// `reconfigure` event's `fmt=`/`hdr=` fields report. It is on this line because it identifies
 	// the machine's presentation path, beside the adapter, and because it is answerable at init.
-	const String boot_line = vformat("[CGPERF] build engine=%s pipeline_id=%s baked=0/0 threads=%d adapter=%s/%s canvas_fmt=%s",
+	//
+	// ⚠ browser=, userfs= and wgsl_cache= are APPENDED, never inserted. Every
+	// consumer of this line greps `[CGPERF] build engine=` and reads fields by name;
+	// a field moved into the middle would still be a change to a release-visible
+	// contract. `userfs=session` says the whole user:// tree dies with the tab —
+	// a Safari private window — so a no-cache session identifies itself instead of
+	// looking like slow hardware.
+	const String boot_line = vformat("[CGPERF] build engine=%s pipeline_id=%s baked=0/0 threads=%d adapter=%s/%s canvas_fmt=%s browser=%s/%s/%s userfs=%s persisted=%d wgsl_cache=%d/%dKiB",
 			engine_commit.left(12),
 			pipeline_id,
 			threads,
 			ident.vendor.is_empty() ? String("unknown") : ident.vendor,
 			adapter_second,
-			_webgpu_preferred_canvas_format() == WGPUTextureFormat_RGBA8Unorm ? String("rgba8unorm") : String("bgra8unorm"));
+			_webgpu_preferred_canvas_format() == WGPUTextureFormat_RGBA8Unorm ? String("rgba8unorm") : String("bgra8unorm"),
+			browser_name,
+			browser_engine,
+			browser_version.is_empty() ? String("unknown") : browser_version,
+			userfs_persistent != 0 ? String("persistent") : String("session"),
+			storage_persisted,
+			_wgsl_disk_enabled ? (int)_wgsl_disk_index.size() : -1,
+			(int)(_wgsl_disk_bytes / 1024));
 	const CharString boot_line_utf8 = boot_line.utf8();
 	EM_ASM({ console.log(UTF8ToString($0)); }, boot_line_utf8.get_data());
 }
@@ -1629,6 +2054,13 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 			});
 			d._lostPatched = true;
 		} }, (int)CGPerfChannel::C_UNCAPTURED_ERROR, (int)CGPerfChannel::C_DEVICE_LOST);
+
+	// Before the build blob, so it can report what the cache actually got. Doing it
+	// here rather than lazily also puts the directory scan at a known point in boot
+	// instead of inside the first shader creation.
+	if (!_wgsl_disk_ready) {
+		_wgsl_disk_init();
+	}
 
 	_cgperf_publish_build();
 

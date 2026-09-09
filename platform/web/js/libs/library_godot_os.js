@@ -121,9 +121,51 @@ const GodotFS = {
 		_idbfs: false,
 		_syncing: false,
 		_mount_points: [],
+		// navigator.storage.persist() verdict: -1 unknown/unanswered, 0 denied, 1 granted.
+		// Without a granted bucket the browser may evict user:// — which now holds the
+		// shader and WGSL caches — at any time, so a session must be able to say which
+		// bucket it got rather than reporting a mystery slow boot.
+		_persisted: -1,
+		// Bound listener, kept so deinit can remove exactly what init added.
+		_pagehide_cb: null,
 
 		is_persistent: function () {
 			return GodotFS._idbfs ? 1 : 0;
+		},
+
+		is_storage_persisted: function () {
+			return GodotFS._persisted;
+		},
+
+		// Ask the browser to move this origin's storage out of the best-effort
+		// eviction bucket. Answered asynchronously and reported through
+		// _persisted, never awaited: nothing in the boot path may block on it.
+		//
+		// persisted() is asked FIRST so an origin that already has the grant never
+		// reaches persist(). That matters on Firefox, which shows the user a
+		// permission prompt for persist() while Chrome and Safari answer from their
+		// own heuristics silently.
+		request_persistence: function () {
+			const storage = (typeof navigator !== 'undefined') ? navigator.storage : null;
+			if (!storage || typeof storage.persist !== 'function') {
+				return;
+			}
+			const persisted = (typeof storage.persisted === 'function')
+				? storage.persisted()
+				: Promise.resolve(false);
+			persisted.then(function (granted) {
+				if (granted) {
+					GodotFS._persisted = 1;
+					return null;
+				}
+				return storage.persist().then(function (ok) {
+					GodotFS._persisted = ok ? 1 : 0;
+					return null;
+				});
+			}).catch(function (e) {
+				GodotFS._persisted = 0;
+				GodotRuntime.print(`Persistent storage request failed: ${e.message}`);
+			});
 		},
 
 		// Initialize godot file system, setting up persistent paths.
@@ -156,6 +198,20 @@ const GodotFS = {
 				createRecursive(path);
 				FS.mount(IDBFS, {}, path);
 			});
+			GodotFS.request_persistence();
+			// ⚠ pagehide, not beforeunload. beforeunload does not fire on mobile Safari
+			// or on a backgrounded tab the browser discards, which are exactly the
+			// sessions that lose a cache. The engine already schedules a sync on the
+			// frame after any user:// write (OS_Web::main_loop_iterate), but a sync in
+			// flight when the tab goes away loses that batch, and idb_is_syncing
+			// suppresses a second one — so during a shader-compile wave the newest
+			// writes are precisely the ones still queued.
+			if (typeof window !== 'undefined' && GodotFS._pagehide_cb === null) {
+				GodotFS._pagehide_cb = function () {
+					GodotFS.sync(true);
+				};
+				window.addEventListener('pagehide', GodotFS._pagehide_cb);
+			}
 			return new Promise(function (resolve, reject) {
 				FS.syncfs(true, function (err) {
 					if (err) {
@@ -183,15 +239,33 @@ const GodotFS = {
 					delete IDBFS.dbs[path];
 				}
 			});
+			if (typeof window !== 'undefined' && GodotFS._pagehide_cb !== null) {
+				window.removeEventListener('pagehide', GodotFS._pagehide_cb);
+				GodotFS._pagehide_cb = null;
+			}
 			GodotFS._mount_points = [];
 			GodotFS._idbfs = false;
 			GodotFS._syncing = false;
 		},
 
-		sync: function () {
+		// p_force skips the in-flight guard and does NOT touch _syncing. It exists for
+		// the pagehide path only: a page that is going away cannot wait for the running
+		// sync to finish and then start another, and dropping the batch is the failure
+		// this is here to prevent. Two concurrent IDBFS reconciles read the same
+		// in-memory tree and write the same entries, so the redundant one costs a
+		// transaction, not consistency — and clearing _syncing from here would tell the
+		// other sync's owner it had finished.
+		sync: function (p_force) {
 			if (GodotFS._syncing) {
-				GodotRuntime.error('Already syncing!');
-				return Promise.resolve();
+				if (!p_force) {
+					GodotRuntime.error('Already syncing!');
+					return Promise.resolve();
+				}
+				return new Promise(function (resolve, reject) {
+					FS.syncfs(false, function (error) {
+						resolve(error);
+					});
+				});
 			}
 			GodotFS._syncing = true;
 			return new Promise(function (resolve, reject) {
@@ -238,6 +312,66 @@ const GodotOS = {
 		request_quit: function () {},
 		_async_cbs: [],
 		_fs_sync_promise: null,
+		_browser: null,
+
+		// The engine's ONE browser classifier. Everything that wants to know which
+		// browser this is reads it here — OS.has_feature("web_safari") below, and the
+		// WebGPU driver through godot_js_os_browser_id — so the two can never disagree
+		// about a session.
+		//
+		// ⚠ Report and schedule with this; NEVER relax a correctness workaround on it.
+		// A validation-driven rewrite runs for every browser, because the browser that
+		// needs it is the one whose UA string the next release changes.
+		//
+		// `engine` is the load-bearing half: on iOS every brand is WebKit, and what
+		// decides how WebGPU behaves is the implementation, not the badge. Brand order
+		// matters — Chrome's UA contains "Safari", Edge's contains "Chrome".
+		browser_id: function () {
+			if (GodotOS._browser !== null) {
+				return GodotOS._browser;
+			}
+			const ua = (typeof navigator !== 'undefined' && navigator.userAgent) ? navigator.userAgent : '';
+			const table = [
+				['FxiOS', 'firefox_ios', 'webkit'],
+				['CriOS', 'chrome_ios', 'webkit'],
+				['EdgiOS', 'edge_ios', 'webkit'],
+				['Firefox/', 'firefox', 'gecko'],
+				['Edg/', 'edge', 'blink'],
+				['OPR/', 'opera', 'blink'],
+				['SamsungBrowser/', 'samsung', 'blink'],
+				['Chrome/', 'chrome', 'blink'],
+				['Chromium/', 'chromium', 'blink'],
+				['Safari/', 'safari', 'webkit'],
+			];
+			let name = 'other';
+			let engine = 'other';
+			let token = '';
+			for (let i = 0; i < table.length; i++) {
+				if (ua.indexOf(table[i][0]) !== -1) {
+					token = table[i][0];
+					name = table[i][1];
+					engine = table[i][2];
+					break;
+				}
+			}
+			// Safari reports its own version as "Version/x.y", not after "Safari/".
+			let version = '';
+			if (engine === 'webkit' && name === 'safari') {
+				token = 'Version/';
+			}
+			if (token !== '') {
+				const at = ua.indexOf(token);
+				if (at !== -1) {
+					const tail = ua.slice(at + token.length);
+					const m = (/^[/]?([0-9]+(?:[.][0-9]+)*)/).exec(tail);
+					if (m !== null) {
+						[, version] = m;
+					}
+				}
+			}
+			GodotOS._browser = { name: name, engine: engine, version: version };
+			return GodotOS._browser;
+		},
 
 		atexit: function (p_promise_cb) {
 			GodotOS._async_cbs.push(p_promise_cb);
@@ -289,6 +423,19 @@ const GodotOS = {
 		return GodotFS.is_persistent();
 	},
 
+	godot_js_os_fs_storage_persisted__proxy: 'sync',
+	godot_js_os_fs_storage_persisted__sig: 'i',
+	godot_js_os_fs_storage_persisted: function () {
+		return GodotFS.is_storage_persisted();
+	},
+
+	godot_js_os_browser_id__proxy: 'sync',
+	godot_js_os_browser_id__sig: 'vii',
+	godot_js_os_browser_id: function (p_ptr, p_ptr_max) {
+		const b = GodotOS.browser_id();
+		GodotRuntime.stringToHeap(`${b.name}|${b.engine}|${b.version}`, p_ptr, p_ptr_max);
+	},
+
 	godot_js_os_fs_sync__proxy: 'sync',
 	godot_js_os_fs_sync__sig: 'vi',
 	godot_js_os_fs_sync: function (callback) {
@@ -318,6 +465,14 @@ const GodotOS = {
 		}
 		if (ftr === 'web_linuxbsd') {
 			return ((ua.indexOf('CrOS') !== -1) || (ua.indexOf('BSD') !== -1) || (ua.indexOf('Linux') !== -1) || (ua.indexOf('X11') !== -1)) ? 1 : 0;
+		}
+		// Browser identity, from the one classifier above. A project reads these to
+		// ATTRIBUTE a measurement, never to change what it renders.
+		if (ftr.startsWith('web_browser_')) {
+			return (GodotOS.browser_id().name === ftr.slice('web_browser_'.length)) ? 1 : 0;
+		}
+		if (ftr.startsWith('web_engine_')) {
+			return (GodotOS.browser_id().engine === ftr.slice('web_engine_'.length)) ? 1 : 0;
 		}
 		return 0;
 	},

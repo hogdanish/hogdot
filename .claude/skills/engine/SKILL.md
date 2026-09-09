@@ -139,6 +139,50 @@ FILL: the subpass structure proper. What the port established (2026-08-06, slice
   counterpart of upstream Godot #102877 / `09282c316a`; CommonGrounds WEB-01 demonstrated the omitted
   path twice during web export.
 
+## `ShaderRD` and the two shader caches (written 2026-09-08)
+
+`ShaderRD` compiles one GLSL shader into N *variants*, grouped, per *version*. Everything about the
+cache is upstream code the fork must keep working on desktop, so read this before touching it.
+
+**The path is `<dir>/<name>/<group_sha256>/<version_sha1>.<api>.cache`**, and both hashes are
+*derived*, not stored:
+
+- `base_sha256` (`setup()`) mixes `GODOT_VERSION_NUMBER`, **`GODOT_VERSION_HASH`**, the three stage
+  sources and the debug-info flag.
+- `group_sha256[g]` (`_initialize_cache`) mixes `base_sha256`, the general defines, the group id,
+  every variant define in the group and the dynamic-buffer list.
+- `_version_get_sha1` mixes the version's code sections and custom defines.
+
+⚠ **`GODOT_VERSION_HASH` is therefore a PATH COMPONENT.** Every engine rebuild moves every
+`group_sha256`, which is why an editor and a template built from different commits share no cache
+entry (RL-055) — and why the user directory only ever grows. Nothing deleted the old trees:
+`shader_cache_cleanup_on_start` was declared, defined and read **nowhere** until 2026-09-08. It is
+now wired to `_cleanup_stale_cache_groups()`, which deletes any `<name>/<subdir>` this shader's live
+group set does not claim.
+⚠ Safe only because `ShaderRD` names are unique — each is the class name generated from one `.glsl`
+path, so one shader owns its whole directory. The only duplicate basenames in the tree are
+`renderer_rd` vs `gles3`, and GLES3 uses `ShaderGLES3`, a different cache.
+⚠ `user://` only, at `_initialize_cache` time only, and **off in the editor**
+(`RendererCompositorRD` passes `!is_editor_hint()`): switching between two engine builds is a normal
+day there, and each boot would delete the other build's warm cache.
+
+**Two directories, and they are NOT symmetrical.** `shader_cache_user_dir` is written and read;
+`shader_cache_res_dir` (`res://.godot/shader_cache`) is the exported bake and is read-only.
+`_load_from_cache` tries user first, then res.
+
+⚠ **The res-dir-only hole, fixed 2026-09-08.** `_initialize_cache` returned before the
+`group_sha256` loop when the user directory was empty, and the *grouped* `initialize()` overload —
+the one every scene, canvas, sky and fog shader uses — did not call it at all in that case. So a run
+whose user directory could not be created had no group hashes, `shader_cache_res_dir_valid` was
+never set, and **the entire baked pack was ignored in silence**: full glslang plus, on WebGPU, full
+Tint, on the main thread. The group hash is a path component of the *res* lookup too, which is what
+makes a user-directory failure break the read-only cache.
+The fix is structural: compute every `group_sha256` whenever *either* directory is set, then return
+before the DirAccess block, which only ever decided whether this run may WRITE.
+⚠ That DirAccess block is a **second loop** on purpose. Its failures are `ERR_FAIL_MSG`, which
+returns from the function — fused into the hash loop, one unwritable directory left every LATER
+group without a sha256 and broke the res:// read that has nothing to do with writing.
+
 ## Driver registration and selection
 
 FILL: how a rendering driver is registered and chosen — `main/main.cpp`, `servers/display/display_server.cpp`,
