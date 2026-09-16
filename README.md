@@ -6,7 +6,7 @@
   </a>
 </p>
 
-A custom fork of [Godot 4.7.2](https://github.com/godotengine/godot) developed for my game, [COMMONGROUNDS](https://hogdani.sh)
+A custom fork of [Godot 4.7.2](https://github.com/godotengine/godot) developed for my game, [COMMONGROUNDS](https://commongrounds.fun)
 
 The WebGPU work was directly borrowed from **[GodotWebGPU](https://github.com/dwalter/godotwebgpu)** by [dwalter](https://github.com/dwalter). This fork ports over his work to Godot 4.7.2 and adds a few additional features, fixes, and improvements on top of it.
 
@@ -39,7 +39,7 @@ scons platform=web target=template_release webgpu=yes opengl3=no threads=yes
 ## CI and releases
 
 This fork exists to ship one thing: WebGPU web export templates (plus the Linux editor that bakes
-their shaders) to [COMMONGROUNDS](https://hogdani.sh). CI is deliberately trimmed to match and
+their shaders) to [COMMONGROUNDS](https://commongrounds.fun). CI is deliberately trimmed to match and
 **diverges from upstream Godot's by design**: pushes run static checks, the web template matrix
 (the two `webgpu=yes` wasm32 builds plus one vanilla wasm32 canary), and a single linuxbsd editor
 build. The android/ios/macos/windows workflows are still in-tree but are not called — those
