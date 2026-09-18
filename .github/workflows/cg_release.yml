@@ -1,8 +1,8 @@
 name: 📦 CG Release
 # The engine-artifact channel for CommonGrounds (the fork's sole consumer).
 # A release run builds the linuxbsd and macOS editors (each + tint_convert_cli
-# from the same commit — the shader baker refuses a skewed pair) and all four
-# production web templates and the two headless linuxbsd dedicated-server
+# from the same commit — the shader baker refuses a skewed pair), the four
+# dlink production web templates and the two headless linuxbsd dedicated-server
 # templates, then publishes them as a GitHub Release whose body carries the
 # digests game CI verifies before laying assets out.
 #
@@ -435,52 +435,24 @@ jobs:
     runs-on: ubuntu-24.04
     # 180, not 120: the dlink legs below build the whole engine as an
     # emscripten SIDE_MODULE (~50 MB) on top of a separate main module, so they
-    # are the slowest legs in this workflow. The non-dlink legs are unaffected.
+    # are the slowest legs in this workflow.
     timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
         include:
-          # All eight are profiled production-channel builds. Per the recipe of
+          # All four are profiled production-channel builds. Per the recipe of
           # record (CommonGrounds prod-web-build.md §1): release templates get
           # production=yes (ThinLTO), debug templates deliberately do NOT —
           # but every variant takes the same build_profile or the artifacts
           # diverge in behavior.
-          - name: Template release, threads (production=yes, threads=yes)
-            cache-name: cg-release-web-release-threads
-            target: template_release
-            scons-flags: production=yes threads=yes
-            bin-zip: godot.web.template_release.wasm32.zip
-            asset: web-template_release.threads.wasm32.zip
-
-          - name: Template release, nothreads (production=yes, threads=no)
-            cache-name: cg-release-web-release-nothreads
-            target: template_release
-            scons-flags: production=yes threads=no
-            bin-zip: godot.web.template_release.wasm32.nothreads.zip
-            asset: web-template_release.nothreads.wasm32.zip
-
-          - name: Template debug, threads (threads=yes)
-            cache-name: cg-release-web-debug-threads
-            target: template_debug
-            scons-flags: threads=yes
-            bin-zip: godot.web.template_debug.wasm32.zip
-            asset: web-template_debug.threads.wasm32.zip
-
-          - name: Template debug, nothreads (threads=no)
-            cache-name: cg-release-web-debug-nothreads
-            target: template_debug
-            scons-flags: threads=no
-            bin-zip: godot.web.template_debug.wasm32.nothreads.zip
-            asset: web-template_debug.nothreads.wasm32.zip
-
-          # The four dlink legs are the GDExtension-capable twins of the four
-          # above: `dlink_enabled=yes` builds the engine as a wasm SIDE_MODULE
-          # so an extension can link against it, and appends `.dlink` to the
-          # zip name. Nothing that ships today selects one; they exist for
-          # CommonGrounds' Rust simulation core. Everything else about them
-          # matches its non-dlink twin, on purpose: one flag, one difference.
-          # See the build-export skill, "The dlink templates".
+          #
+          # Only the dlink templates are built. `dlink_enabled=yes` builds the
+          # engine as a wasm SIDE_MODULE so a GDExtension can link against it,
+          # and appends `.dlink` to the zip name. Both CommonGrounds web
+          # presets ship its Rust simulation core as a GDExtension, so no
+          # consumer selects a plain template; the four plain legs were dropped
+          # for r14. See the build-export skill, "The dlink templates".
           - name: Template release, threads, dlink (production=yes, threads=yes, dlink_enabled=yes)
             cache-name: cg-release-web-release-threads-dlink
             target: template_release
@@ -795,20 +767,15 @@ jobs:
             echo
             echo "Templates: \`production=yes\` (release only) \`webgpu=yes vulkan=no opengl3=no\`," \
                  "\`build_profile=${BUILD_PROFILE}\` \`initial_memory=256\`, wasm32."
-            echo "The four \`.dlink\` templates are the same builds plus \`dlink_enabled=yes\`:" \
-                 "they carry the engine as a wasm SIDE_MODULE so a GDExtension can link against" \
-                 "it. Nothing selects them by default; they are what an extension-bearing export" \
-                 "preset points at."
+            echo "The four web templates are \`dlink_enabled=yes\` builds: they carry the engine" \
+                 "as a wasm SIDE_MODULE so a GDExtension can link against it. Both CommonGrounds" \
+                 "web presets point at them."
             echo "Editor tarballs each contain their editor binary and a same-commit" \
                  "\`tint_convert_cli\` (must stay beside each other; the baker shells out to it)."
             echo
             echo "Game-side layout (asset -> hogdot/bin/ name the export presets expect):"
             echo
             echo '```'
-            echo "web-template_release.threads.wasm32.zip         -> godot.web.template_release.wasm32.zip"
-            echo "web-template_release.nothreads.wasm32.zip       -> godot.web.template_release.wasm32.nothreads.zip"
-            echo "web-template_debug.threads.wasm32.zip           -> godot.web.template_debug.wasm32.zip"
-            echo "web-template_debug.nothreads.wasm32.zip         -> godot.web.template_debug.wasm32.nothreads.zip"
             echo "web-template_release.threads.dlink.wasm32.zip   -> godot.web.template_release.wasm32.dlink.zip"
             echo "web-template_release.nothreads.dlink.wasm32.zip -> godot.web.template_release.wasm32.nothreads.dlink.zip"
             echo "web-template_debug.threads.dlink.wasm32.zip     -> godot.web.template_debug.wasm32.dlink.zip"
