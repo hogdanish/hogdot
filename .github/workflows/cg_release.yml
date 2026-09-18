@@ -447,6 +447,12 @@ jobs:
           # but every variant takes the same build_profile or the artifacts
           # diverge in behavior.
           #
+          # The release template also takes optimize=speed (-O3), overriding
+          # the web platform's -Os default: CommonGrounds is a 3D game whose
+          # frame time matters more than the few MB -Os saves on first load.
+          # The debug template keeps -Os; it exists to read errors, and the
+          # frame-time bench measures release.
+          #
           # Only threaded dlink templates are built. `dlink_enabled=yes` builds
           # the engine as a wasm SIDE_MODULE so a GDExtension can link against
           # it, and appends `.dlink` to the zip name. CommonGrounds ships its
@@ -454,10 +460,10 @@ jobs:
           # so no consumer selects a plain or a nothreads template; those six
           # legs were dropped for r14. See the build-export skill, "The dlink
           # templates".
-          - name: Template release, threads, dlink (production=yes, threads=yes, dlink_enabled=yes)
+          - name: Template release, threads, dlink (production=yes, optimize=speed, threads=yes, dlink_enabled=yes)
             cache-name: cg-release-web-release-threads-dlink
             target: template_release
-            scons-flags: production=yes threads=yes dlink_enabled=yes
+            scons-flags: production=yes optimize=speed threads=yes dlink_enabled=yes
             bin-zip: godot.web.template_release.wasm32.dlink.zip
             asset: web-template_release.threads.dlink.wasm32.zip
 
@@ -752,7 +758,7 @@ jobs:
             echo "| Build profile sha256 | \`${PROFILE_SHA}\` |"
             echo "| Server profile sha256 | \`${SERVER_PROFILE_SHA}\` |"
             echo
-            echo "Templates: \`production=yes\` (release only) \`webgpu=yes vulkan=no opengl3=no\`," \
+            echo "Templates: \`production=yes optimize=speed\` (release only) \`webgpu=yes vulkan=no opengl3=no\`," \
                  "\`build_profile=${BUILD_PROFILE}\` \`initial_memory=256\`, wasm32."
             echo "The two web templates are threaded \`dlink_enabled=yes\` builds: they carry" \
                  "the engine as a wasm SIDE_MODULE so a GDExtension can link against it. The" \
