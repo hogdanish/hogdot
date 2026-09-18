@@ -1174,6 +1174,19 @@ already pinned (`4.10.1`) inside the composite.
     while read -l id; gh api -X DELETE "/repos/hogdanish/hogdot/actions/caches/$id"; end
   ```
 
+## Builds without 3D physics (`disable_physics_3d`, since 2026-09-18)
+
+CommonGrounds' web profile and its dedicated-server profile both set `disable_physics_3d`. Stock
+4.7.2 does not link that way with the CSG module on: `modules/csg/csg_shape.cpp` put
+`set_autosmooth`, `is_autosmooth`, `set_smoothing_angle` and `get_smoothing_angle` inside its
+`#ifndef PHYSICS_3D_DISABLED` block, but `_bind_methods` binds them and `csg_shape.h` declares them
+unconditionally. The link fails with `undefined reference to CSGShape3D::set_autosmooth(bool)`.
+
+The fork moves the `#endif` up so that only the collision accessors stay guarded. This is an
+upstream defect. Keep the fix on every rebase-forward until upstream moves the guard. A
+`linuxbsd template_release` build with the server profile, in an `ubuntu:noble` container, is
+the quick proof: it failed in 6 min before the fix.
+
 ## The lint baseline (established 2026-08-06, before the first port commit)
 
 `pre-commit run --all-files` on untouched 4.7.1 **passes every hook**. The snapshot is
