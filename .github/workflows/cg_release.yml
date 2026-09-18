@@ -2,8 +2,9 @@ name: 📦 CG Release
 # The engine-artifact channel for CommonGrounds (the fork's sole consumer).
 # A release run builds the linuxbsd and macOS editors (each + tint_convert_cli
 # from the same commit — the shader baker refuses a skewed pair) and all four
-# production web templates, then publishes them as a GitHub Release whose body
-# carries the digests game CI verifies before laying assets out.
+# production web templates and the two headless linuxbsd dedicated-server
+# templates, then publishes them as a GitHub Release whose body carries the
+# digests game CI verifies before laying assets out.
 #
 # Deliberately standalone: not gated on static-checks or any upstream job, and
 # its own concurrency group so the upstream matrix can never cancel it.
@@ -67,6 +68,9 @@ env:
   # is private and this repo holds zero secrets). Its sha256 goes into the
   # release body so game CI can detect drift against its own copy.
   BUILD_PROFILE: hogdot/build_profile.web.gdbuild
+  # The dedicated server's minimal profile, also a tracked copy of the game's
+  # file. Its sha256 is a separate body row, so game CI pins each profile.
+  SERVER_BUILD_PROFILE: hogdot/build_profile.server.gdbuild
   # The tag this run releases as: the dispatch input, or the pushed tag ref.
   TAG: ${{ github.event.inputs.tag || github.ref_name }}
 
@@ -587,10 +591,125 @@ jobs:
           # Intermediate hand-off only; the Release asset is the permanent copy.
           retention-days: 1
 
+  server-template:
+    needs: [preflight]
+    # The CommonGrounds dedicated server's own templates, built from the same
+    # commit as the editors so the exporting editor and the template always
+    # match (the coherence rule). Headless only: the minimal server profile
+    # drops every renderer, windowing system, audio device and 3D physics.
+    # The debug twin exists because break-glass `cg deploy --local --server`
+    # exports debug by default.
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Server template release, linuxbsd x86_64 (production=yes)
+            cache-name: cg-release-server-release
+            target: template_release
+            scons-flags: production=yes
+            bin: godot.linuxbsd.template_release.x86_64
+            asset: linux-template_release.x86_64
+
+          - name: Server template debug, linuxbsd x86_64
+            cache-name: cg-release-server-debug
+            target: template_debug
+            scons-flags: ''
+            bin: godot.linuxbsd.template_debug.x86_64
+            asset: linux-template_debug.x86_64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: recursive
+          # Same reasoning as the editor jobs: no git after checkout, so no
+          # credential left lying in the workspace while the build runs.
+          persist-credentials: false
+
+      - name: Setup dependencies
+        # The server profile turns off x11, wayland, alsa, pulseaudio, udev,
+        # dbus, speechd and fontconfig, so none of their dev headers are needed.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config time
+
+      - name: Restore Godot build cache
+        uses: ./.github/actions/godot-cache-restore
+        with:
+          cache-name: ${{ matrix.cache-name }}
+        continue-on-error: true
+
+      - name: Setup Python and SCons
+        uses: ./.github/actions/godot-deps
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Build template
+        # `/usr/bin/time -v` records the link's peak RSS: production=yes means
+        # GCC full LTO, and the recorded first lever if it outgrows the
+        # runner's 16 GB is `lto=none`.
+        run: |
+          set -euo pipefail
+          /usr/bin/time -v -o "$RUNNER_TEMP/build-time.txt" \
+            scons platform=linuxbsd target=${{ matrix.target }} arch=x86_64 ${{ matrix.scons-flags }} \
+              build_profile=${{ env.SERVER_BUILD_PROFILE }} \
+              "cache_path=${{ github.workspace }}/.scons_cache/" redirect_build_objects=no
+          file "bin/${{ matrix.bin }}" >"$RUNNER_TEMP/file.txt"; cat "$RUNNER_TEMP/file.txt"
+          grep -q 'ELF 64-bit LSB.*x86-64' "$RUNNER_TEMP/file.txt"
+          ls -l bin/
+
+      - name: Save Godot build cache
+        # Dispatch runs only: they execute on refs/heads/main, so the save is
+        # restorable by every later run. A tag-push run's save is scoped to
+        # its own tag ref, where nothing can ever restore it.
+        if: github.event_name == 'workflow_dispatch'
+        uses: ./.github/actions/godot-cache-save
+        with:
+          cache-name: ${{ matrix.cache-name }}
+        continue-on-error: true
+
+      - name: Stage asset
+        # A raw ELF, not an archive: the exporter copies it with mode 0755 and
+        # checks its ELF architecture itself.
+        run: |
+          mkdir -p dist
+          cp "bin/${{ matrix.bin }}" "dist/${{ matrix.asset }}"
+
+      - name: Record build manifest
+        run: |
+          set -euo pipefail
+          {
+            echo "### ${{ matrix.asset }}"
+            echo "runs-on:       ubuntu-24.04"
+            echo "runner-image:  ${ImageOS:-unknown} ${ImageVersion:-unknown} (${RUNNER_OS}/${RUNNER_ARCH})"
+            echo "cc:            $(gcc --version | head -n 1)"
+            echo "cxx:           $(g++ --version | head -n 1)"
+            echo "ld:            $(ld --version | head -n 1)"
+            echo "python:        $(python --version 2>&1)"
+            echo "scons:         $(python -m pip show scons | awk '/^Version:/ { print $2 }')"
+            echo "scons flags:   platform=linuxbsd target=${{ matrix.target }} arch=x86_64 ${{ matrix.scons-flags }} build_profile=${SERVER_BUILD_PROFILE}"
+            echo "bytes:         $(stat -c%s "bin/${{ matrix.bin }}")"
+            echo "peak rss:      $(awk -F': ' '/Maximum resident set size/ { print $2 }' "$RUNNER_TEMP/build-time.txt") kB (largest process in the build tree; the link)"
+            echo "build wall:    $(awk -F': ' '/Elapsed \(wall clock\) time/ { print $2 }' "$RUNNER_TEMP/build-time.txt")"
+            echo
+          } | tee "dist/manifest-40-${{ matrix.cache-name }}.txt"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ${{ matrix.cache-name }}
+          path: dist/*
+          if-no-files-found: error
+          # Intermediate hand-off only; the Release asset is the permanent copy.
+          retention-days: 1
+
   release:
     name: Publish release
     runs-on: ubuntu-24.04
-    needs: [linux-editor, macos-editor, web-template]
+    needs: [linux-editor, macos-editor, web-template, server-template]
     timeout-minutes: 15
     # ⚠ The ONLY job in this workflow with write access, and the only one that
     # needs it: it pushes the tag and creates the Release. Everything above runs
@@ -640,6 +759,7 @@ jobs:
           EDITOR_VERSION="$(cat editor-version.txt)"
           rm editor-version.txt
           PROFILE_SHA="$(sha256sum "../${BUILD_PROFILE}" | cut -d' ' -f1)"
+          SERVER_PROFILE_SHA="$(sha256sum "../${SERVER_BUILD_PROFILE}" | cut -d' ' -f1)"
 
           # Fold the per-job fragments into one `build-manifest.txt` asset, then
           # delete them so they don't each become a release asset of their own.
@@ -651,6 +771,7 @@ jobs:
             echo
             echo "fork commit:   ${GITHUB_SHA}"
             echo "build profile: ${BUILD_PROFILE} (sha256 ${PROFILE_SHA})"
+            echo "server profile: ${SERVER_BUILD_PROFILE} (sha256 ${SERVER_PROFILE_SHA})"
             echo "workflow run:  ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
             echo
             cat manifest-*.txt
@@ -670,6 +791,7 @@ jobs:
             echo "| Editor \`--version\` (HOGDOT_BUILD) | \`${EDITOR_VERSION}\` |"
             echo "| emsdk pin | \`${EM_VERSION_WEBGPU}\` |"
             echo "| Build profile sha256 | \`${PROFILE_SHA}\` |"
+            echo "| Server profile sha256 | \`${SERVER_PROFILE_SHA}\` |"
             echo
             echo "Templates: \`production=yes\` (release only) \`webgpu=yes vulkan=no opengl3=no\`," \
                  "\`build_profile=${BUILD_PROFILE}\` \`initial_memory=256\`, wasm32."
@@ -693,6 +815,8 @@ jobs:
             echo "web-template_debug.nothreads.dlink.wasm32.zip   -> godot.web.template_debug.wasm32.nothreads.dlink.zip"
             echo "editor-linux-x86_64.tar.gz                      -> godot.linuxbsd.editor.x86_64 + tint_convert_cli"
             echo "editor-macos-arm64.tar.gz                       -> godot.macos.editor.arm64 + tint_convert_cli"
+            echo "linux-template_release.x86_64                   -> godot.linuxbsd.template_release.x86_64"
+            echo "linux-template_debug.x86_64                     -> godot.linuxbsd.template_debug.x86_64"
             echo '```'
             echo
             echo "\`editor-linux-x86_64.debugsymbols.tar.gz\` is that editor's separated DWARF." \

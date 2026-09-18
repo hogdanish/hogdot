@@ -833,13 +833,16 @@ steps** (a tag-scoped save is unreachable dead weight against the 10 GiB cache q
 | `editor-macos-arm64.tar.gz` | `godot.macos.editor.arm64` + `tint_convert_cli` (since r2, 6.A.4) — the Mac dev editor as a pinned asset instead of an mtime in `bin/`. Built on `macos-15` with the Vulkan SDK step REQUIRED (the editor links `-lMoltenVK`; matches the local recipe above), via the pinned `hogdot/install-vulkan-sdk-macos.sh`. arm64 only. |
 | `web-template_{release,debug}.{threads,nothreads}.wasm32.zip` | The four production templates: `webgpu=yes vulkan=no opengl3=no initial_memory=256 build_profile=hogdot/build_profile.web.gdbuild`, `production=yes` on release only (the prod-web-build recipe: debug skips exactly that flag). |
 | `web-template_{release,debug}.{threads,nothreads}.dlink.wasm32.zip` | The same four builds plus `dlink_enabled=yes` — GDExtension-capable, added 2026-09-09. Nothing selects them by default. See "The dlink templates". |
+| `linux-template_{release,debug}.x86_64` | The CommonGrounds dedicated-server templates (added in r14, 2026-09-18), raw ELF files, not archives. `platform=linuxbsd arch=x86_64 build_profile=hogdot/build_profile.server.gdbuild`, `production=yes` on release only. The server profile is minimal and headless: no renderer, no windowing system, no audio device, no 3D physics. The debug twin is there because the game's break-glass `cg deploy --local --server` exports debug by default. Layout: `godot.linuxbsd.template_{release,debug}.x86_64`. |
 | `editor-linux-x86_64.debugsymbols.tar.gz` | The linuxbsd editor's separated DWARF (`godot.linuxbsd.editor.x86_64.debugsymbols`). Diagnostic-only; nothing needs it to build or export. See "Symbolizing a stalled editor" below. |
 | `checksums.txt` | sha256 per asset; also in the release body. |
 | `build-manifest.txt` | Runner image + toolchain per asset (see "Reproducibility" below); also in the release body, folded into a `<details>`. |
 
 The release body carries the fork commit, the editor `--version` string (game CI's
 `HOGDOT_BUILD`; format `4.7.2.stable.custom_build.<sha9>` — CI must NOT set `BUILD_NAME`, which
-upstream's godot-build composite sets to `gh`), the emsdk pin, and the build profile's sha256.
+upstream's godot-build composite sets to `gh`), the emsdk pin, the web build profile's sha256
+(row `Build profile sha256`) and the server build profile's sha256 (row `Server profile sha256`).
+The game parses each row by its exact first cell, so neither name may contain the other's.
 
 ⚠ **The game downloads assets by name** (`web-export.yml`: an explicit list, each verified against
 an `HOGDOT_SHA256_*` pin in `engine.env`), so adding an asset to a release is safe and removing or
