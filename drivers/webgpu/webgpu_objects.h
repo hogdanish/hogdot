@@ -605,7 +605,12 @@ struct WGQueryPool {
 	WGPUQuerySet handle = nullptr;
 	WGPUBuffer resolve_buffer = nullptr; // GPU buffer for query set resolve (CopySrc | QueryResolve).
 	WGPUBuffer readback_buffer = nullptr; // CPU-readable staging buffer (CopyDst | MapRead).
-	uint32_t count = 0;
+	uint32_t count = 0; // Slots the engine owns, and the only ones ever resolved.
+	// WebGPU writes timestamps only at a pass boundary, and both ends of that pair must be a real,
+	// in-range, distinct index (see command_timestamp_write). The query set is therefore 2 * count
+	// slots wide and capture `i` sinks its unwanted end write at `scratch_base + i`, which also
+	// keeps every index written at most once per command buffer.
+	uint32_t scratch_base = 0;
 	bool is_real = false; // True if backed by actual timestamp-query hardware.
 
 	// Shadow CPU buffer for async readback results.

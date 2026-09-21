@@ -548,6 +548,29 @@ point of the flag), or with the project setting **`rendering/rendering_device/we
 ⚠ That setting is registered from the web-only driver, so **it never appears in the editor's Project
 Settings dialog** — write the line into `project.godot` by hand.
 
+- ⚠ **`writeTimestamp` is gone, and it took the render loop with it (fixed 2026-09-21).**
+  `GPUCommandEncoder.writeTimestamp` was an early Chrome extension; the spec removed it and
+  **Chrome 153 dropped the method**. emdawnwebgpu still forwards `wgpuCommandEncoderWriteTimestamp`
+  straight to it (`library_webgpu.js`), so `?cgperf_ts` died with
+  `commandEncoder.writeTimestamp is not a function` and a black canvas. The spec's replacement
+  writes only at a **pass boundary**, so `command_timestamp_write` now issues an **empty compute
+  pass** carrying `timestampWrites`: the beginning of that pass is a GPU timestamp at exactly the
+  point in the command stream the engine asked for, and no real pass descriptor in the driver
+  changes. `RenderingDevice::capture_timestamp()` refuses to run inside a draw, compute or
+  raytracing list, so a capture is never mid-pass.
+- ⚠ **`WGPU_QUERY_SET_INDEX_UNDEFINED` does NOT work through emdawnwebgpu.**
+  `WebGPU.makePassTimestampWrites` copies both indices out of the struct as plain `u32` and never
+  converts the sentinel to `undefined` (several neighboring fields in that file do), so the browser
+  receives `4294967295` and rejects it as out of range. **Both ends of a pass pair must therefore be
+  real, in-range and distinct.** The query set is allocated at `2 * count` and capture `i` sinks its
+  unwanted end write at `count + i` — which also keeps every index written at most once per command
+  buffer. Only the lower half is ever resolved or read.
+- **The consumer is the engine's own frame profile, not a new channel.**
+  `RenderingServer.set_frame_profiling_enabled(true)` plus `get_frame_profile()` returns one
+  `{name, gpu_msec, cpu_msec}` per `RENDER_TIMESTAMP` site — ~90 named passes a frame — and it is
+  GDScript-visible on every backend. Nothing needs to be added to `__cgPerf` for per-pass GPU ms.
+  ⚠ Captures only happen while `RSG::utilities->capturing_timestamps` is set, so `?cgperf_ts` alone
+  measures nothing: the game must turn frame profiling on as well.
 - **Why it was off.** The imported driver hard-disabled it: a stuck `mapAsync` on the readback buffer
   produces `buffer used in submit while mapped` validation errors that corrupt rendering. ⚠ Reading
   the code says the hazard is **already defended three times over**, all landed in the same import

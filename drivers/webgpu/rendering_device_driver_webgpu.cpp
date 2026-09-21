@@ -10994,10 +10994,13 @@ RDD::QueryPoolID RenderingDeviceDriverWebGPU::timestamp_query_pool_create(uint32
 		return QueryPoolID(pool);
 	}
 
-	// Create query set.
+	// Create query set. Twice the engine's count: every capture needs a second slot for the end
+	// write WebGPU insists on but nothing reads (see command_timestamp_write). Only the lower half
+	// is ever resolved or reported.
+	pool->scratch_base = p_query_count;
 	WGPUQuerySetDescriptor qs_desc = {};
 	qs_desc.type = WGPUQueryType_Timestamp;
-	qs_desc.count = p_query_count;
+	qs_desc.count = p_query_count * 2;
 	pool->handle = wgpuDeviceCreateQuerySet(device, &qs_desc);
 	if (!pool->handle) {
 		WARN_PRINT("WebGPU: Failed to create timestamp query set, falling back to dummy timestamps.");
@@ -11153,10 +11156,37 @@ void RenderingDeviceDriverWebGPU::command_timestamp_write(CommandBufferID p_cmd_
 	WGCommandBuffer *cmd = (WGCommandBuffer *)(p_cmd_buffer.id);
 	ERR_FAIL_NULL(cmd);
 
-	// wgpuCommandEncoderWriteTimestamp requires no active render/compute pass.
+	// ⚠ There is no mid-encoder timestamp write in WebGPU any more.
+	// GPUCommandEncoder.writeTimestamp was an early Chrome extension, the spec removed it, and
+	// Chrome 153 dropped it; emdawnwebgpu still forwards wgpuCommandEncoderWriteTimestamp straight
+	// to it, so this line threw `writeTimestamp is not a function` and took the whole render loop
+	// down with it — a black canvas whenever timestamps were turned on.
+	//
+	// The replacement writes only at a pass boundary, so a capture becomes its own EMPTY COMPUTE
+	// PASS: the beginning of that pass is a GPU timestamp at exactly this point in the command
+	// stream, which is what the engine asked for. Attaching captures to the driver's real passes
+	// instead would touch every pass descriptor here for a strictly worse approximation.
+	// RenderingDevice::capture_timestamp() refuses to run inside a draw, compute or raytracing
+	// list, so this is never called mid-pass.
 	cmd->end_active_encoder();
 
-	wgpuCommandEncoderWriteTimestamp(cmd->encoder, pool->handle, p_index);
+	// ⚠ Both ends of the pair must be real, in-range and different. emdawnwebgpu's
+	// makePassTimestampWrites forwards WGPU_QUERY_SET_INDEX_UNDEFINED to JS as the number
+	// 0xFFFFFFFF rather than omitting the member, so "do not write the end" is not expressible and
+	// would be an out-of-range validation error. The end write goes to this capture's own slot in
+	// the upper half of the set, which nothing resolves.
+	WGPUPassTimestampWrites ts_writes = {};
+	ts_writes.querySet = pool->handle;
+	ts_writes.beginningOfPassWriteIndex = p_index;
+	ts_writes.endOfPassWriteIndex = pool->scratch_base + p_index;
+
+	WGPUComputePassDescriptor cp_desc = {};
+	cp_desc.timestampWrites = &ts_writes;
+	WGPUComputePassEncoder ts_pass = wgpuCommandEncoderBeginComputePass(cmd->encoder, &cp_desc);
+	if (ts_pass) {
+		wgpuComputePassEncoderEnd(ts_pass);
+		wgpuComputePassEncoderRelease(ts_pass);
+	}
 
 	// Track this pool so we resolve it in command_buffer_end.
 	bool already_tracked = false;
