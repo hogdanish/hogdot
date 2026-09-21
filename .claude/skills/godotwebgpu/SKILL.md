@@ -876,6 +876,56 @@ menu before the first click, and any tab with autoplay blocked.
   `MAX_VOLUME_CHANNELS` is `8`, so that channel has always read out of range and written 0. The
   rewrite preserves that exactly rather than quietly changing a surround mix.
 
+## The dlink side module and `$asyncLoad` (read before streaming-compiling it)
+
+**Chrome code-caches WebAssembly only for `compileStreaming` / `instantiateStreaming` over a
+`Response`.** The `dlink_enabled` side module — 52 MB for CommonGrounds — goes through
+`$asyncLoad` → `readAsync` → `arrayBuffer()` → `WebAssembly.instantiate(bytes)`, so **no visit ever
+reuses compiled code**, while the 1.4 MB main module already streams. Moving the side module onto
+`compileStreaming` is worth a whole recompile per visit. It has not been done, and this section is
+why.
+
+**Verified against the pinned emsdk (`src/lib/libdylink.js`, read at 6.0.9): the Module path is
+equivalent, on the main thread and on the 8 pthread workers alike.**
+
+- `getDylinkMetadata(binary)` has an explicit `binary instanceof WebAssembly.Module` branch that
+  reads `dylink.0` through `WebAssembly.Module.customSections`. Custom sections survive compilation.
+- `loadWebAssemblyModule`'s `loadModule()` handles a Module on **both** branches — async
+  (`new WebAssembly.Instance(binary, info)`) and sync (`binary instanceof WebAssembly.Module ?
+  binary : new WebAssembly.Module(binary)`).
+- `postInstantiation` stores `sharedModules[libName] = module` on the main thread only, and every
+  worker's `loadLibData` returns that Module. **The workers already take the Module path today**, so
+  handing the main thread a Module changes nothing about them.
+
+⚠ **The blocker is that `$asyncLoad` is SHARED, and overriding it by URL suffix breaks the
+GDExtension.** `FS_preloadFile` (`libfs_shared.js`) calls `asyncLoad(url)` and hands the result
+straight to `FS_createDataFile`; `emscripten_wget_data` and `emscripten_async_wget_data` copy it
+into the heap. CommonGrounds preloads its Rust extension's `.wasm` through `engine.preloadFile`, so
+a `url.endsWith('.wasm')` override would write a `WebAssembly.Module` into the Emscripten FS and the
+client would boot with no simulation core — the 2026-09-16 outage class, exactly.
+
+**The safe shape, when someone spends on it:** scope by URL, never by suffix. Both
+`dynamicLibraries` and `locateFile` are in scope in the generated JS, so the override compares the
+requested URL against `dynamicLibraries.map(locateFile)` **at call time** (a game-supplied
+`Module.locateFile` rewrites asset URLs, so the set cannot be precomputed). Everything else keeps
+the byte path untouched.
+
+Three more things that must be decided, not discovered:
+
+- ⚠ **The fallback re-downloads.** `compileStreaming` consumes the `Response` body, so a `catch`
+  cannot recover it: falling back to `readAsync(url)` issues a **second** request for the whole 52 MB.
+  `response.clone()` avoids that and buffers the entire body in memory instead. Neither is free.
+  Whatever is chosen, count it — a silent fallback is a silent regression.
+- ⚠ `compileStreaming` **requires `Content-Type: application/wasm`** and throws otherwise. Caddy
+  serves it locally; the edge has to be checked before this ships.
+- ⚠ **`libdylink.js` is upstream's generated JS and moves between releases.** The reading above is
+  6.0.9 (the local Homebrew keg); CI and the shipped templates pin **6.0.8**. Re-read it at the
+  pinned version before landing anything that depends on these branches.
+
+Seeding `sharedModules` from the page instead was considered and does not work as it stands: it is a
+module-scope `var` in `runtime_pthread.js`, not a property of `Module`, so nothing outside the
+generated JS can reach it without exporting it first.
+
 ## Browser identity (added 2026-09-08)
 
 Nothing under `drivers/webgpu/` could tell Chrome from Safari from Firefox; `navigator.userAgent` was
