@@ -112,6 +112,9 @@ public:
 
 	Error open_dynamic_library(const String &p_path, void *&p_library_handle, GDExtensionData *p_data = nullptr) override;
 
+	// Puts one startup mark on the page's own timeline. See os_web.cpp for which one and why.
+	void benchmark_begin_measure(const String &p_context, const String &p_what) override;
+
 	void resume_audio();
 
 	OS_Web();

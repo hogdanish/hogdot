@@ -289,6 +289,32 @@ Error OS_Web::open_dynamic_library(const String &p_path, void *&p_library_handle
 	return OK;
 }
 
+// The engine's own startup marks are TOOLS_ENABLED only, so an export template records nothing
+// between the renderer's first console line and the first autoload `_ready` — measured at 1.55 s on
+// a fast machine and 6.2 s under a 4x CPU throttle, with no instrumentation inside it at all.
+// Main::start's entry cuts that window in two: everything before it is Main::setup2's tail, and
+// everything after it is loading the autoload scripts and the main scene.
+//
+// Published as an ordinary `__cgPerf` event, so it carries the page's own performance.now() stamp
+// and sits on the same timeline as the loader's marks and the driver's events. The channel belongs
+// to the WebGPU driver, so the call is a no-op under any other driver, and the whole override is a
+// no-op on every other platform. Android overrides the same method for its own tracing.
+//
+// ⚠ Widening this to every mark is one edit, and it is deliberately NOT taken: `__cgPerf.events`
+// holds 256 records, and ~50 boot marks would evict a quarter of a session's driver events.
+void OS_Web::benchmark_begin_measure(const String &p_context, const String &p_what) {
+	OS_Unix::benchmark_begin_measure(p_context, p_what);
+
+	if (p_context == "Startup" && p_what == "Main::Start") {
+		MAIN_THREAD_EM_ASM({
+			var g = (typeof window != 'undefined') ? window : globalThis;
+			if (!g.__cgPerf || typeof g.__cgPerf._event != 'function') {
+				return;
+			}
+			g.__cgPerf._event('boot_mark', 'Startup/Main::Start'); });
+	}
+}
+
 OS_Web *OS_Web::get_singleton() {
 	return static_cast<OS_Web *>(OS::get_singleton());
 }

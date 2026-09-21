@@ -473,6 +473,24 @@ builds by `drivers/webgpu/SCsub` from the same input list and builder as the edi
 agree by construction. Comparing it against the editor's stamp is what detects a template that
 translates differently from the pck it was fed.
 
+### The `boot_mark` event (added 2026-09-21)
+
+`OS_Web::benchmark_begin_measure()` publishes one event, `{type: 'boot_mark', detail:
+'Startup/Main::Start'}`, at the entry of `Main::start`. It is the **only** mark a released web build
+puts inside its own startup: every `OS::benchmark_*_measure` call in `main/main.cpp` compiles out of
+an export template (`#ifdef TOOLS_ENABLED` in `core/os/os.cpp`), and CommonGrounds measured
+**1.55 s at 1x and 6.2 s at 4x with nothing in it at all** between the renderer's first console line
+and the first autoload `_ready`. This mark cuts that window into `Main::setup2`'s tail and
+`Main::start`'s own script and scene loading.
+
+- **Overriding the OS method is the mainline seam, not a fork invention** — `OS_Android` overrides
+  the same three methods for its own tracing. Nothing in `main/main.cpp` changes, so this costs
+  nothing at the next rebase-forward.
+- ⚠ **Widening it to every mark is one edit and is deliberately not taken.** `events` holds 256
+  records; ~50 boot marks would evict a quarter of a session's driver events for a one-off reading.
+- The event goes through `__cgPerf._event`, so it is absent with any other rendering driver and on
+  every other platform, and it carries the page's `performance.now()` stamp like every other event.
+
 ### Reading `compiles`, `events` and `fence_lag` (added 2026-08-30, chunk 2)
 
 - ⚠ **`ms` times the `wgpuDevice*Create*` call's RETURN, not the GPU's compile.** Dawn
