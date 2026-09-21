@@ -701,6 +701,7 @@ SkyRD::SkyRD() {
 	roughness_layers = GLOBAL_GET("rendering/reflections/sky_reflections/roughness_layers");
 	sky_ggx_samples_quality = GLOBAL_GET("rendering/reflections/sky_reflections/ggx_samples");
 	sky_use_octmap_array = GLOBAL_GET("rendering/reflections/sky_reflections/texture_array_reflections");
+	realtime_update_interval = MAX(1, (int)GLOBAL_GET("rendering/reflections/sky_reflections/realtime_update_interval_frames"));
 }
 
 void SkyRD::init() {
@@ -927,6 +928,8 @@ void SkyRD::set_texture_format(RD::DataFormat p_texture_format) {
 }
 
 SkyRD::~SkyRD() {
+	print_verbose(vformat("SkyRD: %d sky radiance rebuilds, last on frame %d, realtime interval %d.", radiance_rebuild_count, radiance_rebuild_frame_last, realtime_update_interval));
+
 	// cleanup anything created in init...
 	RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
 
@@ -1274,8 +1277,18 @@ void SkyRD::update_radiance_buffers(Ref<RenderSceneBuffersRD> p_render_buffers, 
 
 	int max_processing_layer = sky_use_octmap_array ? sky->reflection.layers.size() : sky->reflection.layers[0].mipmaps.size();
 
+	// A REALTIME sky rebuilds at most once every realtime_update_interval frames. The dirty flag
+	// stays pending, so a rebuild is delayed by less than one interval, never dropped. A sky that
+	// has not been built yet is never held: update_dirty_skys() clears radiance_rebuilt, which is
+	// how a new sky, a new radiance size and a mode change all rebuild at once.
+	bool realtime_interval_held = false;
+	if (sky_mode == RSE::SKY_MODE_REALTIME && sky->radiance_rebuilt && realtime_update_interval > 1) {
+		uint64_t frames_since_rebuild = RSG::rasterizer->get_frame_number() - sky->radiance_rebuild_frame;
+		realtime_interval_held = frames_since_rebuild < (uint64_t)realtime_update_interval;
+	}
+
 	// Update radiance octmap
-	if (sky->reflection.dirty && (sky->processing_layer >= max_processing_layer || update_single_frame)) {
+	if (sky->reflection.dirty && !realtime_interval_held && (sky->processing_layer >= max_processing_layer || update_single_frame)) {
 		Projection cm;
 		cm.set_perspective(90, 1, 0.01, 10.0);
 		Projection correction;
@@ -1358,6 +1371,10 @@ void SkyRD::update_radiance_buffers(Ref<RenderSceneBuffersRD> p_render_buffers, 
 		}
 		sky->baked_exposure = p_luminance_multiplier;
 		sky->reflection.dirty = false;
+		sky->radiance_rebuilt = true;
+		sky->radiance_rebuild_frame = RSG::rasterizer->get_frame_number();
+		radiance_rebuild_count++;
+		radiance_rebuild_frame_last = sky->radiance_rebuild_frame;
 
 	} else {
 		if (sky_mode == RSE::SKY_MODE_INCREMENTAL && sky->processing_layer < max_processing_layer) {
@@ -1603,6 +1620,9 @@ void SkyRD::update_dirty_skys() {
 
 		sky->reflection.dirty = true;
 		sky->processing_layer = 0;
+		// The radiance data was just (re)created, so its content means nothing. Rebuild at once,
+		// whatever the realtime interval says.
+		sky->radiance_rebuilt = false;
 
 		Sky *next = sky->dirty_list;
 		sky->dirty_list = nullptr;

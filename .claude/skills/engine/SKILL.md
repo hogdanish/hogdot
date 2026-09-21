@@ -183,6 +183,33 @@ before the DirAccess block, which only ever decided whether this run may WRITE.
 returns from the function — fused into the hash loop, one unwritable directory left every LATER
 group without a sha256 and broke the res:// read that has nothing to do with writing.
 
+## The sky radiance map, and the fork's REALTIME rebuild interval (written 2026-09-21)
+
+`SkyRD::update_radiance_buffers()` (`renderer_rd/environment/sky.cpp`) is the **single choke point** for
+a radiance rebuild — Forward+ and forward-mobile both reach it and nothing else does. One rebuild is a
+sky draw into the octmap plus, in REALTIME, `create_reflection_fast_filter()` over every roughness layer:
+measured on CommonGrounds at **8 render passes, ~60 driver draws and ~26 bind-group sets per frame**.
+
+- **`SKY_MODE_AUTOMATIC` resolves to REALTIME on `uses_time` or `uses_position` alone**, provided
+  `radiance_size == Sky::REAL_TIME_SIZE` (256) — `sky.cpp`'s `setup_sky()`. ⚠ A `TIME`-scrolled cloud
+  layer therefore re-dirties the map every frame; the sky shader decides the mode, not the project.
+- ⚠ **`SkyMaterialData::update_parameters()` sets `uniform_set_updated` on EVERY parameter write**, and
+  `setup_sky()` turns that into `reflection.dirty`. So replacing `TIME` with a uniform written per frame
+  rebuilds exactly as often — there is no game-side way to slow this down.
+- **hogdot adds `rendering/reflections/sky_reflections/realtime_update_interval_frames`** (default 1 =
+  stock behavior, bit for bit). Above 1, a REALTIME sky rebuilds at most once every N **rendered frames**
+  (`RSG::rasterizer->get_frame_number()`, not a per-call counter, so multiple viewports cannot spend the
+  budget N times over). The dirty flag stays **pending**, never cleared, so a delayed rebuild is late by
+  less than one interval and is never dropped. INCREMENTAL and QUALITY are untouched.
+- ⚠ **A rebuild that must not be delayed is expressed as "not yet built", never as a shorter interval.**
+  `update_dirty_skys()` clears `Sky::radiance_rebuilt` beside `processing_layer = 0`, and that one line
+  covers first use, a changed radiance size and a changed process mode — all three free the radiance RID
+  and route through `invalidate_sky()`, so the texture's content is meaningless until it is redrawn.
+  A changed sky *material* does not invalidate; it is an ordinary dirty and waits out the interval.
+- `SkyRD::~SkyRD()` prints the session's rebuild count and last rebuild frame under `--verbose`. That is
+  the count-shaped proof the interval works; there is no script-visible counter for sky rebuilds, and
+  `VIEWPORT_RENDER_INFO_DRAW_CALLS_IN_FRAME` cannot see them either (see forward-mobile above).
+
 ## Driver registration and selection
 
 FILL: how a rendering driver is registered and chosen — `main/main.cpp`, `servers/display/display_server.cpp`,

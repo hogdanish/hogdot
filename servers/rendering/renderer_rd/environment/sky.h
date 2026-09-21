@@ -267,6 +267,12 @@ public:
 		ReflectionData reflection;
 		bool dirty = false;
 		int processing_layer = 0;
+
+		// REALTIME rebuild throttle. `radiance_rebuilt` false forces the next rebuild, so a sky
+		// whose radiance data was just created holds nothing back.
+		bool radiance_rebuilt = false;
+		uint64_t radiance_rebuild_frame = 0;
+
 		Sky *dirty_list = nullptr;
 		float baked_exposure = 1.0;
 
@@ -291,6 +297,13 @@ public:
 	Sky *dirty_sky_list = nullptr;
 	mutable RID_Owner<Sky, true> sky_owner;
 	int roughness_layers;
+
+	// Minimum frames between two REALTIME radiance rebuilds. 1 rebuilds whenever the sky is dirty,
+	// which is what every other mode and every stock Godot build does.
+	int realtime_update_interval = 1;
+	// Verbose-only accounting for that interval; a rebuild draws the sky and filters 7 layers.
+	uint64_t radiance_rebuild_count = 0;
+	uint64_t radiance_rebuild_frame_last = 0;
 
 	RendererRD::MaterialStorage::ShaderData *_create_sky_shader_func();
 	static RendererRD::MaterialStorage::ShaderData *_create_sky_shader_funcs();

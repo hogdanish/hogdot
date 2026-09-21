@@ -3274,6 +3274,11 @@
 		<member name="rendering/reflections/sky_reflections/ggx_samples.mobile" type="int" setter="" getter="" default="16">
 			Lower-end override for [member rendering/reflections/sky_reflections/ggx_samples] on mobile devices, due to performance concerns or driver support.
 		</member>
+		<member name="rendering/reflections/sky_reflections/realtime_update_interval_frames" type="int" setter="" getter="" default="1">
+			Minimum number of rendered frames between two radiance map rebuilds for a [Sky] running in [constant Sky.PROCESS_MODE_REALTIME]. The default [code]1[/code] rebuilds the map on every frame the sky changes, which is the only behavior other process modes have.
+			A sky that scrolls with [code]TIME[/code] changes on every frame, so it pays a sky draw plus a fast filter of every roughness layer per frame. Raising this to [code]30[/code] refreshes ambient light and reflections twice a second instead, while the sky itself still draws every frame and still looks smooth. Raise it when the sky's own motion is faster than the lighting it should produce.
+			[b]Note:[/b] Only [constant Sky.PROCESS_MODE_REALTIME] is affected. A new sky, a changed radiance size and a changed process mode all rebuild at once, and a change of sky material is delayed by less than one interval, never dropped.
+		</member>
 		<member name="rendering/reflections/sky_reflections/roughness_layers" type="int" setter="" getter="" default="8">
 			Limits the number of layers to use in radiance maps when using importance sampling. A lower number will be slightly faster and take up less VRAM.
 		</member>
