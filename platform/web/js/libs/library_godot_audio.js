@@ -212,6 +212,23 @@ class SampleNodeBus {
 		/** @type {ChannelMergerNode} */
 		this._channelMerger = GodotAudio.ctx.createChannelMerger(NUMBER_OF_WEB_CHANNELS);
 
+		// Written in one loop by setVolume, against the last value each node actually took.
+		/** @type {Array<GainNode>} */
+		this._gains = [this._l, this._r, this._sl, this._sr, this._c, this._lfe];
+		/** @type {Array<number>} */
+		this._gainChannels = [
+			GodotAudio.GodotChannel.CHANNEL_L,
+			GodotAudio.GodotChannel.CHANNEL_R,
+			GodotAudio.GodotChannel.CHANNEL_SL,
+			GodotAudio.GodotChannel.CHANNEL_SR,
+			GodotAudio.GodotChannel.CHANNEL_C,
+			GodotAudio.GodotChannel.CHANNEL_LFE,
+		];
+		/** @type {Float32Array} */
+		this._lastVolume = new Float32Array(this._gains.length);
+		/** @type {number} */
+		this._volumeEpoch = -1;
+
 		this._channelSplitter
 			.connect(this._l, GodotAudio.WebChannel.CHANNEL_L)
 			.connect(
@@ -276,21 +293,41 @@ class SampleNodeBus {
 
 	/**
 	 * Sets the volume for each (split) channel.
+	 *
+	 * Writes a gain only when it moved, because Chrome implements the setter as an insert into the
+	 * node's automation timeline and the engine writes these once per physics tick per voice. The
+	 * comparison is against the value the node last took, so a slow ramp is never lost: the error
+	 * against what the engine asked for stays below one epsilon.
+	 *
+	 * A gain skipped while the AudioContext was not running was never written at all, so every
+	 * state change bumps `GodotAudio.sampleVolumeEpoch` and the next call here writes all six
+	 * unconditionally. A fresh `SampleNodeBus` starts at epoch -1 and therefore also writes all six
+	 * the first time, which matters because a `GainNode` starts at 1.0, not at 0.
 	 * @param {Float32Array} volume Volume array from the engine for each channel.
+	 * @param {number} [offset] First channel of this bus inside `volume`.
 	 * @returns {void}
 	 */
-	setVolume(volume) {
-		if (volume.length !== GodotAudio.MAX_VOLUME_CHANNELS) {
+	setVolume(volume, offset = 0) {
+		if (volume.length - offset < GodotAudio.MAX_VOLUME_CHANNELS) {
 			throw new Error(
-				`Volume length isn't "${GodotAudio.MAX_VOLUME_CHANNELS}", is ${volume.length} instead`
+				`Volume length isn't "${GodotAudio.MAX_VOLUME_CHANNELS}", is ${volume.length - offset} instead`
 			);
 		}
-		this._l.gain.value = volume[GodotAudio.GodotChannel.CHANNEL_L] ?? 0;
-		this._r.gain.value = volume[GodotAudio.GodotChannel.CHANNEL_R] ?? 0;
-		this._sl.gain.value = volume[GodotAudio.GodotChannel.CHANNEL_SL] ?? 0;
-		this._sr.gain.value = volume[GodotAudio.GodotChannel.CHANNEL_SR] ?? 0;
-		this._c.gain.value = volume[GodotAudio.GodotChannel.CHANNEL_C] ?? 0;
-		this._lfe.gain.value = volume[GodotAudio.GodotChannel.CHANNEL_LFE] ?? 0;
+		const force = this._volumeEpoch !== GodotAudio.sampleVolumeEpoch;
+		this._volumeEpoch = GodotAudio.sampleVolumeEpoch;
+		for (let i = 0; i < this._gains.length; i++) {
+			const channel = this._gainChannels[i];
+			// GodotChannel indexes past MAX_VOLUME_CHANNELS for CHANNEL_SR, so that one channel
+			// reads 0 - which is what slicing one bus out of the array already produced.
+			const value = channel < GodotAudio.MAX_VOLUME_CHANNELS
+				? (volume[offset + channel] ?? 0)
+				: 0;
+			if (!force && Math.abs(value - this._lastVolume[i]) <= GodotAudio.VOLUME_EPSILON) {
+				continue;
+			}
+			this._gains[i].gain.value = value;
+			this._lastVolume[i] = value;
+		}
 	}
 
 	/**
@@ -299,6 +336,9 @@ class SampleNodeBus {
 	 */
 	clear() {
 		this._bus = null;
+		this._gains = null;
+		this._gainChannels = null;
+		this._lastVolume = null;
 		this._channelSplitter.disconnect();
 		this._channelSplitter = null;
 		this._l.disconnect();
@@ -582,19 +622,19 @@ class SampleNode {
 	}
 
 	/**
-	 * Sets the volumes of the `SampleNode` for each buses passed in parameters.
-	 * @param {Array<Bus>} buses
+	 * Sets the volumes of the `SampleNode` for each bus passed in parameters.
+	 *
+	 * Takes bus indexes and an offset rather than a bus array and a slice per bus: this runs once
+	 * per physics tick per voice, and the array and the slices were three allocations per call
+	 * that nothing outlived.
+	 * @param {Int32Array | Array<number>} busIndexes
 	 * @param {Float32Array} volumes
 	 */
-	setVolumes(buses, volumes) {
-		for (let busIdx = 0; busIdx < buses.length; busIdx++) {
-			const sampleNodeBus = this.getSampleNodeBus(buses[busIdx]);
-			sampleNodeBus.setVolume(
-				volumes.slice(
-					busIdx * GodotAudio.MAX_VOLUME_CHANNELS,
-					(busIdx * GodotAudio.MAX_VOLUME_CHANNELS) + GodotAudio.MAX_VOLUME_CHANNELS
-				)
-			);
+	setVolumes(busIndexes, volumes) {
+		for (let busIdx = 0; busIdx < busIndexes.length; busIdx++) {
+			const bus = GodotAudio.Bus.getBus(busIndexes[busIdx]);
+			const sampleNodeBus = this.getSampleNodeBus(bus);
+			sampleNodeBus.setVolume(volumes, busIdx * GodotAudio.MAX_VOLUME_CHANNELS);
 		}
 	}
 
@@ -1131,6 +1171,19 @@ const _GodotAudio = {
 		MAX_VOLUME_CHANNELS: 8,
 
 		/**
+		 * Smallest gain change worth writing to a GainNode. -100 dB, so nothing audible is lost,
+		 * and a value that only jitters in its last bits costs no timeline event.
+		 */
+		VOLUME_EPSILON: 1e-5,
+
+		/**
+		 * Bumped on every AudioContext state change. A `SampleNodeBus` whose epoch is behind
+		 * writes every gain again, because gains are not written at all while the context is not
+		 * running and the node therefore never took the values the engine asked for.
+		 */
+		sampleVolumeEpoch: 0,
+
+		/**
 		 * Represents the index of each sound channel relative to the engine.
 		 */
 		GodotChannel: Object.freeze({
@@ -1252,6 +1305,9 @@ const _GodotAudio = {
 			const ctx = new (window.AudioContext || window.webkitAudioContext)(opts);
 			GodotAudio.ctx = ctx;
 			ctx.onstatechange = function () {
+				// Sample gains are not written while the context is not running, so whatever each
+				// GainNode holds after a state change is stale. Force the next write.
+				GodotAudio.sampleVolumeEpoch++;
 				let state = 0;
 				switch (ctx.state) {
 				case 'suspended':
@@ -1419,7 +1475,7 @@ const _GodotAudio = {
 		/**
 		 * Triggered when a sample node volumes need to be updated.
 		 * @param {string} playbackObjectId Id of the sample playback
-		 * @param {Array<number>} busIndexes Indexes of the buses that need to be updated
+		 * @param {Int32Array} busIndexes Indexes of the buses that need to be updated
 		 * @param {Float32Array} volumes Array of the volumes
 		 * @returns {void}
 		 */
@@ -1428,8 +1484,7 @@ const _GodotAudio = {
 			if (sampleNode == null) {
 				return;
 			}
-			const buses = busIndexes.map((busIndex) => GodotAudio.Bus.getBus(busIndex));
-			sampleNode.setVolumes(buses, volumes);
+			sampleNode.setVolumes(busIndexes, volumes);
 		},
 
 		/**
@@ -1823,16 +1878,15 @@ const _GodotAudio = {
 		/** @type {string} */
 		const playbackObjectId = GodotRuntime.parseString(playbackObjectIdStrPtr);
 
-		/** @type {Uint32Array} */
+		// Both stay heap views. Nothing downstream is async and nothing allocates wasm memory, so
+		// neither view can detach before it is read, and the copy Array.from made per call per
+		// voice per tick bought nothing.
+		/** @type {Int32Array} */
 		const buses = GodotRuntime.heapSub(HEAP32, busesPtr, busesSize);
 		/** @type {Float32Array} */
 		const volumes = GodotRuntime.heapSub(HEAPF32, volumesPtr, volumesSize);
 
-		GodotAudio.sample_set_volumes_linear(
-			playbackObjectId,
-			Array.from(buses),
-			volumes
-		);
+		GodotAudio.sample_set_volumes_linear(playbackObjectId, buses, volumes);
 	},
 
 	godot_audio_sample_bus_set_count__proxy: 'sync',

@@ -820,6 +820,39 @@ async key/value store in `library_godot_os.js`, one small transaction per entry 
 commits independently of the mount. Platform-layer only, no renderer semantics, verifiable the same
 way this batch was.
 
+## Sample volumes and the suspended AudioContext (added 2026-09-21)
+
+⚠ **A `GainNode.gain.value` write is an insert into an automation timeline, and a context that is
+not `running` never drains it.** `AudioServer` writes six gains per active positional voice per
+physics tick, so on a page whose audio was never unlocked by a click **every write costs more than
+the last one**: CommonGrounds measured `setVolumes` going 1.5 ms → 1624 ms per 12 s window between
+t≈40 s and t≈215 s of one idle page, taking whole-frame busy from 4.26 to 6.37 ms. With the context
+running the same page is flat for 170 s. It bites every `cg bench web` page (no user gesture), the
+menu before the first click, and any tab with autoplay blocked.
+
+- **`AudioDriverWeb::set_sample_playback_bus_volumes_linear` returns early unless
+  `audio_context.state == AUDIO_CONTEXT_RUNNING`.** That skips the `itos()`+`utf8()` of the playback
+  id, both scratch buffers and the JS crossing, not just the gain writes.
+- ⚠ **A skipped write means the node never took the value, so the cache cannot be trusted across a
+  state change.** `ctx.onstatechange` bumps `GodotAudio.sampleVolumeEpoch`, and a `SampleNodeBus`
+  whose epoch is behind writes all six gains unconditionally — that is what stops a voice keeping a
+  stale volume after the first click. A fresh bus starts at epoch `-1` for the same reason: a
+  `GainNode` starts at **1.0**, not at 0, so its first write can never be elided.
+- **With the context running, a gain is written only when it moved by more than
+  `GodotAudio.VOLUME_EPSILON` (1e-5) from the value the node last took.** Comparing against the last
+  *written* value, never the last *requested* one, is what bounds a slow ramp's error at one epsilon
+  instead of letting it accumulate.
+- **Three allocations per call per voice per tick are gone**: `Array.from(buses)`, the `.map()` to
+  `Bus` objects and a `volumes.slice()` per bus. `setVolumes` takes bus indexes and reads `volumes`
+  at an offset; the C++ side reuses two `thread_local LocalVector`s.
+- ⚠ **The playback id is still a decimal STRING on every call** — `itos(instance_id).utf8()` in C++,
+  `UTF8ArrayToString` in JS, and a `Map` keyed by that string. Making it numeric touches ~10
+  `godot_audio_sample_*` signatures plus `_sample_playback_finished_callback`, which parses it back,
+  so it was left alone. It is the next thing to remove on this path.
+- ⚠ **Unrelated upstream defect, left alone deliberately:** `GodotChannel.CHANNEL_SR` is `8` while
+  `MAX_VOLUME_CHANNELS` is `8`, so that channel has always read out of range and written 0. The
+  rewrite preserves that exactly rather than quietly changing a surround mix.
+
 ## Browser identity (added 2026-09-08)
 
 Nothing under `drivers/webgpu/` could tell Chrome from Safari from Firefox; `navigator.userAgent` was

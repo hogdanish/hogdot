@@ -35,6 +35,7 @@
 #include "core/config/engine.h"
 #include "core/math/math_funcs_binary.h"
 #include "core/object/object.h"
+#include "core/templates/local_vector.h"
 #include "servers/audio/audio_stream.h"
 
 #include <emscripten.h>
@@ -176,7 +177,7 @@ void AudioDriverWeb::start() {
 }
 
 void AudioDriverWeb::resume() {
-	if (audio_context.state == 0) { // 'suspended'
+	if (audio_context.state == AUDIO_CONTEXT_SUSPENDED) {
 		godot_audio_resume();
 	}
 }
@@ -356,16 +357,29 @@ void AudioDriverWeb::update_sample_playback_pitch_scale(const Ref<AudioSamplePla
 void AudioDriverWeb::set_sample_playback_bus_volumes_linear(const Ref<AudioSamplePlayback> &p_playback, const HashMap<StringName, Vector<AudioFrame>> &p_bus_volumes) {
 	ERR_FAIL_COND_MSG(p_playback.is_null(), "Parameter p_playback is null.");
 
+	// A GainNode write on a context that is not running is an insert into an automation timeline
+	// nothing ever drains, so each write costs more than the last one. AudioServer calls this once
+	// per physics tick for every active positional voice, which on a page whose audio was never
+	// unlocked by a click makes the whole frame grow with session time. The gain nodes keep
+	// whatever they last took; library_godot_audio.js bumps sampleVolumeEpoch on every state
+	// change, so the first call after the context runs again writes every gain.
+	if (audio_context.state != AUDIO_CONTEXT_RUNNING) {
+		return;
+	}
+
 	constexpr int real_max_channels = AudioServer::MAX_CHANNELS_PER_BUS * 2;
 
-	PackedInt32Array buses;
+	// Both buffers are reused across calls: this runs once per tick per voice and neither buffer
+	// outlives the call below. thread_local because AudioServer may reach a driver from more than
+	// one thread; LocalVector::resize keeps the capacity, so a warm call allocates nothing.
+	thread_local LocalVector<int32_t> buses;
+	thread_local LocalVector<float> values;
 	buses.resize(p_bus_volumes.size());
-	int32_t *buses_ptrw = buses.ptrw();
-	PackedFloat32Array values;
-	values.resize(p_bus_volumes.size() * AudioServer::MAX_CHANNELS_PER_BUS * 2);
-	float *values_ptrw = values.ptrw();
+	values.resize(p_bus_volumes.size() * real_max_channels);
+	int32_t *buses_ptrw = buses.ptr();
+	float *values_ptrw = values.ptr();
 	int idx = 0;
-	for (KeyValue<StringName, Vector<AudioFrame>> pair : p_bus_volumes) {
+	for (const KeyValue<StringName, Vector<AudioFrame>> &pair : p_bus_volumes) {
 		int bus_index = AudioServer::get_singleton()->get_bus_index(pair.key);
 		buses_ptrw[idx] = bus_index;
 		ERR_FAIL_COND(pair.value.size() != AudioServer::MAX_CHANNELS_PER_BUS);
@@ -379,9 +393,9 @@ void AudioDriverWeb::set_sample_playback_bus_volumes_linear(const Ref<AudioSampl
 	godot_audio_sample_set_volumes_linear(
 			itos(p_playback->get_instance_id()).utf8().get_data(),
 			buses_ptrw,
-			buses.size(),
+			(int)buses.size(),
 			values_ptrw,
-			values.size());
+			(int)values.size());
 }
 
 void AudioDriverWeb::set_sample_bus_count(int p_count) {

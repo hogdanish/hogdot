@@ -38,6 +38,14 @@
 
 class AudioDriverWeb : public AudioDriver {
 private:
+	// The AudioContext.state values library_godot_audio.js reports through
+	// _state_change_callback. The field starts at -1, meaning nothing was reported yet.
+	enum AudioContextState {
+		AUDIO_CONTEXT_SUSPENDED = 0,
+		AUDIO_CONTEXT_RUNNING = 1,
+		AUDIO_CONTEXT_CLOSED = 2,
+	};
+
 	struct AudioContext {
 		bool inited = false;
 		float output_latency = 0.0;
