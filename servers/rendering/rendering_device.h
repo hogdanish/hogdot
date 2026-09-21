@@ -392,6 +392,10 @@ public:
 		BitField<RDD::TextureAspectBits> read_aspect_flags = {};
 		BitField<RDD::TextureAspectBits> barrier_aspect_flags = {};
 		bool bound = false; // Bound to framebuffer.
+		// True only where texture_memory was charged for this texture, which is texture_create()
+		// alone. A shared view reports the parent's allocation size and an extension texture owns
+		// no allocation at all, so both must leave texture_memory alone when they are freed.
+		bool owns_allocation = false;
 		RID owner;
 
 		RDG::ResourceTracker *draw_tracker = nullptr;

@@ -59,6 +59,30 @@ FILL: which responsibilities sit in `rendering_device.cpp` versus the driver, an
 makes every barrier a no-op — establish what mainline expects a barrier to *mean* before deciding that is
 safe under 4.7.1.
 
+## `MEMORY_TEXTURES` / `MEMORY_BUFFERS` accounting (written 2026-09-21)
+
+`RenderingDevice::texture_memory` and `buffer_memory` are plain running sums, so **every `+=` needs a
+`-=` that can only fire when the `+=` did**. Both invariants were broken in 4.7.2 as shipped.
+
+- ⚠ **`texture_memory` underflowed on every shared view.** The free path subtracted
+  `driver->texture_get_allocation_size(texture->driver_id)` for *every* disposed texture, while only
+  `texture_create()` ever added. A shared view's driver texture reports the **parent's** size (the
+  WebGPU driver's `texture_create_shared` does `*tex = *orig`), and views are everywhere — the render
+  target's sRGB view, every backbuffer mip, every radiance mip and layer, every `get_texture_slice`.
+  `texture_create_from_extension` was a second, quieter hole: it adds nothing and subtracted anyway.
+  hogdot adds `Texture::owns_allocation`, set true beside the one `+=`, and guards the one `-=` with
+  it. ⚠ Do not "simplify" it to `owner.is_null()` — that reads true for an extension texture.
+  The symptom was `RENDER_TEXTURE_MEM_USED` reading `1.8446744e19` (a wrapped `uint64_t`) after any
+  scene change, which made the whole texture-attribution tool useless.
+- **Shared views deliberately add nothing.** A view is a `VkImageView`/`GPUTextureView`; the honest
+  reading of `MEMORY_TEXTURES` is the sum of the *owning* allocations.
+- ⚠ **`MEMORY_BUFFERS` silently omitted the staging pools**, which are up to 32 MiB of real GPU
+  allocation that only ever grows. `_insert_staging_block()` and the transfer workers' resizable
+  staging buffers call `driver->buffer_create` directly; hogdot charges both. Staging blocks are
+  inserted and never removed before `finalize()`, so the pair is two sites, not a lifecycle.
+- The driver's own `_tracked_memory_used` (`MEMORY_TOTAL` on WebGPU) always counted all of this and is
+  the honest total; only the two RD-side sub-counters were wrong. Read all three together.
+
 ## storage_rd
 
 FILL: the general resource-ownership model. What the port established (2026-08-06, slice 2):

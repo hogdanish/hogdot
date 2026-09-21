@@ -902,6 +902,10 @@ Error RenderingDevice::_insert_staging_block(StagingBuffers &p_staging_buffers) 
 		return ERR_CANT_CREATE;
 	}
 
+	// Staging blocks are real GPU allocations that only ever grow, so MEMORY_BUFFERS must see them
+	// or it under-reports the pool's whole cap.
+	buffer_memory += driver->buffer_get_allocation_size(block.driver_id);
+
 	p_staging_buffers.blocks.insert(p_staging_buffers.current, block);
 	return OK;
 }
@@ -1785,6 +1789,7 @@ RID RenderingDevice::texture_create(const TextureFormat &p_format, const Texture
 	}
 
 	texture_memory += driver->texture_get_allocation_size(texture.driver_id);
+	texture.owns_allocation = true;
 
 	RID id = texture_owner.make_rid(texture);
 #ifdef DEV_ENABLED
@@ -7595,12 +7600,14 @@ RenderingDevice::TransferWorker *RenderingDevice::_acquire_transfer_worker(uint3
 		uint32_t expected_buffer_size = MAX(transfer_worker->max_transfer_size, expected_buffer_size_minimum);
 		if (expected_buffer_size > transfer_worker->staging_buffer_size_allocated) {
 			if (transfer_worker->staging_buffer.id != 0) {
+				buffer_memory -= driver->buffer_get_allocation_size(transfer_worker->staging_buffer);
 				driver->buffer_free(transfer_worker->staging_buffer);
 			}
 
 			uint32_t new_staging_buffer_size = Math::next_power_of_2(expected_buffer_size);
 			transfer_worker->staging_buffer_size_allocated = new_staging_buffer_size;
 			transfer_worker->staging_buffer = driver->buffer_create(new_staging_buffer_size, RDD::BUFFER_USAGE_TRANSFER_FROM_BIT, RDD::MEMORY_ALLOCATION_TYPE_CPU, frames_drawn);
+			buffer_memory += driver->buffer_get_allocation_size(transfer_worker->staging_buffer);
 		}
 	}
 
@@ -7766,6 +7773,9 @@ void RenderingDevice::_free_transfer_workers() {
 	for (uint32_t i = 0; i < transfer_worker_pool_size; i++) {
 		TransferWorker *worker = transfer_worker_pool[i];
 		driver->fence_free(worker->command_fence);
+		if (worker->staging_buffer.id != 0) {
+			buffer_memory -= driver->buffer_get_allocation_size(worker->staging_buffer);
+		}
 		driver->buffer_free(worker->staging_buffer);
 		driver->command_pool_free(worker->command_pool);
 		memdelete(worker);
@@ -8362,7 +8372,9 @@ void RenderingDevice::_free_pending_resources(int p_frame) {
 
 		_texture_free_shared_fallback(texture);
 
-		texture_memory -= driver->texture_get_allocation_size(texture->driver_id);
+		if (texture->owns_allocation) {
+			texture_memory -= driver->texture_get_allocation_size(texture->driver_id);
+		}
 		driver->texture_free(texture->driver_id);
 
 		frames[p_frame].textures_to_dispose_of.pop_front();
@@ -9373,11 +9385,13 @@ void RenderingDevice::finalize() {
 	frames.clear();
 
 	for (int i = 0; i < upload_staging_buffers.blocks.size(); i++) {
+		buffer_memory -= driver->buffer_get_allocation_size(upload_staging_buffers.blocks[i].driver_id);
 		driver->buffer_unmap(upload_staging_buffers.blocks[i].driver_id);
 		driver->buffer_free(upload_staging_buffers.blocks[i].driver_id);
 	}
 
 	for (int i = 0; i < download_staging_buffers.blocks.size(); i++) {
+		buffer_memory -= driver->buffer_get_allocation_size(download_staging_buffers.blocks[i].driver_id);
 		driver->buffer_unmap(download_staging_buffers.blocks[i].driver_id);
 		driver->buffer_free(download_staging_buffers.blocks[i].driver_id);
 	}
