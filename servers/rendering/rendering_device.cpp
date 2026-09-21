@@ -1838,6 +1838,8 @@ RID RenderingDevice::texture_create_shared(const TextureView &p_view, RID p_with
 	Texture texture = *src_texture;
 	texture.slice_trackers = nullptr;
 	texture.shared_fallback = nullptr;
+	// A view is not an allocation; the copy above brought the parent's flag with it.
+	texture.owns_allocation = false;
 
 	RDD::TextureView tv;
 	bool create_shared = true;
@@ -1991,6 +1993,8 @@ RID RenderingDevice::texture_create_shared_from_slice(const TextureView &p_view,
 	Texture texture = *src_texture;
 	texture.slice_trackers = nullptr;
 	texture.shared_fallback = nullptr;
+	// A view is not an allocation; the copy above brought the parent's flag with it.
+	texture.owns_allocation = false;
 
 	get_image_format_required_size(texture.format, texture.width, texture.height, texture.depth, p_mipmap + 1, &texture.width, &texture.height);
 	texture.mipmaps = p_mipmaps;

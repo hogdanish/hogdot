@@ -74,6 +74,11 @@ safe under 4.7.1.
   it. ⚠ Do not "simplify" it to `owner.is_null()` — that reads true for an extension texture.
   The symptom was `RENDER_TEXTURE_MEM_USED` reading `1.8446744e19` (a wrapped `uint64_t`) after any
   scene change, which made the whole texture-attribution tool useless.
+  ⚠ **And clear it in BOTH shared paths.** `texture_create_shared*` start with
+  `Texture texture = *src_texture;`, so a new flag on that struct is INHERITED from the parent and
+  a guard keyed on it is inert. Measured 2026-09-21 on a Metal editor: with the flag copied,
+  freeing one 512² RGBA8 view still took 1,064,960 bytes off `MEMORY_TEXTURES`, exactly as before
+  the fix. Every field the two share-constructors do not override is a hazard of this shape.
 - **Shared views deliberately add nothing.** A view is a `VkImageView`/`GPUTextureView`; the honest
   reading of `MEMORY_TEXTURES` is the sum of the *owning* allocations.
 - ⚠ **`MEMORY_BUFFERS` silently omitted the staging pools**, which are up to 32 MiB of real GPU
