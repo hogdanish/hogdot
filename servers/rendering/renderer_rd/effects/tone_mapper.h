@@ -122,6 +122,11 @@ private:
 		float luminance_multiplier; //  4 - 96
 
 		float tonemapper_params[4]; //  16 - 112
+
+		float film_grain_amount; //  4 - 116
+		float film_grain_uv_scale; //  4 - 120
+		float film_grain_seed; //  4 - 124
+		float pad; //  4 - 128
 	};
 
 	struct TonemapPushConstantMobile {
@@ -138,7 +143,9 @@ private:
 
 		float tonemapper_params[4]; //  16 - 64
 		float output_max_value; //  4 - 68
-		float pad[3]; //  12 - 80
+		float film_grain_amount; //  4 - 72
+		float film_grain_uv_scale; //  4 - 76
+		float film_grain_seed; //  4 - 80
 	};
 
 	/* tonemap actually writes to a framebuffer, which is
@@ -158,6 +165,27 @@ private:
 		RID shader_version;
 		PipelineCacheRD pipelines[TONEMAP_MOBILE_MODE_MAX];
 	} tonemap_mobile;
+
+	// One RGBA8 texture both tonemappers sample: r is the film-grain tile, gba the blue-noise
+	// dither tables. Made once, on the CPU, at construction (see _create_noise_texture).
+	static const uint32_t NOISE_TEXTURE_SIZE = 512;
+	RID noise_texture;
+	void _create_noise_texture();
+
+	// The grain's authored amplitude at intensity 1.0: 1.5 codes rms of 8 bits at mid-grey, and
+	// the 6.5 % rms the tile loses to bilinear sampling (measured), folded in. A grain texel is
+	// `film_grain_size` pixels wide on a 1080-line output, so a grain covers the same share of
+	// the screen at every device pixel ratio. The pattern moves 24 times a second of wall time.
+	static constexpr float FILM_GRAIN_RMS_CODES = 1.5f;
+	static constexpr float FILM_GRAIN_BILINEAR_LOSS = 0.935f;
+	static constexpr float FILM_GRAIN_REFERENCE_HEIGHT = 1080.0f;
+	static constexpr float FILM_GRAIN_RATE_HZ = 24.0f;
+	static const uint32_t FILM_GRAIN_SEED_PERIOD = 4096;
+	struct FilmGrainParams {
+		float amount = 0.0f;
+		float uv_scale = 0.0f;
+		float seed = 0.0f;
+	};
 
 public:
 	ToneMapper(bool p_use_mobile_version);
@@ -212,11 +240,19 @@ public:
 		bool bilinear_filtering = true;
 
 		bool convert_to_srgb = false;
+
+		// Film grain is added in display space, after convert_to_srgb, before the dither.
+		bool use_film_grain = false;
+		float film_grain_intensity = 1.0f;
+		float film_grain_size = 0.75f;
 	};
 
 	void tonemapper(RID p_source_color, RID p_dst_framebuffer, const TonemapSettings &p_settings);
 	void tonemapper_mobile(RID p_source_color, RID p_dst_framebuffer, const TonemapSettings &p_settings);
 	void tonemapper_subpass(RD::DrawListID p_subpass_draw_list, RID p_source_color, RD::FramebufferFormatID p_dst_format_id, const TonemapSettings &p_settings);
+
+private:
+	FilmGrainParams _film_grain_params(const TonemapSettings &p_settings, int p_output_height) const;
 };
 
 } // namespace RendererRD

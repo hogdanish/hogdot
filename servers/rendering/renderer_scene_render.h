@@ -262,6 +262,12 @@ public:
 	bool environment_get_use_1d_color_correction(RID p_env) const;
 	RID environment_get_color_correction(RID p_env) const;
 
+	// Film grain
+	void environment_set_film_grain(RID p_env, bool p_enable, float p_intensity, float p_size);
+	bool environment_get_film_grain_enabled(RID p_env) const;
+	float environment_get_film_grain_intensity(RID p_env) const;
+	float environment_get_film_grain_size(RID p_env) const;
+
 	virtual Ref<Image> environment_bake_panorama(RID p_env, bool p_bake_irradiance, const Size2i &p_size) = 0;
 
 	virtual void positional_soft_shadow_filter_set_quality(RSE::ShadowQuality p_quality) = 0;

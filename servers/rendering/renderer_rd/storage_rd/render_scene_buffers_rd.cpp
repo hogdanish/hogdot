@@ -31,6 +31,7 @@
 #include "render_scene_buffers_rd.h"
 #include "render_scene_buffers_rd.compat.inc"
 
+#include "core/config/project_settings.h"
 #include "core/object/class_db.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
 #include "servers/rendering/rendering_device_binds.h"
@@ -156,7 +157,9 @@ void RenderSceneBuffersRD::configure(const RenderSceneBuffersConfiguration *p_co
 	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
 
 	render_target = p_config->get_render_target();
-	force_hdr = texture_storage->render_target_is_using_hdr(render_target);
+	// A float 3D buffer follows either an HDR render target or the project's own ask
+	// (`rendering/viewport/hdr_3d`); read live, so a probe can flip it and reconfigure.
+	force_hdr = texture_storage->render_target_is_using_hdr(render_target) || bool(GLOBAL_GET("rendering/viewport/hdr_3d"));
 
 	target_size = p_config->get_target_size();
 	internal_size = p_config->get_internal_size();

@@ -734,3 +734,21 @@ bool RendererSceneRender::environment_get_use_1d_color_correction(RID p_env) con
 RID RendererSceneRender::environment_get_color_correction(RID p_env) const {
 	return environment_storage.environment_get_color_correction(p_env);
 }
+
+// Film grain
+
+void RendererSceneRender::environment_set_film_grain(RID p_env, bool p_enable, float p_intensity, float p_size) {
+	environment_storage.environment_set_film_grain(p_env, p_enable, p_intensity, p_size);
+}
+
+bool RendererSceneRender::environment_get_film_grain_enabled(RID p_env) const {
+	return environment_storage.environment_get_film_grain_enabled(p_env);
+}
+
+float RendererSceneRender::environment_get_film_grain_intensity(RID p_env) const {
+	return environment_storage.environment_get_film_grain_intensity(p_env);
+}
+
+float RendererSceneRender::environment_get_film_grain_size(RID p_env) const {
+	return environment_storage.environment_get_film_grain_size(p_env);
+}

@@ -30,14 +30,136 @@
 
 #include "tone_mapper.h"
 
+#include "core/math/random_pcg.h"
+#include "servers/rendering/renderer_rd/effects/blue_noise_64.h"
 #include "servers/rendering/renderer_rd/renderer_compositor_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
+#include "servers/rendering/rendering_server_globals.h"
 
 using namespace RendererRD;
 
+// A separable Gaussian blur over a square field that wraps at its edges, so the result tiles.
+static void _blur_wrapped(LocalVector<float> &p_field, uint32_t p_size, float p_sigma) {
+	const int radius = int(Math::ceil(p_sigma * 3.0f));
+	LocalVector<float> kernel;
+	kernel.resize(2 * radius + 1);
+	float sum = 0.0f;
+	for (int k = -radius; k <= radius; k++) {
+		kernel[k + radius] = Math::exp(-float(k * k) / (2.0f * p_sigma * p_sigma));
+		sum += kernel[k + radius];
+	}
+	for (float &weight : kernel) {
+		weight /= sum;
+	}
+	LocalVector<float> pass;
+	pass.resize(p_field.size());
+	const int size = int(p_size);
+	for (int y = 0; y < size; y++) {
+		for (int x = 0; x < size; x++) {
+			float acc = 0.0f;
+			for (int k = -radius; k <= radius; k++) {
+				acc += kernel[k + radius] * p_field[y * size + ((x + k + size) % size)];
+			}
+			pass[y * size + x] = acc;
+		}
+	}
+	for (int y = 0; y < size; y++) {
+		for (int x = 0; x < size; x++) {
+			float acc = 0.0f;
+			for (int k = -radius; k <= radius; k++) {
+				acc += kernel[k + radius] * pass[((y + k + size) % size) * size + x];
+			}
+			p_field[y * size + x] = acc;
+		}
+	}
+}
+
+static void _normalize_rms(LocalVector<float> &p_field) {
+	double sum_sq = 0.0;
+	for (float v : p_field) {
+		sum_sq += double(v) * double(v);
+	}
+	const float rms = float(Math::sqrt(sum_sq / double(p_field.size())));
+	if (rms <= 0.0f) {
+		return;
+	}
+	for (float &v : p_field) {
+		v /= rms;
+	}
+}
+
+// The noise the tonemappers sample, made once on the CPU:
+//   r:   the film-grain tile. White Gaussian noise blurred by a wrapped Gaussian (sigma 1.0),
+//        plus a wider layer (sigma 2.5) at 0.35, normalized to unit rms and stored as t / 8 + 0.5.
+//        The blur is what makes it read as grain rather than static; the wider layer clumps it
+//        the way dye clouds do. Per-pixel hash noise measured 1 px wide and looked like TV snow.
+//   gba: three independent 64x64 blue-noise rank tables, tiled, for the triangular dither.
+void ToneMapper::_create_noise_texture() {
+	const uint32_t size = NOISE_TEXTURE_SIZE;
+	const uint32_t count = size * size;
+
+	LocalVector<float> fine;
+	LocalVector<float> coarse;
+	fine.resize(count);
+	coarse.resize(count);
+	RandomPCG rng(0x6772616976, RandomPCG::DEFAULT_INC); // Fixed, so every platform draws the same tile.
+	for (uint32_t i = 0; i < count; i++) {
+		fine[i] = rng.randfn(0.0f, 1.0f);
+		coarse[i] = rng.randfn(0.0f, 1.0f);
+	}
+	_blur_wrapped(fine, size, 1.0f);
+	_blur_wrapped(coarse, size, 2.5f);
+	_normalize_rms(fine);
+	_normalize_rms(coarse);
+	for (uint32_t i = 0; i < count; i++) {
+		fine[i] += 0.35f * coarse[i];
+	}
+	_normalize_rms(fine);
+
+	Vector<uint8_t> data;
+	data.resize(count * 4);
+	uint8_t *w = data.ptrw();
+	for (uint32_t y = 0; y < size; y++) {
+		for (uint32_t x = 0; x < size; x++) {
+			const uint32_t i = y * size + x;
+			const uint32_t blue = (y & 63) * 64 + (x & 63);
+			w[i * 4 + 0] = uint8_t(CLAMP(Math::round((fine[i] * 0.125f + 0.5f) * 255.0f), 0.0f, 255.0f));
+			w[i * 4 + 1] = BLUE_NOISE_64[0][blue];
+			w[i * 4 + 2] = BLUE_NOISE_64[1][blue];
+			w[i * 4 + 3] = BLUE_NOISE_64[2][blue];
+		}
+	}
+
+	RD::TextureFormat tf;
+	tf.format = RD::DATA_FORMAT_R8G8B8A8_UNORM;
+	tf.width = size;
+	tf.height = size;
+	tf.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_UPDATE_BIT;
+	Vector<Vector<uint8_t>> layers;
+	layers.push_back(data);
+	noise_texture = RD::get_singleton()->texture_create(tf, RD::TextureView(), layers);
+	RD::get_singleton()->set_resource_name(noise_texture, "Tonemap Noise");
+}
+
+ToneMapper::FilmGrainParams ToneMapper::_film_grain_params(const TonemapSettings &p_settings, int p_output_height) const {
+	FilmGrainParams params;
+	if (!p_settings.use_film_grain || p_settings.film_grain_intensity <= 0.0f || p_output_height <= 0) {
+		return params; // amount 0: the shader skips the block on a uniform branch.
+	}
+	params.amount = p_settings.film_grain_intensity * (FILM_GRAIN_RMS_CODES / 255.0f) / FILM_GRAIN_BILINEAR_LOSS;
+	params.uv_scale = FILM_GRAIN_REFERENCE_HEIGHT / (MAX(0.01f, p_settings.film_grain_size) * float(NOISE_TEXTURE_SIZE) * float(p_output_height));
+	// The frame clock, not the frame count, so the cadence is the same at every frame rate and
+	// keeps running while the tree is paused, as a projector does. The modulus keeps the
+	// shader's fract() precise: 4096 steps of the R2 sequence never settle into a short cycle.
+	const uint64_t step = uint64_t(RSG::rasterizer->get_total_time() * double(FILM_GRAIN_RATE_HZ));
+	params.seed = float(step % FILM_GRAIN_SEED_PERIOD);
+	return params;
+}
+
 ToneMapper::ToneMapper(bool p_use_mobile_version) {
 	using_mobile_version = p_use_mobile_version;
+	_create_noise_texture();
 	if (using_mobile_version) {
 		// Initialize tonemapper
 		Vector<String> tonemap_modes;
@@ -115,6 +237,9 @@ ToneMapper::ToneMapper(bool p_use_mobile_version) {
 }
 
 ToneMapper::~ToneMapper() {
+	if (noise_texture.is_valid()) {
+		RD::get_singleton()->free_rid(noise_texture);
+	}
 	if (using_mobile_version) {
 		tonemap_mobile.shader.version_free(tonemap_mobile.shader_version);
 	} else {
@@ -205,6 +330,11 @@ void ToneMapper::tonemapper(RID p_source_color, RID p_dst_framebuffer, const Ton
 
 	tonemap.push_constant.flags |= p_settings.convert_to_srgb ? TONEMAP_FLAG_CONVERT_TO_SRGB : 0;
 
+	const FilmGrainParams grain = _film_grain_params(p_settings, p_settings.dest_texture_size.y);
+	tonemap.push_constant.film_grain_amount = grain.amount;
+	tonemap.push_constant.film_grain_uv_scale = grain.uv_scale;
+	tonemap.push_constant.film_grain_seed = grain.seed;
+
 	if (p_settings.view_count > 1) {
 		// Use USE_MULTIVIEW versions
 		mode += 4;
@@ -213,8 +343,11 @@ void ToneMapper::tonemapper(RID p_source_color, RID p_dst_framebuffer, const Ton
 	RID default_sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
 	RID default_mipmap_sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
 	RID nearest_sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+	RID repeat_sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR, RSE::CANVAS_ITEM_TEXTURE_REPEAT_ENABLED);
 
 	RD::Uniform u_source_color(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ p_settings.bilinear_filtering ? default_sampler : nearest_sampler, p_source_color }));
+
+	RD::Uniform u_noise(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, Vector<RID>({ repeat_sampler, noise_texture }));
 
 	RD::Uniform u_exposure_texture;
 	u_exposure_texture.uniform_type = RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE;
@@ -248,7 +381,7 @@ void ToneMapper::tonemapper(RID p_source_color, RID p_dst_framebuffer, const Ton
 	RD::get_singleton()->draw_list_bind_uniform_set(draw_list, uniform_set_cache->get_cache(shader, 0, u_source_color), 0);
 	RD::get_singleton()->draw_list_bind_uniform_set(draw_list, uniform_set_cache->get_cache(shader, 1, u_exposure_texture), 1);
 	RD::get_singleton()->draw_list_bind_uniform_set(draw_list, uniform_set_cache->get_cache(shader, 2, u_glow_texture, u_glow_map), 2);
-	RD::get_singleton()->draw_list_bind_uniform_set(draw_list, uniform_set_cache->get_cache(shader, 3, u_color_correction_texture), 3);
+	RD::get_singleton()->draw_list_bind_uniform_set(draw_list, uniform_set_cache->get_cache(shader, 3, u_color_correction_texture, u_noise), 3);
 
 	RD::get_singleton()->draw_list_set_push_constant(draw_list, &tonemap.push_constant, sizeof(TonemapPushConstant));
 	RD::get_singleton()->draw_list_draw(draw_list, false, 1u, 3u);
@@ -285,6 +418,11 @@ void ToneMapper::tonemapper_mobile(RID p_source_color, RID p_dst_framebuffer, co
 	tonemap_mobile.push_constant.tonemapper_params[2] = p_settings.tonemapper_params[2];
 	tonemap_mobile.push_constant.tonemapper_params[3] = p_settings.tonemapper_params[3];
 
+	const FilmGrainParams grain = _film_grain_params(p_settings, p_settings.dest_texture_size.y);
+	tonemap_mobile.push_constant.film_grain_amount = grain.amount;
+	tonemap_mobile.push_constant.film_grain_uv_scale = grain.uv_scale;
+	tonemap_mobile.push_constant.film_grain_seed = grain.seed;
+
 	uint32_t spec_constant = 0;
 	spec_constant |= p_settings.use_bcs ? TONEMAP_MOBILE_FLAG_USE_BCS : 0;
 	spec_constant |= p_settings.use_glow ? TONEMAP_MOBILE_FLAG_USE_GLOW : 0;
@@ -315,6 +453,7 @@ void ToneMapper::tonemapper_mobile(RID p_source_color, RID p_dst_framebuffer, co
 	RID default_sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
 	RID default_mipmap_sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
 	RID nearest_sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+	RID repeat_sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR, RSE::CANVAS_ITEM_TEXTURE_REPEAT_ENABLED);
 
 	RD::Uniform u_source_color(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ p_settings.bilinear_filtering ? default_sampler : nearest_sampler, p_source_color }));
 
@@ -336,12 +475,14 @@ void ToneMapper::tonemapper_mobile(RID p_source_color, RID p_dst_framebuffer, co
 	u_color_correction_texture.append_id(default_sampler);
 	u_color_correction_texture.append_id(p_settings.color_correction_texture);
 
+	RD::Uniform u_noise(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 4, Vector<RID>({ repeat_sampler, noise_texture }));
+
 	RID shader = tonemap_mobile.shader.version_get_shader(tonemap_mobile.shader_version, mode);
 	ERR_FAIL_COND(shader.is_null());
 
 	RD::DrawListID draw_list = RD::get_singleton()->draw_list_begin(p_dst_framebuffer);
 	RD::get_singleton()->draw_list_bind_render_pipeline(draw_list, tonemap_mobile.pipelines[mode].get_render_pipeline(RD::INVALID_ID, RD::get_singleton()->framebuffer_get_format(p_dst_framebuffer), false, RD::get_singleton()->draw_list_get_current_pass(), spec_constant));
-	RD::get_singleton()->draw_list_bind_uniform_set(draw_list, uniform_set_cache->get_cache(shader, 0, u_source_color, u_glow_texture, u_glow_map, u_color_correction_texture), 0);
+	RD::get_singleton()->draw_list_bind_uniform_set(draw_list, uniform_set_cache->get_cache(shader, 0, u_source_color, u_glow_texture, u_glow_map, u_color_correction_texture, u_noise), 0);
 	RD::get_singleton()->draw_list_set_push_constant(draw_list, &tonemap_mobile.push_constant, sizeof(TonemapPushConstantMobile));
 	RD::get_singleton()->draw_list_draw(draw_list, false, 1u, 3u);
 	RD::get_singleton()->draw_list_end();
@@ -376,6 +517,12 @@ void ToneMapper::tonemapper_subpass(RD::DrawListID p_subpass_draw_list, RID p_so
 	tonemap_mobile.push_constant.tonemapper_params[2] = p_settings.tonemapper_params[2];
 	tonemap_mobile.push_constant.tonemapper_params[3] = p_settings.tonemapper_params[3];
 
+	// ⚠ Not dest_texture_size: the subpass path never sets it. texture_size is the target here.
+	const FilmGrainParams grain = _film_grain_params(p_settings, p_settings.texture_size.y);
+	tonemap_mobile.push_constant.film_grain_amount = grain.amount;
+	tonemap_mobile.push_constant.film_grain_uv_scale = grain.uv_scale;
+	tonemap_mobile.push_constant.film_grain_seed = grain.seed;
+
 	uint32_t spec_constant = TONEMAP_MOBILE_ADRENO_BUG;
 	spec_constant |= p_settings.use_bcs ? TONEMAP_MOBILE_FLAG_USE_BCS : 0;
 	//spec_constant |= p_settings.use_glow ? TONEMAP_MOBILE_FLAG_USE_GLOW : 0;
@@ -403,11 +550,14 @@ void ToneMapper::tonemapper_subpass(RD::DrawListID p_subpass_draw_list, RID p_so
 
 	RID default_sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
 	RID default_mipmap_sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+	RID repeat_sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR, RSE::CANVAS_ITEM_TEXTURE_REPEAT_ENABLED);
 
 	RD::Uniform u_source_color;
 	u_source_color.uniform_type = RD::UNIFORM_TYPE_INPUT_ATTACHMENT;
 	u_source_color.binding = 0;
 	u_source_color.append_id(p_source_color);
+
+	RD::Uniform u_noise(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 4, Vector<RID>({ repeat_sampler, noise_texture }));
 
 	RD::Uniform u_glow_texture;
 	u_glow_texture.uniform_type = RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE;
@@ -431,7 +581,7 @@ void ToneMapper::tonemapper_subpass(RD::DrawListID p_subpass_draw_list, RID p_so
 	ERR_FAIL_COND(shader.is_null());
 
 	RD::get_singleton()->draw_list_bind_render_pipeline(p_subpass_draw_list, tonemap_mobile.pipelines[mode].get_render_pipeline(RD::INVALID_ID, p_dst_format_id, false, RD::get_singleton()->draw_list_get_current_pass(), spec_constant));
-	RD::get_singleton()->draw_list_bind_uniform_set(p_subpass_draw_list, uniform_set_cache->get_cache(shader, 0, u_source_color, u_glow_texture, u_glow_map, u_color_correction_texture), 0);
+	RD::get_singleton()->draw_list_bind_uniform_set(p_subpass_draw_list, uniform_set_cache->get_cache(shader, 0, u_source_color, u_glow_texture, u_glow_map, u_color_correction_texture, u_noise), 0);
 	RD::get_singleton()->draw_list_set_push_constant(p_subpass_draw_list, &tonemap_mobile.push_constant, sizeof(TonemapPushConstantMobile));
 	RD::get_singleton()->draw_list_draw(p_subpass_draw_list, false, 1u, 3u);
 }

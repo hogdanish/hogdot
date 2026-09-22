@@ -724,6 +724,9 @@ public:
 
 	GlobalPipelineData global_pipeline_data_compiled = {};
 	GlobalPipelineData global_pipeline_data_required = {};
+	// `rendering/viewport/hdr_3d`, read once at init like hdr_2d: the colour buffer every
+	// precompiled pipeline must target when the render target itself is LDR.
+	bool hdr_3d_color_buffer = false;
 
 	typedef Pair<SceneShaderForwardMobile::ShaderData *, SceneShaderForwardMobile::ShaderData::PipelineKey> ShaderPipelinePair;
 

@@ -60,6 +60,9 @@ layout(set = 0, binding = 3) uniform sampler2D source_color_correction;
 layout(set = 0, binding = 3) uniform sampler3D source_color_correction;
 #endif
 
+// r: the film-grain tile (512², bilinear, repeat); gba: blue-noise dither tables (texelFetch).
+layout(set = 0, binding = 4) uniform sampler2D noise_tile;
+
 layout(constant_id = 0) const bool use_bcs = false;
 layout(constant_id = 1) const bool use_glow = false;
 layout(constant_id = 2) const bool use_glow_map = false;
@@ -94,7 +97,9 @@ layout(push_constant, std430) uniform Params {
 	vec4 tonemapper_params;
 
 	float output_max_value;
-	float pad[3];
+	float film_grain_amount;
+	float film_grain_uv_scale;
+	float film_grain_seed;
 }
 params;
 
@@ -707,20 +712,38 @@ vec3 do_fxaa(vec3 color, float exposure, vec2 uv_interp) {
 }
 #endif // !SUBPASS
 
-// From https://alex.vlachos.com/graphics/Alex_Vlachos_Advanced_VR_Rendering_GDC2015.pdf
-// and https://www.shadertoy.com/view/MslGR8 (5th one starting from the bottom)
+// A triangular blue-noise dither, per channel, in units of the target's quantization step.
 // NOTE: `frag_coord` is in pixels (i.e. not normalized UV).
 // This dithering must be applied after encoding changes (linear/nonlinear) have been applied
 // as the final step before quantization from floating point to integer values.
-vec3 screen_space_dither(vec2 frag_coord, float bit_alignment_diviser) {
-	// Iestyn's RGB dither (7 asm instructions) from Portal 2 X360, slightly modified for VR.
-	// Removed the time component to avoid passing time into this shader.
-	vec3 dither = vec3(dot(vec2(171.0, 231.0), frag_coord));
-	dither.rgb = fract(dither.rgb / vec3(103.0, 71.0, 97.0));
+//
+// Why not the uniform hash it replaced: a ±0.5-step uniform dither leaves noise modulation on
+// slow gradients (no noise where the value sits on a code, full noise half-way between), which
+// still reads as bands; a ±1-step triangular dither has constant variance and hides that (Gjøl,
+// "Banding in Games"). Blue noise has no energy below its principal frequency, so the same
+// amplitude reads as a smooth tone rather than grain. Within half a step of black and white the
+// triangle folds back to the uniform dither, because a clamped triangle would bias the mean.
+vec3 screen_space_dither(vec2 frag_coord, float bit_alignment_diviser, vec3 color) {
+	vec3 noise = texelFetch(noise_tile, ivec2(frag_coord) & ivec2(511), 0).gba; // three 64² tables, tiled
+	vec3 centered = noise * 2.0 - 1.0;
+	vec3 triangular = sign(centered) * (1.0 - sqrt(1.0 - abs(centered))); // ranks kept, so still blue
+	vec3 uniform_dither = noise - 0.5;
+	vec3 codes = color * bit_alignment_diviser;
+	vec3 fold = min(clamp(codes * 2.0, 0.0, 1.0), clamp((bit_alignment_diviser - codes) * 2.0, 0.0, 1.0));
+	return mix(uniform_dither, triangular, fold) / bit_alignment_diviser;
+}
 
-	// Subtract 0.5 to avoid slightly brightening the whole viewport.
-	// Use a dither strength of 100% rather than the 37.5% suggested by the original source.
-	return (dither.rgb - 0.5) / bit_alignment_diviser;
+// Film grain: one bilinear fetch of the blurred tile, at a scale referenced to a 1080-line
+// output so a grain covers the same share of the screen at any device pixel ratio, weighted by
+// the film bell w = sqrt(4y(1 - y)) on the encoded luma (zero at black and white, one at
+// mid-grey), monochrome, added in display space before the dither. The tile offset steps 24
+// times a second of wall time along the R2 sequence, so 60 Hz and 144 Hz look the same.
+vec3 film_grain(vec2 frag_coord, vec3 color) {
+	const vec2 r2 = vec2(0.7548776662, 0.5698402910);
+	vec2 grain_uv = frag_coord * params.film_grain_uv_scale + fract(params.film_grain_seed * r2);
+	float grain = textureLod(noise_tile, grain_uv, 0.0).r * 8.0 - 4.0; // unit rms
+	float luma = clamp(dot(color, vec3(0.2126, 0.7152, 0.0722)), 0.0, 1.0);
+	return color + grain * sqrt(4.0 * luma * (1.0 - luma)) * params.film_grain_amount;
 }
 
 void main() {
@@ -821,14 +844,21 @@ void main() {
 		color.rgb = linear_to_srgb(color.rgb); // Regular linear -> SRGB conversion.
 	}
 
+	// Grain belongs to the finished picture, so it goes on the display-encoded value, and before
+	// the dither: it is zero at black and white, exactly where the dither is still needed. The
+	// amount is 0 when grain is off or the target is HDR, and the branch is uniform.
+	if (params.film_grain_amount > 0.0) {
+		color.rgb = film_grain(gl_FragCoord.xy, color.rgb);
+	}
+
 	// Debanding should be done at the end of tonemapping, but before writing to the LDR buffer.
 	// Otherwise, we're adding noise to an already-quantized image.
 	if (deband_8_bit) {
 		// Divide by 255 to align to 8-bit quantization.
-		color.rgb += screen_space_dither(gl_FragCoord.xy, 255.0);
+		color.rgb += screen_space_dither(gl_FragCoord.xy, 255.0, color.rgb);
 	} else if (deband_10_bit) {
 		// Divide by 1023 to align to 10-bit quantization.
-		color.rgb += screen_space_dither(gl_FragCoord.xy, 1023.0);
+		color.rgb += screen_space_dither(gl_FragCoord.xy, 1023.0, color.rgb);
 	}
 
 	frag_color = color;

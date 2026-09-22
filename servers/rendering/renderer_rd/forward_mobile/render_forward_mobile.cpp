@@ -1211,6 +1211,9 @@ void RenderForwardMobile::_render_scene(RenderDataRD *p_render_data, const Color
 		base_specialization.scene_use_reflection_cubemap = use_reflection_cubemap;
 		base_specialization.scene_roughness_limiter_enabled = p_render_data->render_buffers.is_valid() && screen_space_roughness_limiter_is_active();
 		base_specialization.luminance_multiplier = p_render_data->render_buffers.is_valid() ? p_render_data->render_buffers->get_luminance_multiplier() : 1.0;
+		// The material dither is sized for the 10-bit UNORM buffer; in a float buffer (hdr_2d or
+		// hdr_3d) the same 1/1023 offset is only noise, so it follows the buffer format.
+		base_specialization.use_material_debanding = material_use_debanding_get() && p_render_data->render_buffers.is_valid() && p_render_data->render_buffers->get_base_data_format() == RD::DATA_FORMAT_A2B10G10R10_UNORM_PACK32;
 	}
 
 	{
@@ -3633,7 +3636,9 @@ void RenderForwardMobile::_mesh_compile_pipelines_for_surface(const SurfacePipel
 		for (uint32_t use_post_pass = post_pass_start; use_post_pass < post_pass_iterations; use_post_pass++) {
 			const uint32_t hdr_iterations = use_post_pass ? hdr_target_iterations : (hdr_start + 1);
 			for (uint32_t use_hdr = hdr_start; use_hdr < hdr_iterations; use_hdr++) {
-				const RD::DataFormat buffers_color_format = use_hdr ? RD::DATA_FORMAT_R16G16B16A16_SFLOAT : _render_buffers_get_preferred_color_format();
+				// The colour buffer follows the render target OR the project's hdr_3d key
+				// (RenderSceneBuffersRD::configure); `use_hdr` alone still decides the post-pass target.
+				const RD::DataFormat buffers_color_format = (use_hdr || hdr_3d_color_buffer) ? RD::DATA_FORMAT_R16G16B16A16_SFLOAT : _render_buffers_get_preferred_color_format();
 				pipeline_key.version = SceneShaderForwardMobile::SHADER_VERSION_COLOR_PASS;
 				pipeline_key.framebuffer_format_id = _get_color_framebuffer_format_for_pipeline(buffers_color_format, buffers_can_be_storage, RD::TextureSamples(p_global.texture_samples), RD::TextureSamples(p_global.target_samples), use_vrs, use_post_pass, use_hdr, 1);
 				_mesh_compile_pipeline_for_surface(p_surface.shader, p_surface.mesh_surface, p_surface.instanced, p_source, pipeline_key, r_pipeline_pairs);
@@ -3889,6 +3894,7 @@ RenderForwardMobile::RenderForwardMobile() {
 	const bool root_hdr_render_target = GLOBAL_GET("rendering/viewport/hdr_2d");
 	global_pipeline_data_required.use_hdr_render_target = root_hdr_render_target;
 	global_pipeline_data_required.use_ldr_render_target = !root_hdr_render_target;
+	hdr_3d_color_buffer = GLOBAL_GET("rendering/viewport/hdr_3d");
 }
 
 RenderForwardMobile::~RenderForwardMobile() {

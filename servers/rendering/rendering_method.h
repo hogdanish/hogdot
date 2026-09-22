@@ -314,6 +314,7 @@ public:
 	virtual void environment_set_sdfgi_frames_to_update_light(RSE::EnvironmentSDFGIFramesToUpdateLight p_update) = 0;
 
 	virtual void environment_set_adjustment(RID p_env, bool p_enable, float p_brightness, float p_contrast, float p_saturation, bool p_use_1d_color_correction, RID p_color_correction) = 0;
+	virtual void environment_set_film_grain(RID p_env, bool p_enable, float p_intensity, float p_size) = 0;
 
 	virtual bool environment_get_adjustments_enabled(RID p_env) const = 0;
 	virtual float environment_get_adjustments_brightness(RID p_env) const = 0;

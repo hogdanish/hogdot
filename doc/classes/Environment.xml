@@ -82,6 +82,15 @@
 		<member name="background_mode" type="int" setter="set_background" getter="get_background" enum="Environment.BGMode" default="0">
 			The background mode.
 		</member>
+		<member name="film_grain_enabled" type="bool" setter="set_film_grain_enabled" getter="is_film_grain_enabled" default="false">
+			If [code]true[/code], adds an animated film grain to the tonemapped image: a monochrome, band-limited noise that is strongest at mid-grey and vanishes at black and white, added in display-encoded space before the debanding dither. A new grain pattern is drawn 24 times a second of wall time, so the cadence is the same at every frame rate. The grain is not applied to an HDR output ([member Viewport.use_hdr_2d]), and never to 2D. Moving grain compresses poorly, so a project that expects to be streamed or recorded should let the player turn it off.
+		</member>
+		<member name="film_grain_intensity" type="float" setter="set_film_grain_intensity" getter="get_film_grain_intensity" default="1.0">
+			The grain's strength. At [code]1.0[/code] the grain measures 1.5 codes rms (of 255) at mid-grey; [code]0.0[/code] is no grain. Effective only if [member film_grain_enabled] is [code]true[/code].
+		</member>
+		<member name="film_grain_size" type="float" setter="set_film_grain_size" getter="get_film_grain_size" default="0.75">
+			The width of one grain texel in pixels of a 1080-line output; the size scales with the output height, so a grain covers the same share of the screen at every resolution. A blob of grain is about 3.6 texels wide. Effective only if [member film_grain_enabled] is [code]true[/code].
+		</member>
 		<member name="fog_aerial_perspective" type="float" setter="set_fog_aerial_perspective" getter="get_fog_aerial_perspective" default="0.0">
 			If set above [code]0.0[/code] (exclusive), blends between the fog's color and the color of the background [Sky], as read from the radiance cubemap. This has a small performance cost when set above [code]0.0[/code]. Must have [member background_mode] set to [constant BG_SKY].
 			This is useful to simulate [url=https://en.wikipedia.org/wiki/Aerial_perspective]aerial perspective[/url] in large scenes with low density fog. However, it is not very useful for high-density fog, as the sky will shine through. When set to [code]1.0[/code], the fog color comes completely from the [Sky]. If set to [code]0.0[/code], aerial perspective is disabled.

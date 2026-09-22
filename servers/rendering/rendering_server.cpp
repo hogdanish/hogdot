@@ -3077,6 +3077,7 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("environment_set_tonemap", "env", "tone_mapper", "exposure", "white"), &RenderingServer::environment_set_tonemap);
 	ClassDB::bind_method(D_METHOD("environment_set_tonemap_agx_contrast", "env", "agx_contrast"), &RenderingServer::environment_set_tonemap_agx_contrast);
 	ClassDB::bind_method(D_METHOD("environment_set_adjustment", "env", "enable", "brightness", "contrast", "saturation", "use_1d_color_correction", "color_correction"), &RenderingServer::environment_set_adjustment);
+	ClassDB::bind_method(D_METHOD("environment_set_film_grain", "env", "enable", "intensity", "size"), &RenderingServer::environment_set_film_grain);
 	ClassDB::bind_method(D_METHOD("environment_set_ssr", "env", "enable", "max_steps", "fade_in", "fade_out", "depth_tolerance"), &RenderingServer::environment_set_ssr);
 	ClassDB::bind_method(D_METHOD("environment_set_ssao", "env", "enable", "radius", "intensity", "power", "detail", "horizon", "sharpness", "light_affect", "ao_channel_affect"), &RenderingServer::environment_set_ssao);
 	ClassDB::bind_method(D_METHOD("environment_set_fog", "env", "enable", "light_color", "light_energy", "sun_scatter", "density", "height", "height_density", "aerial_perspective", "sky_affect", "fog_mode"), &RenderingServer::environment_set_fog, DEFVAL(RSE::ENV_FOG_MODE_EXPONENTIAL));
@@ -3756,6 +3757,9 @@ void RenderingServer::init() {
 
 	// Move the project setting definitions here so they are available when we init the rendering internals.
 	GLOBAL_DEF_BASIC("rendering/viewport/hdr_2d", false);
+	// The 3D half of what hdr_2d does on the Mobile renderer: a 16-bit float colour buffer in place
+	// of the 10-bit UNORM one, without the float 2D canvas or the linear canvas colour space.
+	GLOBAL_DEF_RST("rendering/viewport/hdr_3d", false);
 
 	GLOBAL_DEF_BASIC(PropertyInfo(Variant::INT, "rendering/anti_aliasing/quality/msaa_2d", PROPERTY_HINT_ENUM, String::utf8("Disabled (Fastest),2× (Average),4× (Slow),8× (Slowest)")), 0);
 	GLOBAL_DEF_BASIC(PropertyInfo(Variant::INT, "rendering/anti_aliasing/quality/msaa_3d", PROPERTY_HINT_ENUM, String::utf8("Disabled (Fastest),2× (Average),4× (Slow),8× (Slowest)")), 0);

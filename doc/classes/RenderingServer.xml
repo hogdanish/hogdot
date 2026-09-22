@@ -1353,6 +1353,16 @@
 				Sets the maximum layer to use if using Canvas background mode.
 			</description>
 		</method>
+		<method name="environment_set_film_grain">
+			<return type="void" />
+			<param index="0" name="env" type="RID" />
+			<param index="1" name="enable" type="bool" />
+			<param index="2" name="intensity" type="float" />
+			<param index="3" name="size" type="float" />
+			<description>
+				Sets the values to be used with the film grain post-process effect. See [Environment] for more details.
+			</description>
+		</method>
 		<method name="environment_set_fog">
 			<return type="void" />
 			<param index="0" name="env" type="RID" />

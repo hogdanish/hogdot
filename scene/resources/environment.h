@@ -224,6 +224,12 @@ private:
 	Ref<Texture> adjustment_color_correction;
 	void _update_adjustment();
 
+	// Film grain
+	bool film_grain_enabled = false;
+	float film_grain_intensity = 1.0;
+	float film_grain_size = 0.75;
+	void _update_film_grain();
+
 protected:
 	static void _bind_methods();
 	void _validate_property(PropertyInfo &p_property) const;
@@ -448,6 +454,14 @@ public:
 	float get_adjustment_saturation() const;
 	void set_adjustment_color_correction(Ref<Texture> p_color_correction);
 	Ref<Texture> get_adjustment_color_correction() const;
+
+	// Film grain
+	void set_film_grain_enabled(bool p_enabled);
+	bool is_film_grain_enabled() const;
+	void set_film_grain_intensity(float p_intensity);
+	float get_film_grain_intensity() const;
+	void set_film_grain_size(float p_size);
+	float get_film_grain_size() const;
 
 	Environment();
 	~Environment();

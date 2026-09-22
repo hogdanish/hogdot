@@ -179,6 +179,11 @@ private:
 		float adjustments_saturation = 1.0f;
 		bool use_1d_color_correction = false;
 		RID color_correction;
+
+		// Film grain
+		bool film_grain_enabled = false;
+		float film_grain_intensity = 1.0f;
+		float film_grain_size = 0.75f;
 	};
 
 	mutable RID_Owner<Environment, true> environment_owner;
@@ -332,4 +337,10 @@ public:
 	float environment_get_adjustments_saturation(RID p_env) const;
 	bool environment_get_use_1d_color_correction(RID p_env) const;
 	RID environment_get_color_correction(RID p_env) const;
+
+	// Film grain
+	void environment_set_film_grain(RID p_env, bool p_enable, float p_intensity, float p_size);
+	bool environment_get_film_grain_enabled(RID p_env) const;
+	float environment_get_film_grain_intensity(RID p_env) const;
+	float environment_get_film_grain_size(RID p_env) const;
 };

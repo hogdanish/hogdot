@@ -945,3 +945,31 @@ RID RendererEnvironmentStorage::environment_get_color_correction(RID p_env) cons
 	ERR_FAIL_NULL_V(env, RID());
 	return env->color_correction;
 }
+
+// Film grain
+
+void RendererEnvironmentStorage::environment_set_film_grain(RID p_env, bool p_enable, float p_intensity, float p_size) {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL(env);
+	env->film_grain_enabled = p_enable;
+	env->film_grain_intensity = MAX(0.0f, p_intensity);
+	env->film_grain_size = MAX(0.01f, p_size);
+}
+
+bool RendererEnvironmentStorage::environment_get_film_grain_enabled(RID p_env) const {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL_V(env, false);
+	return env->film_grain_enabled;
+}
+
+float RendererEnvironmentStorage::environment_get_film_grain_intensity(RID p_env) const {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL_V(env, 1.0);
+	return env->film_grain_intensity;
+}
+
+float RendererEnvironmentStorage::environment_get_film_grain_size(RID p_env) const {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL_V(env, 0.75);
+	return env->film_grain_size;
+}

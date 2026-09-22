@@ -3529,6 +3529,11 @@
 			Practically speaking, this means that the end result of the Viewport will not be clamped to the [code]0-1[/code] range and can be used in 3D rendering without color encoding adjustments. This allows 2D rendering to take advantage of effects requiring high dynamic range (e.g. 2D glow) as well as substantially improves the appearance of effects requiring highly detailed gradients.
 			[b]Note:[/b] This property is only read when the project starts. To toggle HDR 2D at runtime, set [member Viewport.use_hdr_2d] on the root [Viewport].
 		</member>
+		<member name="rendering/viewport/hdr_3d" type="bool" setter="" getter="" default="false">
+			If [code]true[/code], the Mobile rendering method renders 3D into a 16-bit float ([code]RGBA16F[/code]) color buffer even when the viewport's render target is not HDR. The default 10-bit buffer stores linear light divided by two, which is coarser than an 8-bit display near black: dark gradients, ambient occlusion, fog and faint transparent surfaces band there, and no dither at the tonemap can put back a level the buffer never held. The float buffer removes that at the cost of twice the color-buffer bandwidth. The viewport still tonemaps to its usual 8-bit sRGB target, so the display and the 2D canvas are unchanged.
+			This is the 3D half of what [member rendering/viewport/hdr_2d] does on the Mobile rendering method, without the float 2D canvas and its linear color space. It has no effect on Forward+, which always renders 3D in 16-bit float.
+			[b]Note:[/b] The Mobile material debanding ([method RenderingServer.material_set_use_debanding]) and the glow debanding are applied only to the 10-bit buffer, so enabling this leaves the [member Viewport.use_debanding] dither at the tonemap as the only one.
+		</member>
 		<member name="rendering/viewport/transparent_background" type="bool" setter="" getter="" default="false">
 			If [code]true[/code], enables [member Viewport.transparent_bg] on the root viewport. This allows per-pixel transparency to be effective after also enabling [member display/window/size/transparent] and [member display/window/per_pixel_transparency/allowed].
 		</member>

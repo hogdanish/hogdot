@@ -1102,6 +1102,43 @@ void Environment::_update_adjustment() {
 			color_correction);
 }
 
+// Film grain
+
+void Environment::set_film_grain_enabled(bool p_enabled) {
+	film_grain_enabled = p_enabled;
+	_update_film_grain();
+}
+
+bool Environment::is_film_grain_enabled() const {
+	return film_grain_enabled;
+}
+
+void Environment::set_film_grain_intensity(float p_intensity) {
+	film_grain_intensity = p_intensity;
+	_update_film_grain();
+}
+
+float Environment::get_film_grain_intensity() const {
+	return film_grain_intensity;
+}
+
+void Environment::set_film_grain_size(float p_size) {
+	film_grain_size = p_size;
+	_update_film_grain();
+}
+
+float Environment::get_film_grain_size() const {
+	return film_grain_size;
+}
+
+void Environment::_update_film_grain() {
+	RS::get_singleton()->environment_set_film_grain(
+			environment,
+			film_grain_enabled,
+			film_grain_intensity,
+			film_grain_size);
+}
+
 // Private methods, constructor and destructor
 
 void Environment::_validate_property(PropertyInfo &p_property) const {
@@ -1594,6 +1631,20 @@ void Environment::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "adjustment_contrast", PROPERTY_HINT_RANGE, "0.75,1.25,0.005,or_less,or_greater"), "set_adjustment_contrast", "get_adjustment_contrast");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "adjustment_saturation", PROPERTY_HINT_RANGE, "0.0,2.0,0.01,or_less,or_greater"), "set_adjustment_saturation", "get_adjustment_saturation");
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "adjustment_color_correction", PROPERTY_HINT_RESOURCE_TYPE, "Texture2D,Texture3D"), "set_adjustment_color_correction", "get_adjustment_color_correction");
+
+	// Film grain
+
+	ClassDB::bind_method(D_METHOD("set_film_grain_enabled", "enabled"), &Environment::set_film_grain_enabled);
+	ClassDB::bind_method(D_METHOD("is_film_grain_enabled"), &Environment::is_film_grain_enabled);
+	ClassDB::bind_method(D_METHOD("set_film_grain_intensity", "intensity"), &Environment::set_film_grain_intensity);
+	ClassDB::bind_method(D_METHOD("get_film_grain_intensity"), &Environment::get_film_grain_intensity);
+	ClassDB::bind_method(D_METHOD("set_film_grain_size", "size"), &Environment::set_film_grain_size);
+	ClassDB::bind_method(D_METHOD("get_film_grain_size"), &Environment::get_film_grain_size);
+
+	ADD_GROUP("Film Grain", "film_grain_");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "film_grain_enabled", PROPERTY_HINT_GROUP_ENABLE), "set_film_grain_enabled", "is_film_grain_enabled");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "film_grain_intensity", PROPERTY_HINT_RANGE, "0.0,2.0,0.01,or_greater"), "set_film_grain_intensity", "get_film_grain_intensity");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "film_grain_size", PROPERTY_HINT_RANGE, "0.5,1.5,0.01,or_greater"), "set_film_grain_size", "get_film_grain_size");
 
 	// Constants
 

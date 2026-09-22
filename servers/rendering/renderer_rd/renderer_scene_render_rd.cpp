@@ -609,7 +609,9 @@ void RendererSceneRenderRD::_render_buffers_post_process_and_tonemap(const Rende
 
 		int mipmaps = int(rb->get_texture_format(RB_SCOPE_BUFFERS, RB_TEX_BLUR_1).mipmaps);
 		Vector<float> glow_levels = environment_get_glow_levels(p_render_data->environment);
-		bool use_debanding = rb->get_use_debanding() && !texture_storage->render_target_is_using_hdr(render_target);
+		// The upsample dither is a 10-bit offset for the blur chain, which shares the colour
+		// buffer's format: a float chain (Forward+, hdr_2d or hdr_3d) has nothing to dither.
+		bool use_debanding = rb->get_use_debanding() && rb->get_base_data_format() == RD::DATA_FORMAT_A2B10G10R10_UNORM_PACK32;
 
 		int max_glow_index = -1;
 		int min_glow_level = RSE::MAX_GLOW_LEVELS;
@@ -786,6 +788,10 @@ void RendererSceneRenderRD::_render_buffers_post_process_and_tonemap(const Rende
 				tonemap.use_1d_color_correction = environment_get_use_1d_color_correction(p_render_data->environment);
 				tonemap.color_correction_texture = texture_storage->texture_get_rd_texture(environment_get_color_correction(p_render_data->environment), !tonemap.convert_to_srgb);
 			}
+			// Grain is authored in display-encoded values, which an HDR target does not hold yet.
+			tonemap.use_film_grain = environment_get_film_grain_enabled(p_render_data->environment) && tonemap.convert_to_srgb;
+			tonemap.film_grain_intensity = environment_get_film_grain_intensity(p_render_data->environment);
+			tonemap.film_grain_size = environment_get_film_grain_size(p_render_data->environment);
 		}
 
 		tonemap.luminance_multiplier = rb->get_luminance_multiplier();
@@ -995,6 +1001,9 @@ void RendererSceneRenderRD::_post_process_subpass(RID p_source_texture, RID p_fr
 			tonemap.use_1d_color_correction = environment_get_use_1d_color_correction(p_render_data->environment);
 			tonemap.color_correction_texture = texture_storage->texture_get_rd_texture(environment_get_color_correction(p_render_data->environment), !tonemap.convert_to_srgb);
 		}
+		tonemap.use_film_grain = environment_get_film_grain_enabled(p_render_data->environment) && tonemap.convert_to_srgb;
+		tonemap.film_grain_intensity = environment_get_film_grain_intensity(p_render_data->environment);
+		tonemap.film_grain_size = environment_get_film_grain_size(p_render_data->environment);
 	}
 
 	tonemap.texture_size = Vector2i(target_size.x, target_size.y);

@@ -55,6 +55,9 @@ layout(set = 3, binding = 0) uniform sampler2D source_color_correction;
 layout(set = 3, binding = 0) uniform sampler3D source_color_correction;
 #endif
 
+// r: the film-grain tile (512², bilinear, repeat); gba: blue-noise dither tables (texelFetch).
+layout(set = 3, binding = 1) uniform sampler2D noise_tile;
+
 #define FLAG_USE_BCS (1 << 0)
 #define FLAG_USE_GLOW (1 << 1)
 #define FLAG_USE_AUTO_EXPOSURE (1 << 2)
@@ -84,6 +87,11 @@ layout(push_constant, std430) uniform Params {
 	float luminance_multiplier;
 
 	vec4 tonemapper_params;
+
+	float film_grain_amount;
+	float film_grain_uv_scale;
+	float film_grain_seed;
+	float pad;
 }
 params;
 
@@ -835,20 +843,28 @@ vec3 do_fxaa(vec3 color, float exposure, vec2 uv_interp) {
 #endif
 }
 
-// From https://alex.vlachos.com/graphics/Alex_Vlachos_Advanced_VR_Rendering_GDC2015.pdf
-// and https://www.shadertoy.com/view/MslGR8 (5th one starting from the bottom)
+// A triangular blue-noise dither, per channel, in units of the target's quantization step;
+// the same function as tonemap_mobile.glsl, which carries the reasoning.
 // NOTE: `frag_coord` is in pixels (i.e. not normalized UV).
 // This dithering must be applied after encoding changes (linear/nonlinear) have been applied
 // as the final step before quantization from floating point to integer values.
-vec3 screen_space_dither(vec2 frag_coord, float bit_alignment_diviser) {
-	// Iestyn's RGB dither (7 asm instructions) from Portal 2 X360, slightly modified for VR.
-	// Removed the time component to avoid passing time into this shader.
-	vec3 dither = vec3(dot(vec2(171.0, 231.0), frag_coord));
-	dither.rgb = fract(dither.rgb / vec3(103.0, 71.0, 97.0));
+vec3 screen_space_dither(vec2 frag_coord, float bit_alignment_diviser, vec3 color) {
+	vec3 noise = texelFetch(noise_tile, ivec2(frag_coord) & ivec2(511), 0).gba;
+	vec3 centered = noise * 2.0 - 1.0;
+	vec3 triangular = sign(centered) * (1.0 - sqrt(1.0 - abs(centered)));
+	vec3 uniform_dither = noise - 0.5;
+	vec3 codes = color * bit_alignment_diviser;
+	vec3 fold = min(clamp(codes * 2.0, 0.0, 1.0), clamp((bit_alignment_diviser - codes) * 2.0, 0.0, 1.0));
+	return mix(uniform_dither, triangular, fold) / bit_alignment_diviser;
+}
 
-	// Subtract 0.5 to avoid slightly brightening the whole viewport.
-	// Use a dither strength of 100% rather than the 37.5% suggested by the original source.
-	return (dither.rgb - 0.5) / bit_alignment_diviser;
+// Film grain in display space, before the dither; the same function as tonemap_mobile.glsl.
+vec3 film_grain(vec2 frag_coord, vec3 color) {
+	const vec2 r2 = vec2(0.7548776662, 0.5698402910);
+	vec2 grain_uv = frag_coord * params.film_grain_uv_scale + fract(params.film_grain_seed * r2);
+	float grain = textureLod(noise_tile, grain_uv, 0.0).r * 8.0 - 4.0; // unit rms
+	float luma = clamp(dot(color, vec3(0.2126, 0.7152, 0.0722)), 0.0, 1.0);
+	return color + grain * sqrt(4.0 * luma * (1.0 - luma)) * params.film_grain_amount;
 }
 
 void main() {
@@ -943,12 +959,16 @@ void main() {
 		color.rgb = linear_to_srgb(color.rgb);
 	}
 
+	if (params.film_grain_amount > 0.0) {
+		color.rgb = film_grain(gl_FragCoord.xy, color.rgb);
+	}
+
 	// Debanding should be done at the end of tonemapping, but before writing to the LDR buffer.
 	// Otherwise, we're adding noise to an already-quantized image.
 
 	if (bool(params.flags & FLAG_USE_8_BIT_DEBANDING)) {
 		// Divide by 255 to align to 8-bit quantization.
-		color.rgb += screen_space_dither(gl_FragCoord.xy, 255.0);
+		color.rgb += screen_space_dither(gl_FragCoord.xy, 255.0, color.rgb);
 	}
 
 	frag_color = color;
