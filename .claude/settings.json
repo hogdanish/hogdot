@@ -1,9 +1,5 @@
 {
   "plansDirectory": ".claude/work/plans",
-  "enabledPlugins": {
-    "clangd-lsp@claude-plugins-official": true,
-    "rust-analyzer-lsp@claude-plugins-official": true
-  },
   "permissions": {
     "additionalDirectories": ["/Users/ethan/Projects/commongrounds"],
     "allow": [
