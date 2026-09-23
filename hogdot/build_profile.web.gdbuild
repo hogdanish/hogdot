@@ -195,7 +195,6 @@
 		"TextMesh",
 		"Texture2DRD",
 		"Texture3D",
-		"TextureLayered",
 		"TileMap",
 		"TileMapPattern",
 		"TouchScreenButton",
