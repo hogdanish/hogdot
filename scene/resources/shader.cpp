@@ -102,15 +102,23 @@ void Shader::set_code(const String &p_code) {
 		// 2) Server does not do interaction with Resource filetypes, this is a scene level feature.
 		HashSet<Ref<ShaderInclude>> new_include_dependencies;
 		ShaderPreprocessor preprocessor;
-		Error result = preprocessor.preprocess(p_code, path, preprocessed_code, nullptr, nullptr, nullptr, &new_include_dependencies);
+		String error_text;
+		List<ShaderPreprocessor::FilePosition> error_positions;
+		Error result = preprocessor.preprocess(p_code, path, preprocessed_code, &error_text, &error_positions, nullptr, &new_include_dependencies);
 		if (result == OK) {
 			// This ensures previous include resources are not freed and then re-loaded during parse (which would make compiling slower)
 			include_dependencies = new_include_dependencies;
+		} else {
+			// Report the preprocessor error. Do not compile the raw code: its first `#` only gives "Unknown character #35".
+			const ShaderPreprocessor::FilePosition position = error_positions.is_empty() ? ShaderPreprocessor::FilePosition() : error_positions.back()->get();
+			const String file = position.file.is_empty() ? path : position.file;
+			_err_print_error(nullptr, file.utf8().get_data(), position.line, error_text.utf8().get_data(), false, ERR_HANDLER_SHADER);
+			preprocessed_code = String();
 		}
 	}
 
 	// Try to get the shader type from the final, fully preprocessed shader code.
-	String type = ShaderLanguage::get_shader_type(preprocessed_code);
+	String type = ShaderLanguage::get_shader_type(preprocessed_code.is_empty() ? p_code : preprocessed_code);
 
 	if (type == "canvas_item") {
 		mode = MODE_CANVAS_ITEM;
