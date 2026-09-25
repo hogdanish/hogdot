@@ -74,17 +74,19 @@ const GodotFetch = {
 		},
 
 		onerror: function (id, err) {
-			GodotRuntime.error(err);
 			const obj = IDHandler.get(id);
 			if (!obj) {
+				// A freed fetch rejects with its abort; nobody waits for it.
 				return;
 			}
+			GodotRuntime.error(err);
 			obj.error = err;
 		},
 
 		create: function (method, url, headers, body) {
 			const obj = {
 				request: null,
+				controller: new AbortController(),
 				response: null,
 				reader: null,
 				error: null,
@@ -100,6 +102,7 @@ const GodotFetch = {
 				method: method,
 				headers: headers,
 				body: body,
+				signal: obj.controller.signal,
 			};
 			obj.request = fetch(url, init);
 			obj.request.then(GodotFetch.onresponse.bind(null, id)).catch(GodotFetch.onerror.bind(null, id));
@@ -112,13 +115,8 @@ const GodotFetch = {
 				return;
 			}
 			IDHandler.remove(id);
-			if (!obj.request) {
-				return;
-			}
-			// Try to abort
-			obj.request.then(function (response) {
-				response.abort();
-			}).catch(function (e) { /* nothing to do */ });
+			// Stop the transfer: this rejects a pending request and errors the body stream.
+			obj.controller.abort();
 		},
 
 		read: function (id) {
