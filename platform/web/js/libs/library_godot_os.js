@@ -319,7 +319,9 @@ const GodotFS = {
 				}
 				FS.mkdirTree(dir);
 			}
-			FS.writeFile(path, new Uint8Array(buffer));
+			// The file takes the bytes without a copy: an `ArrayBuffer` is wrapped, a view is copied by `Uint8Array`.
+			// Callers must not change an `ArrayBuffer` after this call.
+			FS.writeFile(path, new Uint8Array(buffer), { canOwn: true });
 		},
 	},
 };

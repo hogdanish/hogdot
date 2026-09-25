@@ -39,9 +39,14 @@ const GodotFetch = {
 			}
 			if (result.value) {
 				obj.chunks.push(result.value);
+				obj.queued += result.value.length;
 			}
 			obj.reading = false;
 			obj.done = result.done;
+			if (!result.done) {
+				// Read again at once, so the body arrives at network speed, not one chunk per frame.
+				GodotFetch.read(id);
+			}
 		},
 
 		onresponse: function (id, response) {
@@ -87,6 +92,8 @@ const GodotFetch = {
 				reading: false,
 				status: 0,
 				chunks: [],
+				queued: 0, // Bytes in `chunks`.
+				high_water: 0, // Stop reading ahead at this many queued bytes.
 			};
 			const id = IDHandler.add(obj);
 			const init = {
@@ -121,7 +128,14 @@ const GodotFetch = {
 			}
 			if (obj.reader && !obj.reading) {
 				if (obj.done) {
-					obj.reader = null;
+					// The stream is over only once the queue is empty.
+					if (!obj.chunks.length) {
+						obj.reader = null;
+					}
+					return;
+				}
+				if (obj.queued >= obj.high_water) {
+					// Keep memory bounded: the next `godot_js_fetch_read_chunk` resumes reading.
 					return;
 				}
 				obj.reading = true;
@@ -215,23 +229,25 @@ const GodotFetch = {
 		if (!obj || !obj.response) {
 			return 0;
 		}
+		// Read ahead up to one caller buffer.
+		obj.high_water = p_buf_size;
 		let to_read = p_buf_size;
 		const chunks = obj.chunks;
 		while (to_read && chunks.length) {
-			const chunk = obj.chunks[0];
+			const chunk = chunks[0];
+			const dst = p_buf + p_buf_size - to_read;
 			if (chunk.length > to_read) {
-				GodotRuntime.heapCopy(HEAP8, chunk.slice(0, to_read), p_buf);
-				chunks[0] = chunk.slice(to_read);
+				GodotRuntime.heapCopy(HEAP8, chunk.subarray(0, to_read), dst);
+				chunks[0] = chunk.subarray(to_read);
 				to_read = 0;
 			} else {
-				GodotRuntime.heapCopy(HEAP8, chunk, p_buf);
+				GodotRuntime.heapCopy(HEAP8, chunk, dst);
 				to_read -= chunk.length;
-				chunks.pop();
+				chunks.shift();
 			}
 		}
-		if (!chunks.length) {
-			GodotFetch.read(p_id);
-		}
+		obj.queued -= p_buf_size - to_read;
+		GodotFetch.read(p_id);
 		return p_buf_size - to_read;
 	},
 

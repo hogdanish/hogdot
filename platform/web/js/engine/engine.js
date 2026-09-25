@@ -121,7 +121,8 @@ const Engine = (function () {
 			 *
 			 * If a ``string`` the file will be loaded from that path.
 			 *
-			 * If an ``ArrayBuffer`` or a view on one, the buffer will used as the content of the file.
+			 * If an ``ArrayBuffer`` or a view on one, the buffer will used as the content of the file. The file system keeps an
+			 * ``ArrayBuffer`` without a copy, so do not change it after this call.
 			 *
 			 * @param {string=} path Path by which the file will be accessible. Required, if ``file`` is not a string.
 			 *
@@ -228,7 +229,8 @@ const Engine = (function () {
 			 * Create a file at the specified ``path`` with the passed as ``buffer`` in the instance's file system.
 			 *
 			 * @param {string} path The location where the file will be created.
-			 * @param {ArrayBuffer} buffer The content of the file.
+			 * @param {ArrayBuffer} buffer The content of the file. The file system keeps it without a copy, so do not change it
+			 * after this call.
 			 */
 			copyToFS: function (path, buffer) {
 				if (this.rtenv == null) {
