@@ -319,9 +319,19 @@ const GodotFS = {
 				}
 				FS.mkdirTree(dir);
 			}
-			// The file takes the bytes without a copy: an `ArrayBuffer` is wrapped, a view is copied by `Uint8Array`.
-			// Callers must not change an `ArrayBuffer` after this call.
-			FS.writeFile(path, new Uint8Array(buffer), { canOwn: true });
+			// The file takes a whole `ArrayBuffer` without a copy, so callers must not change it after this call.
+			// MEMFS copies the bytes of any other view, which may share its buffer with other data.
+			let data;
+			let canOwn = false;
+			if (buffer instanceof ArrayBuffer) {
+				data = new Uint8Array(buffer);
+				canOwn = true;
+			} else if (ArrayBuffer.isView(buffer)) {
+				data = new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+			} else {
+				data = new Uint8Array(buffer);
+			}
+			FS.writeFile(path, data, { canOwn: canOwn });
 		},
 	},
 };
