@@ -597,6 +597,8 @@ bool ProjectSettings::_load_resource_pack(const String &p_pack, bool p_replace_f
 		// the game is running without a main pack, like in the editor or on Android.
 		PackedData::get_singleton()->add_pack_source(memnew(PackedSourceDirectory));
 		PackedData::get_singleton()->add_pack("res://", false, 0);
+		// Keep `res://` writable: a mounted pack only adds files.
+		PackedData::get_singleton()->set_resource_dir_access(DirAccess::create(DirAccess::ACCESS_RESOURCES));
 		DirAccess::make_default<DirAccessPack>(DirAccess::ACCESS_RESOURCES);
 		using_datapack = true;
 	}

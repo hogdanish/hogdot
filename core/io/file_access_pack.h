@@ -117,6 +117,9 @@ private:
 	static inline PackedData *singleton = nullptr;
 	bool disabled = false;
 
+	// Without a main pack, `res://` is a directory on disk, and `DirAccessPack` sends its changes here.
+	Ref<DirAccess> resource_dir_access;
+
 	void _free_packed_dirs(PackedDir *p_dir);
 	void _get_file_paths(PackedDir *p_dir, const String &p_parent_dir, HashSet<String> &r_paths) const;
 
@@ -139,6 +142,8 @@ public:
 	HashSet<String> get_file_paths() const;
 
 	void set_disabled(bool p_disabled) { disabled = p_disabled; }
+	void set_resource_dir_access(const Ref<DirAccess> &p_access) { resource_dir_access = p_access; }
+	Ref<DirAccess> get_resource_dir_access() const { return resource_dir_access; }
 	_FORCE_INLINE_ bool is_disabled() const { return disabled; }
 
 	static PackedData *get_singleton() { return singleton; }
@@ -273,6 +278,7 @@ class DirAccessPack : public DirAccess {
 	bool cdir = false;
 
 	PackedData::PackedDir *_find_dir(const String &p_dir);
+	String _get_resource_path(const String &p_path) const;
 
 public:
 	virtual Error list_dir_begin() override;

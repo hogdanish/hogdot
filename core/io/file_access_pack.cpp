@@ -725,20 +725,44 @@ bool DirAccessPack::dir_exists(String p_dir) {
 	return _find_dir(p_dir) != nullptr;
 }
 
+String DirAccessPack::_get_resource_path(const String &p_path) const {
+	const String path = p_path.replace_char('\\', '/');
+	if (path.contains("://")) {
+		return path;
+	}
+	if (path.begins_with("/")) {
+		return "res:/" + path;
+	}
+	return get_current_dir().path_join(path);
+}
+
 Error DirAccessPack::make_dir(String p_dir) {
-	return ERR_UNAVAILABLE;
+	Ref<DirAccess> da = PackedData::get_singleton()->get_resource_dir_access();
+	if (da.is_null()) {
+		return ERR_UNAVAILABLE;
+	}
+	return da->make_dir(_get_resource_path(p_dir));
 }
 
 Error DirAccessPack::rename(String p_from, String p_to) {
-	return ERR_UNAVAILABLE;
+	Ref<DirAccess> da = PackedData::get_singleton()->get_resource_dir_access();
+	if (da.is_null()) {
+		return ERR_UNAVAILABLE;
+	}
+	return da->rename(_get_resource_path(p_from), _get_resource_path(p_to));
 }
 
 Error DirAccessPack::remove(String p_name) {
-	return ERR_UNAVAILABLE;
+	Ref<DirAccess> da = PackedData::get_singleton()->get_resource_dir_access();
+	if (da.is_null()) {
+		return ERR_UNAVAILABLE;
+	}
+	return da->remove(_get_resource_path(p_name));
 }
 
 uint64_t DirAccessPack::get_space_left() {
-	return 0;
+	Ref<DirAccess> da = PackedData::get_singleton()->get_resource_dir_access();
+	return da.is_valid() ? da->get_space_left() : 0;
 }
 
 String DirAccessPack::get_filesystem_type() const {
