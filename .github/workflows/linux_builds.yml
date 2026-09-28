@@ -87,7 +87,7 @@ jobs:
 
       - name: Setup older .NET SDK as baseline
         if: matrix.build-mono
-        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           # Targeting the oldest version we want to support to ensure it still builds.
           dotnet-version: 8.0.100
@@ -105,7 +105,7 @@ jobs:
 
       - name: Install mold linker
         if: matrix.proj-test
-        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
+        uses: rui314/setup-mold@10ca16bf91dc22e05ebdc935cad9c75ea248f621 # v1
 
       - name: Compilation
         uses: ./.github/actions/godot-build
